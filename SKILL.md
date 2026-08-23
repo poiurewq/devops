@@ -1,6 +1,6 @@
 ---
 name: dev
-description: Multi-contributor task board and dev workflow for a repo, or per-subdir boards in a monorepo. Use for /dev and subcommands (init, add, plan, board, kanban, status, pick, implement, review, auto, absorb, change, delete, show, config, area, meta, iteration, update), and whenever the user asks to add/see/assign/implement/review tasks on the repo's task board, or asks "what should I work on".
+description: Multi-contributor task board and dev workflow for a repo, or per-subdir boards in a monorepo. Use for /dev and subcommands (init, add, plan, board, kanban, status, pick, implement, review, audit, auto, absorb, change, delete, show, config, area, meta, iteration, update), and whenever the user asks to add/see/assign/implement/review tasks on the repo's task board, or asks "what should I work on".
 ---
 
 # dev — coordinated development for humans and agents
@@ -35,17 +35,20 @@ TASKS config [<key> [<value>]]          # integrator, parent_branch, iteration,
 TASKS area list | set <name> [--desc "<one-line scope>"] | rm <name> [--force]
 TASKS add --title "<title>" [--area <m>] [--deps <id,id>]
           [--desc "<1–3 sentences>"] [--assignee <who>]
-          [--kind umbrella] [--status proposed|backlog|planned|later]
-TASKS update <id> [--title] [--area] [--status] [--kind umbrella|""]
+          [--kind umbrella|recurring] [--cadence <N><unit>]
+          [--status proposed|backlog|planned|later]
+TASKS update <id> [--title] [--area] [--status] [--kind umbrella|recurring|""]
           [--assignee <who>|""] [--branch <b>|""] [--pr]
           [--needs decision|""] [--deps] [--append "<paragraph>"]
-          [--desc "<new body>"]
+          [--desc "<new body>"] [--cadence <N><unit>] [--last-run <date>|""]
           [--status later] [--status not-planned --reason "<why>"]
+TASKS verify <id> "<how the children met the goal>"   # close an umbrella
 TASKS delete <id>
 TASKS show <id>
 TASKS collisions <id[,id…]>             # 2 doing-blocked, 3 review-only
 TASKS related "<text>"                  # run before every add
 TASKS list [--assignee <who>] [--status <s>] [--needs decision] [--json]
+TASKS recur list [--due] | recur ran <id> [--date YYYY-MM-DD]
 TASKS board [--expand] [--by-area] [--watch]
 TASKS iteration
 TASKS iteration-close [--force]
@@ -154,10 +157,14 @@ away, or paper over it with manual git/gh.
   lines under `## <n>` (or `## <n> — <name>`). Ship titles PRs
   `[n/T<id>] …`. Missing `schema_version` means 0; see product
   `AGENTS.md` for compatibility rules when changing board schema.
-  Task frontmatter may carry `kind` (`umbrella` = goal parent; absent/empty
-  = normal). An umbrella's `deps` are its **direct children** (leaves or
-  nested umbrellas) — hierarchy is the dep graph among `kind: umbrella`
-  nodes, with no separate parent field.
+  Task frontmatter may carry `kind` (`umbrella` = goal parent;
+  `recurring` = perpetual work on a cadence, see Recurring below;
+  absent/empty = normal). An umbrella's `deps` are its **direct children**
+  (leaves or nested umbrellas) — hierarchy is the dep graph among
+  `kind: umbrella` nodes, with no separate parent field. Closing one is a
+  verification pass, never automatic (see Umbrella close below).
+  A recurring task also carries `cadence` and `last_run`, both omitted
+  when empty.
   `TASKS board` is an index (one line per status of task ids) then
   in-play tasks one per line, umbrella children indented under their
   parent (which also carries a leaf status rollup); done, later, and
@@ -179,8 +186,9 @@ Statuses: `proposed` (auto-filed, awaiting human approval) → `backlog` →
 `planned` → `doing` → `review` → `done`. Off to the side: `later` — intended,
 not this iteration (reseeds on iteration-new; see below); `not-planned` —
 deliberately decided against (see below). `done`, `later`, and `not-planned`
-do not block an iteration close. `needs: decision` marks an open design fork
-awaiting a human call, detailed in the task body.
+do not block an iteration close. A `recurring` task never reaches `done`:
+it re-arms to `backlog` after each run (see below). `needs: decision` marks
+an open design fork awaiting a human call, detailed in the task body.
 
 ## Routing
 
@@ -194,6 +202,7 @@ awaiting a human call, detailed in the task body.
 | Freeform new work | Same as `/dev add`. |
 | `/dev implement <id[, id…]|goal>` | Read `flows/implement.md` (multi → also `flows/implement-batch.md`; claim, forks, PR). |
 | `/dev review [id[, id…]]` | Read `flows/review.md` (inbox; multi-id → `flows/review-batch.md`). |
+| `/dev audit [area]` | Read `flows/audit.md` (scan the codebase for work worth filing; offers to schedule a recurring audit when none covers that scope). Not `/dev review`, which is the PR inbox. |
 | `/dev auto` | Read `flows/auto.md` (autonomous implement cycle). |
 | `/dev absorb <source>` | Read `flows/absorb.md` (import an external task list). |
 | `/dev iteration ...` | Read `flows/iteration.md` (show / close / new). |
@@ -256,6 +265,53 @@ not-planned (logged `[later]`, not unfinished). `iteration-new` re-adds
 archived later tasks with fresh ids, still later, plus a
 `carried from <n>/T<id>` note — no walk. Revive with
 `--status backlog` or `/dev pick <id>`.
+
+## Umbrella close (inline)
+
+**An umbrella is never auto-closed.** Its children all being `done` says
+the work happened, not that the goal was met — separating those two
+judgments is the whole reason the umbrella exists. So no flow, and no
+agent, closes one off a status rollup: `TASKS update <id> --status done`
+on a `kind: umbrella` task is **refused**, and closing it has its own verb
+instead — `TASKS verify <id> "<how the children met the goal>"`, which
+records `Verified (<date>): …` in the body and closes the task. That record
+is carried into `log.md` at iteration close (an umbrella never ships, so it
+is its only outcome line).
+
+The pass itself is `/dev implement <umbrella-id>` (flows/implement.md):
+an umbrella usually carries no code, so implement claims no branch, opens
+no PR, and does **not** go through `/dev review` — it reads the leaves and
+their `Shipped:` records against the umbrella's stated goal and ends in
+the same session, either filing the gaps as new children or closing with
+the record. Anyone may run it — typically whoever filed the umbrella and
+knows its intent; unlike `land`, it is not integrator-only. Real code
+found missing is a new leaf task, not work on the umbrella itself.
+
+`/dev meta` never proposes closing an umbrella. When one looks complete it
+says the goal check is **due** and worth prioritizing, and points at
+`/dev implement <id>`.
+
+## Recurring (inline)
+
+`kind: recurring` + `cadence: <N><unit>` (unit `d`/`w`/`m`, e.g. `2w`, `1m`)
+= perpetual work on a clock — an audit, a dependency sweep — not a task that
+finishes. It is never terminal: `land` stamps `last_run` and re-arms it to
+`backlog` instead of marking it done, `--status done` is refused, and
+`TASKS recur ran <id> [--date]` records a run that never had a PR (refused
+while a branch or PR is live — `land` owns that run). The due date is
+**derived** (`last_run + cadence`), never stored, so a cadence edit re-dates
+it immediately; no `last_run` = due now. `TASKS recur list [--due]` is the
+due view; `board` marks due tasks and indexes a `Recurring` row.
+
+Iteration close treats one **at rest** (`backlog`/`planned`) like `later`:
+non-blocking, archived, carried onto the next board as `backlog`. A run in
+flight (`doing`/`review`) blocks close like any other task; `proposed`
+blocks too and stays `proposed` when reseeded; `not-planned` retires it for
+good — that is the way to stop one.
+
+**Agents never invent a recurring task.** Whether work recurs, and how
+often, is a human call: a flow may offer to schedule one and wait for the
+answer, auto never files one.
 
 ## Area stewardship (inline)
 

@@ -23,15 +23,24 @@ TASKS area set <name> [--desc "<one-line scope>"]
 TASKS area rm <name> [--force]
 TASKS add --title "<title>" [--area <m>] [--deps <id,id>]
           [--desc "<1–3 sentences>"] [--assignee <who>]
-          [--kind umbrella]                     # empty = normal
+          [--kind umbrella|recurring]           # empty = normal
+          [--cadence <N><unit>]                 # recurring only, unit d/w/m
           [--status proposed|backlog|planned|later]  # default backlog
 TASKS update <id> [--title "<t>"] [--area <m>] [--status <s>]
-          [--kind umbrella|""] [--assignee <who>|""] [--branch <b>|""]
-          [--pr <url>] [--needs decision|""] [--deps <id,id>]
+          [--kind umbrella|recurring|""] [--assignee <who>|""]
+          [--branch <b>|""] [--pr <url>] [--needs decision|""]
+          [--deps <id,id>]
           [--append "<paragraph>"]              # add to body, keeping it
           [--desc "<new body>"]                 # REPLACE whole body
+          [--cadence <N><unit>] [--last-run YYYY-MM-DD|""]
+                                                # recurring only; the due date
+                                                # is derived, never stored
           [--status later]                      # park for a later iteration
           [--status not-planned --reason "<why>"]   # reason is required
+TASKS verify <id> "<how the children met the goal>"
+                                        # close an umbrella; the record is
+                                        # required, and --status done on one
+                                        # is refused in favour of this
 TASKS delete <id>
 TASKS show <id>
 TASKS collisions <id[,id…]>             # area occupancy vs doing/review;
@@ -44,6 +53,14 @@ TASKS collisions <id[,id…]>             # area occupancy vs doing/review;
 TASKS related "<text>"                  # existing tasks similar to <text>;
                                         # run before every add
 TASKS list [--assignee <who>] [--status <s>] [--needs decision] [--json]
+TASKS recur list [--due]                # recurring tasks + derived due dates
+                                        # (overdue and never-run first);
+                                        # --due limits to due/overdue now
+TASKS recur ran <id> [--date YYYY-MM-DD]
+                                        # record a run with no PR: stamp
+                                        # last_run (default today), re-arm to
+                                        # backlog. Refused if branch or pr is
+                                        # set — land owns that run.
 TASKS board [--expand] [--by-area] [--watch]
                                         # index: one line per status (or
                                         # area) of task ids; then in-play
@@ -120,5 +137,7 @@ TASKS land <id>                         # integrator-only merge commit (never
                                         # squash, never rewrites the branch):
                                         # merge, retarget stacked children to
                                         # integration, cleanup, done
+                                        # (recurring: re-arms to backlog
+                                        # with last_run stamped, not done)
 TASKS cleanup <id>                      # worktree + branch prune (branch only if PR MERGED)
 ```

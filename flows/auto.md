@@ -2,8 +2,9 @@
 
 For cron/scheduled or parallel agent sessions with no human present. One
 cycle = at most one shipped implementation (plus any proposals filed along
-the way). Multiple agents may run this concurrently against the same board —
-the claim step is the mutex.
+the way), or one due recurring run in its place — an audit files proposals
+and ships nothing. Multiple agents may run this concurrently against the
+same board — the claim step is the mutex.
 
 **Identity**: the assignee is the model, prefixed: `auto/<model-id>` (e.g.
 `auto/claude-sonnet-5`). Pass it explicitly via `--assignee`; don't overwrite
@@ -12,9 +13,10 @@ identity file, write the auto identity there so script defaults stay sane.
 Run from the product directory or pass `--scope`.
 
 **Hard limits**: never merge or approve a PR, resolve a `needs: decision`
-fork, flip `proposed` to `backlog`, mark a task `not-planned` or `later`,
-delete one, or otherwise decide for the human — a pointless-looking task
-gets `needs: decision` with your reasoning instead. Auto files work and
+fork, flip `proposed` to `backlog` (an audit's own findings included), mark
+a task `not-planned` or `later`, delete one, file a recurring task or offer
+to schedule one, or otherwise decide for the human — a pointless-looking
+task gets `needs: decision` with your reasoning instead. Auto files work and
 questions; humans dispose of them via flows/review.md. Never park, discard,
 or reset the local integration branch — that is human-only
 (flows/implement.md preflight).
@@ -27,8 +29,35 @@ or reset the local integration branch — that is human-only
    that a human must park-as-PR or discard via interactive implement; do not
    claim a task. Exit 0 with out-of-scope-only ahead → soft note in the
    report, continue.
-2. **Select**: from `TASKS list --json`, candidates are `backlog` tasks,
-   unassigned, no `needs` flag, all deps `done`. Exclude on **area grounds**
+2. **Select**: **due recurring work comes first** — `TASKS recur list --due`.
+   A recurring task is a candidate only while it is due and eligible on the
+   same terms as any other candidate: `backlog`, unassigned, no `needs` flag
+   (narrower than SKILL.md's *at rest*, which also allows `planned`). One
+   that is not due is never a candidate, here or in the backlog select below.
+   Nothing due → move on; never file a recurring task or offer a cadence.
+
+   - **An audit** (a recurring task naming an audit pass — `flows/audit.md`
+     files them as `Recurring audit: <scope>`) **is** the whole cycle. Read
+     its body for scope and emphasis, take it with `TASKS update <id>
+     --status doing --assignee auto/<model>` — that is the mutex, since an
+     audit has no branch to claim — then follow `flows/audit.md`. It edits
+     no files, so area collisions do not gate it. Findings stay `proposed`;
+     auto never approves its own findings nor implements one in the same
+     cycle, and skips audit.md's *Scheduling* offer. Close with `TASKS recur
+     ran <id>` (re-arms to `backlog`, clears the assignee), report one line
+     per filed task, and stop — no ship, no PR. Interrupted before the
+     stamp, the task stays `doing` for a human: never stamp a pass that did
+     not finish.
+   - **Any other due recurring task** runs the normal path below — claim,
+     implement, ship, with the same collision and fork-risk checks as any
+     candidate. `land` re-arms it rather than marking it done.
+
+   Otherwise, from `TASKS list --json`, candidates are `backlog` tasks,
+   unassigned, no `needs` flag, all deps `done`. **Never a `kind: umbrella`
+   task** — all-deps-done describes exactly the umbrella that is ready for
+   its verification pass, and that pass is a human judgment auto does not
+   make (SKILL.md *Umbrella close*; `claim` refuses one outright).
+   Exclude on **area grounds**
    (`TASKS collisions <id>` / SKILL.md *Area stewardship*): exit 2 **or 3**
    → skip, surface the output (any assignee's `doing` or `review`,
    including this auto identity's other work). Exit 3 (review-only

@@ -52,7 +52,7 @@ Emit it whole — don't reorder, trim to "what's relevant", or annotate.
 | | |
 |---|---|
 | **See** | `/dev board` — the whole board (status) · `/dev board --by-area` — cut by area · `/dev status` — your plate · `/dev show <id>` — one task |
-| **Add work** | `/dev add <task-or-goal>` — file a task, or work a goal or pile of threads onto the board · `/dev absorb <file>` — import an existing list |
+| **Add work** | `/dev add <task-or-goal>` — file a task, or work a goal or pile of threads onto the board · `/dev absorb <file>` — import an existing list · `/dev audit [area]` — scan the code and file what it finds |
 | **Do work** | `/dev pick <id>` — claim it · `/dev implement <id[, id…]|goal>` — build it (or a batch) and open PR(s); unknown goal is filed via add triage first · `/dev auto` — hand one to an agent |
 | **Decide** | `/dev review` — PRs, design questions, and proposals waiting on you · `/dev meta` — pressure the board · `/dev meta area` — area-validity only |
 | **Adjust** | `/dev change <id> <what>` · `/dev delete <id>` · `/dev area` · `/dev config` |

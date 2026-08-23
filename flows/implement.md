@@ -6,6 +6,11 @@
 `flows/implement-batch.md` and follow it — do not load that file for a
 single id. `/dev auto` stays one task per cycle.
 
+**An umbrella** (the resolved task is `kind: umbrella`): it is a goal, not
+a unit of code. Do the resolve in step 0 — the `gh` gate does not apply,
+nothing ships — then jump to **Umbrella: the verification pass** at the
+bottom; skip the pre-claim checks and steps 1–7 entirely.
+
 0. **Gate**: `gh auth status` must succeed — otherwise stop and point at
    setup (flows/init.md step 5). Don't start work that can't be shipped.
 
@@ -46,6 +51,9 @@ single id. `/dev auto` stays one task per cycle.
    If the task now looks pointless (already solved, superseded, false
    premise), say so before writing code — the user chooses whether to drop
    it.
+
+   A `kind: umbrella` task stops here: go to **Umbrella: the verification
+   pass** (bottom). Nothing below applies to it.
 
    Then three pre-claim checks, **always**:
    - **Area sanity**: empty area is a hard stop — do not claim, and do
@@ -256,3 +264,42 @@ from step 4 on the existing branch; fix on the branch, `TASKS ship <id>
 --shipped "<what changed since the last ship>"`, then note on the PR
 what changed (`gh pr comment`). The re-ship record covers the fixes,
 not the whole task again — the earlier records stay.
+
+## Umbrella: the verification pass
+
+An umbrella carries no code of its own, so implementing one means checking
+whether its children actually accomplished its aim (SKILL.md *Umbrella
+close*). **No `claim`, no branch or worktree, no `ship`, no PR — and it
+never goes through `/dev review`.** Skip the area-sanity, collision, and
+preflight checks with it: nothing is edited, so there is nothing to lock or
+park. Anyone may run this, not only the integrator — usually whoever filed
+the umbrella and knows what it meant.
+
+1. **Expand.** `TASKS show <id>` for the goal, then its `deps` — the direct
+   children. A child that is itself an umbrella is its own pass first;
+   don't verify a parent through an unverified child.
+2. **Read the outcomes, not the titles.** Each leaf's `Shipped (<date>): …`
+   record says what actually landed (closed ones live in
+   `.tasks/archive/…` and `log.md`). Where a record doesn't settle whether
+   the goal really holds, look at the code — this is the one place
+   implement reads without writing.
+3. **Judge against the stated aim.** Does the union of what shipped meet
+   it? Name any gap concretely. If some children are still open, say which
+   and stop — the pass is premature unless the user judges the remaining
+   ones unnecessary (then `not-planned` them first, with reasons).
+
+Then end it, in this same session, one of two ways:
+
+- **Gaps** → file them as new children through the `/dev add` path
+  (`flows/add.md`), then attach: `TASKS update <umbrella> --deps
+  <existing+new>`. The umbrella stays open; report what is left. Work the
+  umbrella needs that is real code is a **new leaf**, never edits made on
+  the umbrella itself.
+- **Goal met** → `TASKS verify <id> "<how the children met the goal>"`,
+  which records it and closes the task. `update --status done` is refused
+  on an umbrella and points here.
+  Show the user the judgment and the record you'd write and wait for their
+  go-ahead — closing an umbrella is a human call (SKILL.md *Humans decide;
+  agents draft*), and this pass is the only gate it gets.
+
+`/dev auto` never runs this pass and never closes an umbrella.

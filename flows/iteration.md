@@ -36,7 +36,9 @@ land gate matches log.md's `## {n}` heading.
    Dropped and later tasks don't block the close and need no `--force`.
    Umbrella tasks deserve scrutiny here: an unfinished umbrella means the
    iteration's goal isn't actually met, so closing anyway should be a
-   deliberate call, not a shrug.
+   deliberate call, not a shrug. One whose children all look done is not
+   finished either — it needs its verification pass (`/dev implement <id>`,
+   SKILL.md *Umbrella close*); never close one with `--status done`.
 2. `TASKS iteration-close` (add `--force` only after the user accepts the
    carry-over list — genuinely abandoned tasks should be `not-planned` first,
    and parked work should be `later` first, so `--force` covers only the

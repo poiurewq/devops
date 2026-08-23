@@ -22,6 +22,7 @@ setup, optionally stacked on another task's review tip), `ship`
 `land` / `cleanup`, `iteration-land`. Never auto-approve reviews.
 """
 import argparse
+import calendar
 import datetime
 import difflib
 import glob
@@ -36,7 +37,8 @@ import time
 
 STATUSES = ["proposed", "backlog", "planned", "doing", "review", "done",
             "later", "not-planned"]
-# Live watch only. Static `TASKS board` / TASKS.md keep STATUSES (pipeline).
+# Hottest-first list/index. Watch and static `TASKS board` / TASKS.md share
+# this; STATUSES stays the pipeline (validation, rollup counts).
 _WATCH_HEAD = ("review", "doing", "planned", "proposed", "backlog")
 WATCH_STATUSES = [s for s in _WATCH_HEAD if s in STATUSES] + [
     s for s in STATUSES if s not in _WATCH_HEAD]
@@ -56,18 +58,24 @@ VIEWER_NAME = "board"
 # 2: later is a valid task status (additive; older readers ignore unknown).
 # 3: iteration is a positive integer identity; iteration_name and
 #    iteration_started added. Pre-3 dated names fail closed (no migrate).
-SCHEMA_VERSION = 3
+# 4: kind: recurring, with cadence + last_run frontmatter (additive; both
+#    omitted from the file when empty, so non-recurring tasks are unchanged).
+SCHEMA_VERSION = 4
 CONFIG_KEYS = ["schema_version", "integration_branch", "parent_branch",
                "iteration", "iteration_name", "iteration_started",
                "integrator", "contributors"]
 SETTABLE_KEYS = ["parent_branch", "integrator", "iteration",
                  "iteration_name", "iteration_started"]
 # kind: optional. "" = normal task; "umbrella" = goal parent whose deps are
-# direct children (leaves or nested umbrellas). Hierarchy lives in deps;
-# reverse index is computed at board time. Other kind values reserved for
-# future (e.g. recurring) — readers ignore unknown kinds.
+# direct children (leaves or nested umbrellas); "recurring" = perpetual task
+# on a time cadence (see Recurring tasks below). Hierarchy lives in deps;
+# reverse index is computed at board time. Readers ignore unknown kinds.
+RECURRING = "recurring"
 FIELDS = ["id", "title", "area", "status", "kind", "assignee", "branch", "deps",
-          "pr", "needs", "created"]
+          "pr", "needs", "created", "cadence", "last_run"]
+# Written only when non-empty, so an ordinary task file is byte-identical to
+# what a pre-schema-4 script produced. Older readers ignore them either way.
+OPTIONAL_FIELDS = ("cadence", "last_run")
 # Board push races on a shared integration branch: rebase onto origin and
 # retry this many times before queueing locally.
 PUSH_RETRIES = 5
@@ -242,7 +250,7 @@ import os, sys
 TASKS = __TASKS_PY__
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 if not os.path.isfile(TASKS):
-    sys.exit("error: dev skill not found at %s — delete ./board and re-run init" % TASKS)
+    sys.exit("error: dev skill not found at %s — this wrapper is stale; regenerate it by running `python3 <dev-skill>/scripts/tasks.py board` in %s" % (TASKS, os.getcwd()))
 ARGS = ["--refresh-viewer"] if sys.argv[1:2] == ["update"] else ["--watch"]
 os.execv(sys.executable, [sys.executable, TASKS, "board"] + ARGS)
 '''
@@ -262,6 +270,18 @@ _STOCK_VIEWER_LINE = re.compile(
     r"|os\.execv\(sys\.executable, \[sys\.executable, TASKS, \"board\"\] \+ ARGS\)"
     r")$"
 )
+
+
+# A task worktree is deleted at land/cleanup; a skill copy living there
+# must never be baked into the long-lived hub wrapper.
+_EPHEMERAL_SKILL_PATH = re.compile(r"(^|/)\.dev/worktrees(/|$)")
+
+
+def skill_path_is_ephemeral(path):
+    """True if this copy of the skill lives under some product's
+    .dev/worktrees/ (a task worktree, deleted at land)."""
+    return bool(_EPHEMERAL_SKILL_PATH.search(
+        os.path.abspath(path).replace("\\", "/")))
 
 
 def viewer_script():
@@ -293,7 +313,8 @@ def ensure_board_viewer(root, scope, force=False):
     """Write <product>/board if missing or still a stock wrapper.
 
     Returns (path, wrote). Leaves a user-edited file and a directory alone;
-    force overwrites an edited one (./board update).
+    force overwrites an edited one (./board update). Never writes when this
+    copy of the skill is ephemeral (skill_path_is_ephemeral).
     """
     dest = viewer_path(root, scope)
     if os.path.isdir(dest):
@@ -308,6 +329,12 @@ def ensure_board_viewer(root, scope, force=False):
             return dest, False
         if not force and (existing is None or not viewer_is_stock(existing)):
             return dest, False
+    if skill_path_is_ephemeral(__file__):
+        print(f"warning: leaving ./{VIEWER_NAME} alone — this copy of the "
+              f"skill is in a task worktree ({os.path.abspath(__file__)}), "
+              f"which is deleted at land; run 'board' from the installed "
+              f"skill to refresh the wrapper", file=sys.stderr)
+        return dest, False
     with open(dest, "w", encoding="utf-8") as f:
         f.write(content)
     os.chmod(dest, 0o755)
@@ -475,9 +502,35 @@ def sync_board(root, scope, branch):
             git("rebase", "--abort", cwd=bw, check=False)
             sys.exit(f"error: queued board commits conflict with {upstream}; "
                      f"resolve manually in {board_worktree_rel(scope)}")
+        flush_queued_board_commits(root, scope, branch, bw)
     else:
         git("reset", "--hard", upstream, cwd=bw)
     return bw
+
+
+def git_err(r):
+    """Stderr (or stdout) of a failed git run, for a warning line."""
+    return (r.stderr or r.stdout or "").strip() or "(no output)"
+
+
+def flush_queued_board_commits(root, scope, branch, bw):
+    """Push board commits an earlier failed push left queued (best-effort).
+
+    board_commit promises the queue goes out on the next board operation, but
+    only board_commit pushes — without this a read-only command would leave
+    the commit sitting on the private branch indefinitely.
+    """
+    if not has_remote(root):
+        return
+    r = git("push", "origin", f"HEAD:refs/heads/{branch}", cwd=bw, check=False)
+    if r.returncode != 0:
+        print(f"warning: board commits are still queued locally on "
+              f"{board_branch_name(scope)}; push failed:\n{git_err(r)}",
+              file=sys.stderr)
+        return
+    print(f"pushed queued board commits to {branch}", file=sys.stderr)
+    update_local_branch(root, scope, branch,
+                        git("rev-parse", "HEAD", cwd=bw).stdout.strip())
 
 
 def resolve_board(root, scope):
@@ -513,25 +566,30 @@ def ctx():
 def board_commit(root, branch, bw, scope, message):
     """Commit this board's changes, push to its integration branch (rebase/
     retry when the tip moved — shared-main policy A), fast-forward local
-    checkouts best-effort."""
+    checkouts best-effort. A failed push queues the commit on the private
+    branch and leaves local integration where it is; the next board
+    operation flushes it (flush_queued_board_commits). Returns whether the
+    commit reached origin (True when there is no remote)."""
     paths = [tdir(scope)]
     if os.path.exists(os.path.join(bw, ".gitignore")):
         paths.append(".gitignore")
     git("add", "-A", "--", *paths, cwd=bw)
     if git("diff", "--cached", "--quiet", cwd=bw, check=False).returncode == 0:
         print("no changes")
-        return
+        return True
     git("commit", "-m", message, cwd=bw)
     sha = git("rev-parse", "HEAD", cwd=bw).stdout.strip()
     private = board_branch_name(scope)
     if has_remote(root):
         pushed = False
-        for attempt in range(PUSH_RETRIES):
+        last_err = ""
+        for attempt in range(1, PUSH_RETRIES + 1):
             r = git("push", "origin", f"HEAD:refs/heads/{branch}", cwd=bw,
                     check=False)
             if r.returncode == 0:
                 pushed = True
                 break
+            last_err = git_err(r)
             # Non-ff or race: fetch, rebase onto origin, retry (policy A).
             git("fetch", "origin", branch, cwd=bw, check=False)
             upstream = f"origin/{branch}"
@@ -543,11 +601,23 @@ def board_commit(root, branch, bw, scope, message):
                 sys.exit(f"error: board push rebase conflict with {upstream}; "
                          f"resolve manually in {board_worktree_rel(scope)}")
             sha = git("rev-parse", "HEAD", cwd=bw).stdout.strip()
+            if attempt < PUSH_RETRIES:
+                # A non-race failure (auth, network, hook) rebases to a no-op,
+                # so without this all attempts fire in milliseconds.
+                print(f"  board push attempt {attempt} failed; retry…",
+                      file=sys.stderr)
+                time.sleep(min(2 * attempt, 8))
         if not pushed:
+            # Do NOT fast-forward local integration: the commit lives on the
+            # private branch, and moving integration would make the next
+            # preflight report in-scope .tasks/ ahead — whose discard remedy
+            # would delete this very task.
             print(f"warning: push failed; board commit queued locally on "
-                  f"{private} and will be pushed on the next board operation",
-                  file=sys.stderr)
+                  f"{private} and will be pushed on the next board operation."
+                  f"\n{last_err}", file=sys.stderr)
+            return False
     update_local_branch(root, scope, branch, sha)
+    return True
 
 
 def update_local_branch(root, scope, branch, sha):
@@ -680,6 +750,8 @@ def parse_task(path):
     deps = meta.get("deps", "")
     meta["deps"] = [int(x) for x in re.findall(r"\d+", deps)]
     meta["kind"] = meta.get("kind", "") or ""
+    for k in OPTIONAL_FIELDS:
+        meta[k] = meta.get(k, "") or ""
     meta["body"] = m.group(2).strip()
     meta["path"] = path
     return meta
@@ -691,6 +763,8 @@ def render_task(meta):
         v = meta.get(k, "")
         if k == "deps":
             v = "[" + ", ".join(str(d) for d in meta.get("deps", [])) + "]"
+        elif k in OPTIONAL_FIELDS and not v:
+            continue
         lines.append(f"{k}: {v}")
     lines.append("---")
     body = meta.get("body", "").strip()
@@ -699,6 +773,131 @@ def render_task(meta):
 
 def is_umbrella(t):
     return (t.get("kind") or "").strip() == "umbrella"
+
+
+# --- Recurring tasks -------------------------------------------------
+#
+# kind: recurring + cadence "<N><unit>" (d/w/m). A recurring task is never
+# terminal: instead of done it re-arms — last_run is stamped and status goes
+# back to backlog. The due date is DERIVED (last_run + cadence), never
+# stored, so a cadence edit takes effect immediately and the two can't drift.
+# No last_run yet = due now.
+
+CADENCE_RE = re.compile(r"^(\d+)([dwm])$")
+CADENCE_HELP = "cadence must be <N><unit> with unit d, w, or m (e.g. 2w, 1m)"
+
+
+def is_recurring(t):
+    return (t.get("kind") or "").strip() == RECURRING
+
+
+def parse_cadence(value, what="cadence"):
+    m = CADENCE_RE.match((value or "").strip())
+    if not m:
+        sys.exit(f"error: bad {what} '{value}'; {CADENCE_HELP}")
+    n = int(m.group(1))
+    if n < 1:
+        sys.exit(f"error: bad {what} '{value}'; {CADENCE_HELP}")
+    return n, m.group(2)
+
+
+def add_months(d, n):
+    """Calendar month add, clamping the day to the target month's length.
+
+    Jan 31 + 1m = Feb 28/29 — the alternative (rolling into March) would let
+    a monthly task drift a day later every short month.
+    """
+    month = d.month - 1 + n
+    year = d.year + month // 12
+    month = month % 12 + 1
+    day = min(d.day, calendar.monthrange(year, month)[1])
+    return datetime.date(year, month, day)
+
+
+def cadence_next(last_run, cadence):
+    """Date a task with this last_run and cadence next comes due."""
+    n, unit = parse_cadence(cadence)
+    if unit == "d":
+        return last_run + datetime.timedelta(days=n)
+    if unit == "w":
+        return last_run + datetime.timedelta(weeks=n)
+    return add_months(last_run, n)
+
+
+def task_due_date(t):
+    """Derived due date, or None for a task that has never run (= due now)."""
+    if not is_recurring(t):
+        return None
+    last = (t.get("last_run") or "").strip()
+    if not last:
+        return None
+    return cadence_next(iso_date(last, "last_run"), t.get("cadence"))
+
+
+def task_is_due(t, today=None):
+    if not is_recurring(t):
+        return False
+    due = task_due_date(t)
+    return due is None or due <= (today or datetime.date.today())
+
+
+def recur_sort_rank(t):
+    """Tiebreak within one status: due first, armed-but-not-due last.
+
+    A separate component of the sort key from the status rank on purpose —
+    umbrella status ranking (T94) can change that component without
+    disturbing this one. Recurring tasks are never umbrellas.
+    """
+    if not is_recurring(t):
+        return 0
+    return -1 if task_is_due(t) else 1
+
+
+# A recurring task is "at rest" between runs: approved, nothing in flight, so
+# it is not unfinished work. Any other status means a run is under way, the
+# task was retired, or it is still awaiting approval (proposed) — status wins
+# over recurrence there, or an unapproved proposal would reseed as backlog.
+RECUR_RESTING = ("backlog", "planned")
+
+
+def recur_at_rest(t):
+    return is_recurring(t) and t["status"] in RECUR_RESTING
+
+
+def validate_recurring(meta):
+    """kind and cadence must agree; last_run must be a date. Exits on error."""
+    cadence = (meta.get("cadence") or "").strip()
+    if is_recurring(meta):
+        if not cadence:
+            sys.exit(f"error: kind {RECURRING} requires --cadence <N><unit> "
+                     "(e.g. 2w, 1m)")
+        parse_cadence(cadence)
+    elif cadence:
+        sys.exit(f"error: cadence only applies to kind {RECURRING} tasks")
+    last = (meta.get("last_run") or "").strip()
+    if last:
+        if not is_recurring(meta):
+            sys.exit(f"error: last_run only applies to kind {RECURRING} tasks")
+        parse_iso_date(last, "last_run")
+
+
+def rearm_recurring(root, scope, branch, bw, meta, ran_on=None):
+    """Record a run: stamp last_run and re-arm instead of going terminal.
+
+    Callers pass a freshly read record. Clears the per-run fields (assignee,
+    branch, pr) so the next cycle starts clean; the run itself is recorded in
+    the body and, for a shipped run, in the Shipped record already there.
+    """
+    ran = ran_on or datetime.date.today()
+    meta["last_run"] = ran.isoformat()
+    meta["status"] = "backlog"
+    meta["assignee"] = meta["branch"] = meta["pr"] = ""
+    meta["body"] = append_body(meta["body"], f"Ran ({ran.isoformat()}).")
+    with open(meta["path"], "w") as f:
+        f.write(render_task(meta))
+    board_commit(root, branch, bw, scope,
+                 f"dev: T{meta['id']} ran {ran.isoformat()} (re-armed)")
+    return meta
 
 
 def membership_leaves(umbrella, by_id, _seen=None):
@@ -921,6 +1120,11 @@ def parse_positive_int(value, what="value"):
     if not raw.isdigit() or int(raw) < 1:
         sys.exit(f"error: {what} must be a positive integer (got {value!r})")
     return int(raw)
+
+
+def iso_date(value, what="date"):
+    """Validated YYYY-MM-DD as a date object (parse_iso_date returns the str)."""
+    return datetime.date.fromisoformat(parse_iso_date(value, what))
 
 
 def parse_iso_date(value, what="date"):
@@ -1806,8 +2010,17 @@ def worktree_is_dirty(path):
 
 
 def mark_task_done(root, scope, branch, bw, meta):
-    """Set status=done on the board if not already. Returns True if changed."""
+    """Finish a task on the board. Returns True if changed.
+
+    A recurring task never goes done: it re-arms (last_run stamped, back to
+    backlog) so the next cycle is already on the board. Both land paths go
+    through here, and both pass `branch` to cleanup explicitly, so clearing
+    the task's branch field here does not strand the worktree.
+    """
     meta = find_task(bw, scope, meta["id"])
+    if is_recurring(meta):
+        rearm_recurring(root, scope, branch, bw, meta)
+        return True
     if meta["status"] == "done":
         return False
     meta["status"] = "done"
@@ -1816,6 +2029,14 @@ def mark_task_done(root, scope, branch, bw, meta):
     board_commit(root, branch, bw, scope,
                  f"dev: update T{meta['id']} (status=done)")
     return True
+
+
+def land_outcome(meta):
+    """What land did to the task: done, or re-armed for its next run."""
+    if not is_recurring(meta):
+        return "done"
+    due = task_due_date(meta)
+    return f"re-armed (next due {due.isoformat()})" if due else "re-armed"
 
 
 def _switch_primary_off_task_branch(root, scope, branch, actions):
@@ -2006,6 +2227,14 @@ def cmd_land(args):
         return
 
     if not pr:
+        # A landed recurring task has no pr: re-arming cleared it. That is the
+        # idempotent re-run, not a missing PR — say so instead of asking for
+        # one. Never run = a real error (nothing was ever shipped).
+        if is_recurring(meta) and (meta.get("last_run") or "").strip():
+            print(f"T{tid}: recurring, last run {meta['last_run']} — "
+                  f"{land_outcome(meta)}; nothing to land, cleanup only")
+            cleanup_task_artifacts(root, scope, meta, task_branch_name(meta))
+            return
         sys.exit(f"error: T{tid} has no pr URL; open a PR before land")
 
     require_gh(root)
@@ -2029,12 +2258,14 @@ def cmd_land(args):
         print(f"T{tid}: PR already merged — retargeting children, then done")
         retarget_children(root, branch, integration)
         mark_task_done(root, scope, integration, bw, meta)
-        # Re-read meta so status=done is visible; cleanup still keys off PR.
-        meta = find_task(bw, scope, tid)
+        # Cleanup keys off the PR URL as merge evidence and ignores status,
+        # so hand it the pre-land record: re-arming a recurring task clears
+        # pr, which would otherwise leave the branch undeleted.
         cleanup_task_artifacts(root, scope, meta, branch)
+        meta = find_task(bw, scope, tid)
         note_version_intent(intent, integration,
                             os.path.abspath(product_root(root, scope)))
-        print(f"T{tid}: done")
+        print(f"T{tid}: {land_outcome(meta)}")
         return
 
     if state == "CLOSED":
@@ -2136,11 +2367,12 @@ def cmd_land(args):
 
     integration, bw = resolve_board(root, scope)
     mark_task_done(root, scope, integration, bw, meta)
-    meta = find_task(bw, scope, tid)
+    # Pre-land record: see the cleanup note on the already-merged path above.
     cleanup_task_artifacts(root, scope, meta, branch)
+    meta = find_task(bw, scope, tid)
     note_version_intent(intent, integration,
                         os.path.abspath(product_root(root, scope)))
-    print(f"T{tid}: landed and done")
+    print(f"T{tid}: landed and {land_outcome(meta)}")
 
 
 # ---------- claim (implement setup) ----------
@@ -2208,6 +2440,10 @@ def cmd_claim(args):
                  f"diff (handoff: update --assignee first)")
     if (meta.get("needs") or "").strip() == "decision":
         sys.exit(f"error: T{tid} has needs: decision; resolve before claim")
+    if is_umbrella(meta):
+        sys.exit(f"error: T{tid} is an umbrella: a goal, not a unit of code. "
+                 f"It gets no branch and no PR — run /dev implement {tid} for "
+                 f"the verification pass, and file any real code as a child.")
     if not split_areas(meta.get("area", "")):
         sys.exit(f"error: T{tid} has no area; set a real name "
                  f"(reuse or area set) before claim")
@@ -2507,6 +2743,26 @@ def format_shipped(text, date=None):
 def collect_shipped(text):
     """Every shipped record in a task or PR body, in order."""
     return [m.group(0).strip() for m in SHIPPED_RE.finditer(text or "")]
+
+
+# ---------- verified record (umbrella close) ----------
+
+# An umbrella never ships, so its close carries its own record instead:
+#   Verified (2026-08-22): how the children actually met the goal.
+VERIFIED_RE = re.compile(
+    r"(?ims)^Verified \(\d{4}-\d{2}-\d{2}\):.*?(?=\n[ \t]*\n|\Z)")
+
+
+def format_verified(text, date=None):
+    """One verification record, collapsed to a single paragraph."""
+    text = " ".join((text or "").split())
+    date = date or datetime.date.today().isoformat()
+    return f"Verified ({date}): {text}"
+
+
+def collect_verified(text):
+    """Every verification record in a task body, in order."""
+    return [m.group(0).strip() for m in VERIFIED_RE.finditer(text or "")]
 
 
 def ensure_shipped_in_text(text, records):
@@ -3476,7 +3732,15 @@ def cmd_init(args):
         gi = os.path.join(bw, ".gitignore")
         for line in ignore_lines:
             append_ignore_line(gi, line)
-        board_commit(root, branch, bw, scope, f"dev: init task board ({scope})")
+        if not board_commit(root, branch, bw, scope,
+                            f"dev: init task board ({scope})"):
+            # Nothing was fast-forwarded into this checkout, so the board is
+            # not discoverable yet (find_scope reads the checkout).
+            sys.exit(f"error: the new board is queued on "
+                     f"{board_branch_name(scope)} but did not reach "
+                     f"origin/{branch}, so it is not in this checkout yet and "
+                     f"board commands cannot find it. Fix the remote, then "
+                     f"re-run init to flush the queue.")
         print(f"initialized board '{scope}' on '{branch}' (integrator: {args.name})")
     else:
         cfg = read_board_cfg(bw, scope)
@@ -3620,8 +3884,10 @@ def cmd_add(args):
         "assignee": args.assignee or "", "branch": "",
         "deps": [int(x) for x in re.findall(r"\d+", args.deps or "")], "pr": "",
         "needs": "", "created": datetime.date.today().isoformat(),
+        "cadence": (args.cadence or "").strip(), "last_run": "",
         "body": args.desc or "",
     }
+    validate_recurring(meta)
     known = {t["id"] for t in tasks}
     for d in meta["deps"]:
         if d not in known:
@@ -3643,11 +3909,12 @@ def cmd_update(args):
     meta = find_task(bw, scope, args.id)
     changes = []
     for field in ("title", "area", "status", "kind", "assignee", "branch", "pr",
-                  "needs", "desc"):
+                  "needs", "desc", "cadence", "last_run"):
         v = getattr(args, field, None)
         if v is not None:
             key = "body" if field == "desc" else field
-            meta[key] = v.strip() if field == "kind" and isinstance(v, str) else v
+            strip = field in ("kind",) + OPTIONAL_FIELDS
+            meta[key] = v.strip() if strip and isinstance(v, str) else v
             changes.append(f"{field}={v}" if field != "desc" else "desc")
     if args.deps is not None:
         meta["deps"] = [int(x) for x in re.findall(r"\d+", args.deps)]
@@ -3670,6 +3937,15 @@ def cmd_update(args):
         sys.exit(f"error: status must be one of {STATUSES}")
     if meta.get("needs") not in ("", "decision"):
         sys.exit("error: needs must be 'decision' or empty")
+    validate_recurring(meta)
+    if is_recurring(meta) and meta["status"] == "done":
+        sys.exit(f"error: T{meta['id']} is recurring and never goes done; "
+                 f"record a run instead: TASKS recur ran {meta['id']}")
+    if is_umbrella(meta) and args.status == "done":
+        sys.exit(f"error: T{meta['id']} is an umbrella and never closes on a "
+                 f"status flip; record the verification instead: TASKS verify "
+                 f"{meta['id']} \"<how the children met the goal>\" "
+                 f"(or /dev implement {meta['id']} to do that pass)")
     if meta["status"] == "doing":
         undone = [d for d in meta["deps"]
                   if find_task(bw, scope, d)["status"] != "done"]
@@ -3746,6 +4022,74 @@ def cmd_list(args):
     else:
         for t in sel:
             print(fmt_line(t, tasks))
+
+
+def recur_due_sort(t):
+    """Overdue first, then by due date; never-run sorts to the very front."""
+    due = task_due_date(t)
+    return (0, datetime.date.min, t["id"]) if due is None else (1, due, t["id"])
+
+
+def cmd_recur(args):
+    """List recurring tasks with their derived due dates, or record a run."""
+    root, scope, branch, bw = ctx()
+    tasks = all_tasks(bw, scope)
+    if args.recur_cmd == "ran":
+        meta = find_task(bw, scope, args.id)
+        if not is_recurring(meta):
+            sys.exit(f"error: T{meta['id']} is not a recurring task "
+                     f"(kind: {meta.get('kind') or 'normal'})")
+        # `recur ran` is the no-PR path. Re-arming clears pr and branch, so
+        # running it on an in-flight task would orphan the PR and worktree —
+        # land (or cleanup) owns that run instead.
+        if (meta.get("pr") or "").strip() or (meta.get("branch") or "").strip():
+            sys.exit(f"error: T{meta['id']} has a run in flight "
+                     f"(branch/PR set); land it (TASKS land {meta['id']}) or "
+                     f"clear it (TASKS cleanup {meta['id']}) — `recur ran` is "
+                     f"for runs that never had a PR")
+        ran = (iso_date(args.date, "date") if args.date
+               else datetime.date.today())
+        meta = rearm_recurring(root, scope, branch, bw, meta, ran_on=ran)
+        due = task_due_date(meta)
+        print(f"T{meta['id']} ran {meta['last_run']}, re-armed to backlog; "
+              f"next due {due.isoformat()}")
+        return
+    today = datetime.date.today()
+    sel = [t for t in tasks if is_recurring(t)]
+    if args.due:
+        sel = [t for t in sel if task_is_due(t, today)]
+    if not sel:
+        print("(no due recurring tasks)" if args.due
+              else "(no recurring tasks)")
+        return
+    for t in sorted(sel, key=recur_due_sort):
+        print(fmt_line(t, tasks))
+
+
+def cmd_verify(args):
+    """Close an umbrella by recording how its children met its goal.
+
+    Never a status flip — cmd_update refuses that — because all-children-done
+    is a rollup, not a judgment. An umbrella never ships, so this record is
+    its only outcome line in log.md. Re-running appends another record.
+    """
+    root, scope, branch, bw = ctx()
+    meta = find_task(bw, scope, args.id)
+    if not is_umbrella(meta):
+        sys.exit(f"error: T{meta['id']} is not an umbrella "
+                 f"(kind: {meta.get('kind') or 'normal'}); verify closes a "
+                 f"goal against its children")
+    text = " ".join((args.text or "").split())
+    if not text:
+        sys.exit(f"error: verify needs the record: how T{meta['id']}'s "
+                 f"children met its goal")
+    meta["body"] = append_body(meta["body"], format_verified(text))
+    meta["status"] = "done"
+    with open(meta["path"], "w") as f:
+        f.write(render_task(meta))
+    board_commit(root, branch, bw, scope,
+                 f"dev: verify T{meta['id']} (closed)")
+    print(f"T{meta['id']} closed: {format_verified(text)}")
 
 
 def cmd_collisions(args):
@@ -3854,6 +4198,9 @@ def fmt_line(t, tasks, color=False):
     if t.get("needs"):
         flag = f"⚑needs-{t['needs']}"
         parts.append(_ansi(_NEEDS, flag) if color else flag)
+    if is_recurring(t):
+        mark, sgr = recur_marker(t)
+        parts.append(_ansi(sgr, mark) if color else mark)
     if is_umbrella(t):
         roll = umbrella_rollup(t, tasks)
         parts.append(_ansi(_DIM, roll) if color else roll)
@@ -3867,6 +4214,20 @@ def _status_label(status):
     return STATUS_LABEL.get(status, status.capitalize())
 
 
+def recur_marker(t, today=None):
+    """(text, sgr) for a recurring task's derived due state.
+
+    Due or overdue reads like a blocker (red); armed and waiting is dim, the
+    same weight as the area — it is the least actionable thing on the board.
+    """
+    due = task_due_date(t)
+    if due is None:
+        return "⏰due now", _ERR
+    if due <= (today or datetime.date.today()):
+        return f"⏰due {due.isoformat()}", _ERR
+    return f"⏳{due.isoformat()}", _DIM
+
+
 def _fmt_ids(col, color=False):
     if not color:
         return " ".join(f"T{t['id']}" for t in col)
@@ -3875,6 +4236,23 @@ def _fmt_ids(col, color=False):
 
 def _fmt_count(col):
     return f"({len(col)})"
+
+
+def _recur_index_row(tasks, color=False):
+    """Extra index row listing recurring tasks, due first. [] when none.
+
+    Additional to the status/area rows, not a replacement — a recurring task
+    genuinely sits in backlog (or doing, or review) and stays on that row.
+    The duplication is what makes "what is on the clock" one line to read.
+    """
+    col = sorted([t for t in tasks if is_recurring(t)], key=recur_due_sort)
+    if not col:
+        return []
+    if not color:
+        return [("Recurring", " ".join(f"T{t['id']}" for t in col))]
+    ids = " ".join(_ansi(_ERR if task_is_due(t) else _DIM, f"T{t['id']}")
+                   for t in col)
+    return [("Recurring", ids, _DIM)]
 
 
 def _index_block(rows):
@@ -3900,8 +4278,10 @@ def _list_block(tasks, expand=False, color=False, status_order=None):
 
     --expand also lists done/later/not-planned. A child whose umbrella is
     itself unlisted renders at top level, so nothing drops off the board.
+    Umbrellas rank by the hottest of their own status and their listed
+    descendants'.
     """
-    order = status_order or STATUSES
+    order = status_order or WATCH_STATUSES
     rank = {s: i for i, s in enumerate(order)}
     listed = [t for t in tasks if expand or t["status"] not in TERMINAL]
     by_id = {t["id"]: t for t in listed}
@@ -3927,8 +4307,21 @@ def _list_block(tasks, expand=False, color=False, status_order=None):
     for cid, pid in parent.items():
         children.setdefault(pid, []).append(cid)
 
+    def hottest_rank(t):
+        # parent is a forest (one parent per child, cycle edges dropped
+        # above), so this recursion terminates without a visited set. Own
+        # status counts: an in-flight umbrella must not sink below its
+        # colder children.
+        own = rank.get(t["status"], 99)
+        return min([own] + [hottest_rank(by_id[c])
+                            for c in children.get(t["id"], [])])
+
     def in_order(col):
-        return sorted(col, key=lambda t: (rank.get(t["status"], 99), t["id"]))
+        # (hottest of self and listed descendants, recurrence, id).
+        # Recurrence stays a within-rank tiebreak (T3) so this rank can
+        # move independently.
+        return sorted(col, key=lambda t: (hottest_rank(t),
+                                          recur_sort_rank(t), t["id"]))
 
     lines = []
 
@@ -3943,7 +4336,7 @@ def _list_block(tasks, expand=False, color=False, status_order=None):
 
 
 def _board_by_status(tasks, expand=False, color=False, status_order=None):
-    order = status_order or STATUSES
+    order = status_order or WATCH_STATUSES
     rows = []
     for status in order:
         col = [t for t in tasks if t["status"] == status]
@@ -3953,6 +4346,7 @@ def _board_by_status(tasks, expand=False, color=False, status_order=None):
         rhs = _fmt_count(col) if fold else _fmt_ids(col, color=color)
         sgr = _STATUS_COLOR.get(status) if color else None
         rows.append((_status_label(status), rhs, sgr))
+    rows.extend(_recur_index_row(tasks, color=color))
     lines = _index_block(rows)
     listed = _list_block(tasks, expand=expand, color=color,
                          status_order=order)
@@ -4004,6 +4398,7 @@ def _board_by_area(bw, scope, tasks, expand=False, color=False,
             if col:
                 sgr = _STATUS_COLOR.get(status) if color else None
                 rows.append((_status_label(status), _fmt_count(col), sgr))
+    rows.extend(_recur_index_row(tasks, color=color))
     lines = _index_block(rows)
     listed = _list_block(tasks, expand=expand, color=color,
                          status_order=status_order)
@@ -4036,23 +4431,22 @@ def _render_board(args):
     """Fetch, write plain TASKS.md, return (plain, display, tasks).
 
     display is colorized when stdout is a color-capable tty. TASKS.md is
-    always the plain text in STATUSES order. Watch display uses
-    WATCH_STATUSES so hottest work sits above the fold.
+    always the plain text. Watch and static share WATCH_STATUSES so hottest
+    work sits above the fold on both.
     """
     root, scope, branch, bw = ctx()
     cfg = read_board_cfg(bw, scope)
     tasks = all_tasks(bw, scope)
     expand = bool(getattr(args, "expand", False))
     by_area = bool(getattr(args, "by_area", False))
-    watch = bool(getattr(args, "watch", False))
-    plain = _board_text(cfg, scope, bw, tasks, expand=expand, by_area=by_area)
+    plain = _board_text(cfg, scope, bw, tasks, expand=expand, by_area=by_area,
+                        status_order=WATCH_STATUSES)
     with open(os.path.join(root, scope, "TASKS.md"), "w") as f:
         f.write(plain)
-    live_order = WATCH_STATUSES if watch else None
-    if live_order or _use_color():
+    if _use_color():
         display = _board_text(cfg, scope, bw, tasks, expand=expand,
-                              by_area=by_area, color=_use_color(),
-                              status_order=live_order)
+                              by_area=by_area, color=True,
+                              status_order=WATCH_STATUSES)
     else:
         display = plain
     return plain.rstrip(), display.rstrip(), tasks
@@ -4274,6 +4668,10 @@ def cmd_board_refresh_viewer(root, scope):
     dest = viewer_path(root, scope)
     if os.path.isdir(dest):
         sys.exit(f"error: {VIEWER_NAME} is a directory")
+    if skill_path_is_ephemeral(__file__):
+        sys.exit(f"error: refusing to point ./{VIEWER_NAME} at "
+                 f"{os.path.abspath(__file__)} — that task worktree is "
+                 f"deleted at land; run this from the installed skill")
     edited = False
     if os.path.isfile(dest):
         try:
@@ -4488,19 +4886,32 @@ def archived_tasks(bw, scope, index):
     return [parse_task(p) for p in paths]
 
 
+def carries_to_next_iteration(t):
+    """later = intended but not this iteration; recurring = perpetual.
+
+    not-planned wins over recurrence: retiring a recurring task is how you
+    stop it, so it must not be reseeded back onto the next board.
+    """
+    if t.get("status") == "not-planned":
+        return False
+    return t.get("status") == "later" or is_recurring(t)
+
+
 def reseed_later_tasks(bw, scope, old_index):
-    """Copy archived later tasks onto the live board with fresh ids.
+    """Copy archived later and recurring tasks onto the live board, fresh ids.
 
     Only the outgoing iteration's archive (the one just closed). Scanning
     every archive would duplicate a task that stayed later across closes.
-    later→later deps are remapped; deps on anything else are dropped.
+    Carried→carried deps are remapped; deps on anything else are dropped.
+    A recurring task keeps its cadence and last_run, so its derived due date
+    survives the iteration boundary untouched.
     Returns [(new_meta, old_id), ...] in new-id order.
     """
     if old_index is None:
         return []
     old_index = int(old_index)
     laters = [t for t in archived_tasks(bw, scope, old_index)
-              if t.get("status") == "later"]
+              if carries_to_next_iteration(t)]
     if not laters:
         return []
     nid = max((t["id"] for t in all_tasks(bw, scope)), default=0) + 1
@@ -4519,8 +4930,18 @@ def reseed_later_tasks(bw, scope, old_index):
             "id": new_id,
             "title": t.get("title") or "",
             "area": t.get("area") or "",
-            "status": "later",
+            # Only later and recurring tasks are carried. later stays
+            # later, and a proposed recurring task stays proposed — a
+            # forced close must not promote an unapproved proposal to
+            # approved work. Anything else is a recurring task that
+            # starts the new board armed and unclaimed (assignee/branch/pr
+            # are cleared below, so an in-flight status would name a
+            # branch that is not carried).
+            "status": (t["status"] if t.get("status") in ("later", "proposed")
+                       else "backlog"),
             "kind": t.get("kind") or "",
+            "cadence": t.get("cadence") or "",
+            "last_run": t.get("last_run") or "",
             "assignee": "",
             "branch": "",
             "deps": new_deps,
@@ -4547,7 +4968,17 @@ def cmd_iteration_close(args):
     tasks = all_tasks(bw, scope)
     if not tasks:
         sys.exit("error: no tasks on this board; nothing to close")
-    unfinished = [t for t in tasks if t["status"] not in TERMINAL]
+    # A recurring task at rest is perpetual, never "finished", so it does not
+    # block a close: it archives like everything else and iteration-new
+    # reseeds it, the same way later tasks carry over. One with a run in
+    # flight (doing/review) still blocks. Nothing is deleted by a --force
+    # close — branch, worktree and PR all survive, and the archived file
+    # keeps their names — but they are ORPHANED: the reseeded copy is a
+    # fresh id with branch/pr cleared, land only reads the live board, and
+    # the PR is left based on an integration branch that has already
+    # landed. Recovering one is a manual merge.
+    unfinished = [t for t in tasks
+                  if t["status"] not in TERMINAL and not recur_at_rest(t)]
     if unfinished and not args.force:
         ids = ", ".join(f"T{t['id']}" for t in unfinished)
         sys.exit(f"error: unfinished tasks: {ids}. Finish them, mark later, "
@@ -4588,14 +5019,20 @@ def cmd_iteration_close(args):
             line += " [not planned]"
         elif t["status"] == "later":
             line += " [later]"
+        elif is_recurring(t):
+            line += f" [recurring {t.get('cadence')}]"
+            if not recur_at_rest(t):
+                line += f" [unfinished: {t['status']}]"
         elif t["status"] != "done":
             line += f" [unfinished: {t['status']}]"
         if t.get("pr"):
             line += f" {t['pr']}"
         entry.append(line)
         # The log is the index; the archived file next to it holds everything.
-        # Shipped records ride along here so the result is visible at a skim.
-        for rec in collect_shipped(t.get("body") or ""):
+        # Shipped/Verified records ride along so the result is visible at a
+        # skim — an umbrella has no ship, so Verified is its only outcome line.
+        body = t.get("body") or ""
+        for rec in collect_shipped(body) + collect_verified(body):
             entry.append("  - " + " ".join(rec.split()))
     log = os.path.join(bw, tdir(scope), "log.md")
     existing = open(log).read() if os.path.exists(log) else "# Iteration log\n"
@@ -4693,7 +5130,7 @@ def cmd_iteration_new(args):
     if reseeded:
         bits = ", ".join(f"T{m['id']} ← {old_idx}/T{oid}"
                          for m, oid in reseeded)
-        print(f"reseeded {len(reseeded)} later task(s): {bits}")
+        print(f"reseeded {len(reseeded)} carried task(s): {bits}")
     print(f"note: switch your checkout when ready: git checkout {args.branch}")
 
 
@@ -4744,7 +5181,9 @@ def main():
     s.add_argument("--desc")
     s.add_argument("--assignee")
     s.add_argument("--kind", default="",
-                   help="optional kind (e.g. umbrella); empty = normal task")
+                   help="optional kind (umbrella, recurring); empty = normal")
+    s.add_argument("--cadence",
+                   help="recurring tasks only: <N><unit>, unit d/w/m (2w, 1m)")
     s.add_argument("--status",
                    choices=["proposed", "backlog", "planned", "later"],
                    default="backlog")
@@ -4753,8 +5192,11 @@ def main():
     s = sub.add_parser("update", help="update task fields")
     s.add_argument("id", type=int)
     for f in ("title", "area", "status", "kind", "assignee", "branch", "pr",
-              "needs", "deps", "desc"):
+              "needs", "deps", "desc", "cadence"):
         s.add_argument(f"--{f}")
+    s.add_argument("--last-run", dest="last_run",
+                   help="recurring tasks only: YYYY-MM-DD of the last run "
+                        "(empty string clears; due date is derived from it)")
     s.add_argument("--append", help="append a paragraph to the body "
                                     "(leaves existing text untouched)")
     s.add_argument("--reason", help="why this task is not being pursued; "
@@ -4779,6 +5221,24 @@ def main():
     s.add_argument("--needs")
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_list)
+
+    s = sub.add_parser("recur", help="recurring tasks: list due, record a run")
+    rsub = s.add_subparsers(dest="recur_cmd", required=True)
+    m = rsub.add_parser("list", help="recurring tasks with derived due dates")
+    m.add_argument("--due", action="store_true",
+                   help="only tasks that are due now or overdue")
+    m = rsub.add_parser("ran", help="record a run: stamp last_run, re-arm")
+    m.add_argument("id", type=int)
+    m.add_argument("--date", help="run date (default today), YYYY-MM-DD")
+    s.set_defaults(fn=cmd_recur)
+
+    s = sub.add_parser("verify",
+                       help="close an umbrella: record how its children met "
+                            "its goal")
+    s.add_argument("id", type=int)
+    s.add_argument("text", help="how the children met the goal; recorded in "
+                                "the body as Verified (<date>): …")
+    s.set_defaults(fn=cmd_verify)
 
     s = sub.add_parser("collisions",
                        help="area occupancy vs doing/review (exit 2 if blocked)")
