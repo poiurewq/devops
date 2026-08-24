@@ -1,8 +1,6 @@
 # TASKS flag wall
 
-Full invocation patterns. SKILL.md keeps the short index and the append /
-error caveats; load this file when a flag is not already spelled in
-SKILL.md or the flow you are following. Do not guess flags.
+Full invocation patterns. SKILL.md keeps the short index and the append / error caveats; load this file when a flag is not already spelled in SKILL.md or the flow you are following. Do not guess flags.
 
 ```
 TASKS --scope <subdir> <subcommand> ...   # target another board in the repo
@@ -37,18 +35,22 @@ TASKS update <id> [--title "<t>"] [--area <m>] [--status <s>]
                                                 # is derived, never stored
           [--status later]                      # park for a later iteration
           [--status not-planned --reason "<why>"]   # reason is required
+                                                # --status draft|review on a
+                                                # task with a PR is refused;
+                                                # use ready / unready
 TASKS verify <id> "<how the children met the goal>"
                                         # close an umbrella; the record is
                                         # required, and --status done on one
                                         # is refused in favour of this
 TASKS delete <id>
 TASKS show <id>
-TASKS collisions <id[,id…]>             # area occupancy vs doing/review;
+TASKS collisions <id[,id…]>             # area occupancy vs doing/draft/review;
                                         # multi-id also prints in-set overlap;
                                         # exit 2 if any blocker is doing;
-                                        # exit 3 if every blocker is review
-                                        # (any assignee) — implement offers
-                                        # proceed / stack / wait, auto skips
+                                        # exit 3 if every blocker's PR is open
+                                        # (draft or review, any assignee) —
+                                        # implement offers proceed / stack /
+                                        # wait, auto skips
                                         # (batch peers excluded from that check)
 TASKS related "<text>"                  # existing tasks similar to <text>;
                                         # run before every add
@@ -98,8 +100,10 @@ TASKS ship <id> --shipped "<what actually shipped>"
                 [--message M] [--title T] [--body B]
                 [--version-intent <intent>] [--base <branch>]
                 [--batch <id,id,…>]     # commit if dirty ([n/T<id>] prefix),
-                                        # push, gh pr create if none open,
-                                        # status=review + pr URL. Re-ship
+                                        # push, gh pr create --draft if none
+                                        # open, status=draft + pr URL (a first
+                                        # ship always lands in draft; only
+                                        # ready promotes it). Re-ship
                                         # reuses the open PR, so --title /
                                         # --body / --version-intent / --base
                                         # apply on create only.
@@ -114,6 +118,16 @@ TASKS ship <id> --shipped "<what actually shipped>"
                                         # if that branch moved since the
                                         # stack); --batch stamps Dev-batch
                                         # on PR + task body
+TASKS ready <id>                        # draft → review: mark the PR ready
+                                        # and hand it to the integrator. The
+                                        # user's call, never an agent's own
+                                        # move; anyone may run it
+TASKS unready <id>                      # review → draft: take the PR back off
+                                        # the integrator's queue. Assignee or
+                                        # integrator only. Both mirror the
+                                        # PR's draft bit; a repo with no draft
+                                        # PRs only warns — the board owns the
+                                        # state
 TASKS batch-gate --ids <id,id,…>        # exit 2 if selection omits an open
                                         # stack parent (child before parent
                                         # is the one land order that still
@@ -134,7 +148,8 @@ TASKS preflight [--park|--discard]      # local integration ahead of origin
                                         # (check exits 2 if in-scope ahead;
                                         # --park / --discard are interactive)
 TASKS land <id>                         # integrator-only merge commit (never
-                                        # squash, never rewrites the branch):
+                                        # squash, never rewrites the branch;
+                                        # refuses a draft — ready it first):
                                         # merge, retarget stacked children to
                                         # integration, cleanup, done
                                         # (recurring: re-arms to backlog

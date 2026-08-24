@@ -1,120 +1,21 @@
 # /dev auto — one autonomous implement cycle
 
-For cron/scheduled or parallel agent sessions with no human present. One
-cycle = at most one shipped implementation (plus any proposals filed along
-the way), or one due recurring run in its place — an audit files proposals
-and ships nothing. Multiple agents may run this concurrently against the
-same board — the claim step is the mutex.
+For cron/scheduled or parallel agent sessions with no human present. One cycle = at most one shipped implementation (plus any proposals filed along the way), or one due recurring run in its place — an audit files proposals and ships nothing. Multiple agents may run this concurrently against the same board — the claim step is the mutex.
 
-**Identity**: the assignee is the model, prefixed: `auto/<model-id>` (e.g.
-`auto/claude-sonnet-5`). Pass it explicitly via `--assignee`; don't overwrite
-a human's product-local `<scope>/.dev/identity`. If this product has no
-identity file, write the auto identity there so script defaults stay sane.
-Run from the product directory or pass `--scope`.
+**Identity**: the assignee is the model, prefixed: `auto/<model-id>` (e.g. `auto/claude-sonnet-5`). Pass it explicitly via `--assignee`; don't overwrite a human's product-local `<scope>/.dev/identity`. If this product has no identity file, write the auto identity there so script defaults stay sane. Run from the product directory or pass `--scope`.
 
-**Hard limits**: never merge or approve a PR, resolve a `needs: decision`
-fork, flip `proposed` to `backlog` (an audit's own findings included), mark
-a task `not-planned` or `later`, delete one, file a recurring task or offer
-to schedule one, or otherwise decide for the human — a pointless-looking
-task gets `needs: decision` with your reasoning instead. Auto files work and
-questions; humans dispose of them via flows/review.md. Never park, discard,
-or reset the local integration branch — that is human-only
-(flows/implement.md preflight).
+**Hard limits**: never merge or approve a PR, mark a draft PR ready for review (or un-ready one), resolve a `needs: decision` fork, flip `proposed` to `backlog` (an audit's own findings included), mark a task `not-planned` or `later`, delete one, file a recurring task or offer to schedule one, or otherwise decide for the human — a pointless-looking task gets `needs: decision` with your reasoning instead. Auto files work and questions; humans dispose of them via flows/review.md. Never park, discard, or reset the local integration branch — that is human-only (flows/implement.md preflight).
 
 ## Cycle
 
-1. **Gate**: `gh auth status` must succeed, else exit reporting why. Then
-   `TASKS preflight` (check only — never `--park` / `--discard` in auto).
-   Exit 2 (in-scope ahead): **stop the cycle** — report the script output and
-   that a human must park-as-PR or discard via interactive implement; do not
-   claim a task. Exit 0 with out-of-scope-only ahead → soft note in the
-   report, continue.
-2. **Select**: **due recurring work comes first** — `TASKS recur list --due`.
-   A recurring task is a candidate only while it is due and eligible on the
-   same terms as any other candidate: `backlog`, unassigned, no `needs` flag
-   (narrower than SKILL.md's *at rest*, which also allows `planned`). One
-   that is not due is never a candidate, here or in the backlog select below.
-   Nothing due → move on; never file a recurring task or offer a cadence.
+1. **Gate**: `gh auth status` must succeed, else exit reporting why. Then `TASKS preflight` (check only — never `--park` / `--discard` in auto). Exit 2 (in-scope ahead): **stop the cycle** — report the script output and that a human must park-as-PR or discard via interactive implement; do not claim a task. Exit 0 with out-of-scope-only ahead → soft note in the report, continue.
+2. **Select**: **due recurring work comes first** — `TASKS recur list --due`. A recurring task is a candidate only while it is due and eligible on the same terms as any other candidate: `backlog`, unassigned, no `needs` flag (narrower than SKILL.md's *at rest*, which also allows `planned`). One that is not due is never a candidate, here or in the backlog select below. Nothing due → move on; never file a recurring task or offer a cadence.
 
-   - **An audit** (a recurring task naming an audit pass — `flows/audit.md`
-     files them as `Recurring audit: <scope>`) **is** the whole cycle. Read
-     its body for scope and emphasis, take it with `TASKS update <id>
-     --status doing --assignee auto/<model>` — that is the mutex, since an
-     audit has no branch to claim — then follow `flows/audit.md`. It edits
-     no files, so area collisions do not gate it. Findings stay `proposed`;
-     auto never approves its own findings nor implements one in the same
-     cycle, and skips audit.md's *Scheduling* offer. Close with `TASKS recur
-     ran <id>` (re-arms to `backlog`, clears the assignee), report one line
-     per filed task, and stop — no ship, no PR. Interrupted before the
-     stamp, the task stays `doing` for a human: never stamp a pass that did
-     not finish.
-   - **Any other due recurring task** runs the normal path below — claim,
-     implement, ship, with the same collision and fork-risk checks as any
-     candidate. `land` re-arms it rather than marking it done.
+   - **An audit** (a recurring task naming an audit pass — `flows/audit.md` files them as `Recurring audit: <scope>`) **is** the whole cycle. Read its body for scope and emphasis, take it with `TASKS update <id> --status doing --assignee auto/<model>` — that is the mutex, since an audit has no branch to claim — then follow `flows/audit.md`. It edits no files, so area collisions do not gate it. Findings stay `proposed`; auto never approves its own findings nor implements one in the same cycle, and skips audit.md's *Scheduling* offer. Close with `TASKS recur ran <id>` (re-arms to `backlog`, clears the assignee), report one line per filed task, and stop — no ship, no PR. Interrupted before the stamp, the task stays `doing` for a human: never stamp a pass that did not finish.
+   - **Any other due recurring task** runs the normal path below — claim, implement, ship, with the same collision and fork-risk checks as any candidate. `land` re-arms it rather than marking it done.
 
-   Otherwise, from `TASKS list --json`, candidates are `backlog` tasks,
-   unassigned, no `needs` flag, all deps `done`. **Never a `kind: umbrella`
-   task** — all-deps-done describes exactly the umbrella that is ready for
-   its verification pass, and that pass is a human judgment auto does not
-   make (SKILL.md *Umbrella close*; `claim` refuses one outright).
-   Exclude on **area grounds**
-   (`TASKS collisions <id>` / SKILL.md *Area stewardship*): exit 2 **or 3**
-   → skip, surface the output (any assignee's `doing` or `review`,
-   including this auto identity's other work). Exit 3 (review-only
-   blockers) offers interactive implement a proceed/stack/wait choice —
-   that is a human call, so auto skips it like any other collision and
-   never stacks. Never pass several candidates as one
-   collisions set — that would treat them as batch peers. Never select an
-   `all` task (those wait for a human-supervised quiet board). Untagged
-   candidates: do not claim and do not invent a placeholder. Recommend a
-   reuse from `TASKS area list` or a new name to `area set`, write the
-   fork (options + recommendation) into the body, and flag `needs:
-   decision` — do not `area set` or `--area` until a human decides via
-   review. File that fork for each otherwise-eligible untagged
-   candidate, then continue select among tagged ones. **Area sanity**: a
-   mis-tag (replace with same-width or narrower) — fix it and note why
-   (`TASKS update <id> --area "<better>" --append "<why>"`). Adding
-   coverage is the leaving-areas fork: do not `--area` or `area set`;
-   write the file(s) and recommended area(s) into the body, flag
-   `needs: decision`, move on. Then triage for **fork risk**: read the task
-   body and skim the code it touches; prefer tasks that are mechanical or
-   fully pinned down (clear scope, `Decision:` lines already present,
-   established patterns). If nothing suitable exists, report that and stop —
-   don't force a risky task.
-3. **Claim**: `TASKS claim <id> --assignee auto/<model>`. If the script
-   errors (e.g. a concurrent claim race on board push), resync and select
-   again. Use the printed `product` dir (workdir is the git worktree root).
-4. **Triage scope** (flows/implement.md step 1, including its
-   one-layer-at-a-time rule — mid-sized subtasks are fine): if oversized,
-   file the subtasks as proposals rather than adding them live — check
-   `TASKS related "<title>"` first and skip ones the board already has, then
-   `TASKS add ... --status proposed`, each body noting "decomposes T<id>:
-   <why>". Then convert the original into an umbrella and un-claim it:
-   `TASKS update <id> --kind umbrella --deps <new-ids> --status backlog
-   --assignee "" --branch "" --append "Decomposed into proposed T<ids>;"`,
-   and return to step 2 (at most once per cycle).
-5. **Implement** per flows/implement.md steps 3–6, with one difference —
-   **fork handling**: on hitting a genuine design fork, do not pick. Write
-   the fork into the task body (question, options, your recommendation), then
-   flag and un-claim: `TASKS update <id> --needs decision --status backlog
-   --assignee "" --branch "" --append "<the fork write-up>"`, discard the
-   branch, and return to step 2. Only flag *genuine* forks — choices repo
-   conventions already settle don't count. Leaving the stated areas
-   (flows/implement.md) is a fork: do not `--area` or `area set`. Write
-   the file(s) and recommended area(s) into the body, then flag and
-   un-claim as above. A `Decision:` already on the body for this
-   widen is prior approval — retry apply+collisions; do not file
-   a second fork.
-   (Local-ahead was already cleared or soft-noted in step 1 — do
-   not re-triage park/discard here.)
-6. **Ship** via `TASKS ship <id> --shipped "<what actually shipped>"` (ends at
-   `--status review --pr <url>`). The shipped record is required — result,
-   not plan; see flows/implement.md step 6.
-   When the product versions, pass `--version-intent` (or the line in
-   `--body`) per flows/implement.md — the script does not default it. If the
-   change is major/breaking, do not ship — flag `needs: decision` like other
-   forks. Then stop and summarize what was shipped, proposed, or flagged
-   (this lands wherever the invoking automation routes reports). If `whoami`
-   is the integrator and something shipped to `review`, add one line: review
-   in a **new** session via `/dev review <id>` (same implement-context rule
-   as flows/implement.md step 7).
+   Otherwise, from `TASKS list --json`, candidates are `backlog` tasks, unassigned, no `needs` flag, all deps `done`. **Never a `kind: umbrella` task** — all-deps-done describes exactly the umbrella that is ready for its verification pass, and that pass is a human judgment auto does not make (SKILL.md *Umbrella close*; `claim` refuses one outright). Exclude on **area grounds** (`TASKS collisions <id>` / SKILL.md *Area stewardship*): exit 2 **or 3** → skip, surface the output (any assignee's `doing`, `draft`, or `review`, including this auto identity's other work). Exit 3 (every blocker's PR already out) offers interactive implement a proceed/stack/wait choice — that is a human call, so auto skips it like any other collision and never stacks. Never pass several candidates as one collisions set — that would treat them as batch peers. Never select an `all` task (those wait for a human-supervised quiet board). Untagged candidates: do not claim and do not invent a placeholder. Recommend a reuse from `TASKS area list` or a new name to `area set`, write the fork (options + recommendation) into the body, and flag `needs: decision` — do not `area set` or `--area` until a human decides via review. File that fork for each otherwise-eligible untagged candidate, then continue select among tagged ones. **Area sanity**: a mis-tag (replace with same-width or narrower) — fix it and note why (`TASKS update <id> --area "<better>" --append "<why>"`). Adding coverage is the leaving-areas fork: do not `--area` or `area set`; write the file(s) and recommended area(s) into the body, flag `needs: decision`, move on. Then triage for **fork risk**: read the task body and skim the code it touches; prefer tasks that are mechanical or fully pinned down (clear scope, `Decision:` lines already present, established patterns). If nothing suitable exists, report that and stop — don't force a risky task.
+3. **Claim**: `TASKS claim <id> --assignee auto/<model>`. If the script errors (e.g. a concurrent claim race on board push), resync and select again. Use the printed `product` dir (workdir is the git worktree root).
+4. **Triage scope** (flows/implement.md step 1, including its one-layer-at-a-time rule — mid-sized subtasks are fine): if oversized, file the subtasks as proposals rather than adding them live — check `TASKS related "<title>"` first and skip ones the board already has, then `TASKS add ... --status proposed`, each body noting "decomposes T<id>: <why>". Then convert the original into an umbrella and un-claim it: `TASKS update <id> --kind umbrella --deps <new-ids> --status backlog --assignee "" --branch "" --append "Decomposed into proposed T<ids>;"`, and return to step 2 (at most once per cycle).
+5. **Implement** per flows/implement.md steps 3–6, with one difference — **fork handling**: on hitting a genuine design fork, do not pick. Write the fork into the task body (question, options, your recommendation), then flag and un-claim: `TASKS update <id> --needs decision --status backlog --assignee "" --branch "" --append "<the fork write-up>"`, discard the branch, and return to step 2. Only flag *genuine* forks — choices repo conventions already settle don't count. Leaving the stated areas (flows/implement.md) is a fork: do not `--area` or `area set`. Write the file(s) and recommended area(s) into the body, then flag and un-claim as above. A `Decision:` already on the body for this widen is prior approval — retry apply+collisions; do not file a second fork. (Local-ahead was already cleared or soft-noted in step 1 — do not re-triage park/discard here.)
+6. **Ship** via `TASKS ship <id> --shipped "<what actually shipped>"` (ends at `--status draft --pr <url>`). The shipped record is required — result, not plan; see flows/implement.md step 6. **Auto ships to `draft` and never promotes**: the PR waits there for a human to review and `TASKS ready`. Running `ready` (or `unready`) is a disposal decision, and this cycle makes none. An `auto/…` draft is nobody's private loop — it shows in every human's review inbox (flows/review.md), because auto has no next session to come back and finish it. When the product versions, pass `--version-intent` (or the line in `--body`) per flows/implement.md — the script does not default it. If the change is major/breaking, do not ship — flag `needs: decision` like other forks. Then stop and summarize what was shipped, proposed, or flagged (this lands wherever the invoking automation routes reports). If something shipped to `draft`, add one line: review it in a **new** session via `/dev review <id>`, which is where a human readies it (same implement-context rule as flows/implement.md step 7).

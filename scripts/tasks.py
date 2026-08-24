@@ -19,6 +19,7 @@ setup, optionally stacked on another task's review tip), `ship`
 (commit/push/PR, PR base derived for a stack; optional Dev-batch stamp),
 `preflight`,
 `restack` (fail-closed stack rebase), `batch-gate` (stack land order),
+`ready` / `unready` (draft ⇄ review, mirrored onto the PR's draft bit),
 `land` / `cleanup`, `iteration-land`. Never auto-approve reviews.
 """
 import argparse
@@ -35,11 +36,12 @@ import sys
 import tempfile
 import time
 
-STATUSES = ["proposed", "backlog", "planned", "doing", "review", "done",
-            "later", "not-planned"]
+STATUSES = ["proposed", "backlog", "planned", "doing", "draft", "review",
+            "done", "later", "not-planned"]
 # Hottest-first list/index. Watch and static `TASKS board` / TASKS.md share
 # this; STATUSES stays the pipeline (validation, rollup counts).
-_WATCH_HEAD = ("review", "doing", "planned", "proposed", "backlog")
+_WATCH_HEAD = ("review", "draft", "doing", "planned", "proposed",
+               "backlog")
 WATCH_STATUSES = [s for s in _WATCH_HEAD if s in STATUSES] + [
     s for s in STATUSES if s not in _WATCH_HEAD]
 # Don't block an iteration close. later is parked (reseeds on iteration-new),
@@ -60,7 +62,10 @@ VIEWER_NAME = "board"
 #    iteration_started added. Pre-3 dated names fail closed (no migrate).
 # 4: kind: recurring, with cadence + last_run frontmatter (additive; both
 #    omitted from the file when empty, so non-recurring tasks are unchanged).
-SCHEMA_VERSION = 4
+# 5: draft status between doing and review. No new fields, but an older
+#    script refuses the value on update and drops those tasks from the
+#    board render (it iterates its own status list).
+SCHEMA_VERSION = 5
 CONFIG_KEYS = ["schema_version", "integration_branch", "parent_branch",
                "iteration", "iteration_name", "iteration_started",
                "integrator", "contributors"]
@@ -948,7 +953,7 @@ def umbrella_rollup(umbrella, tasks):
     done = sum(1 for t in active if t["status"] == "done")
     blocked = 0
     for t in active:
-        if t["status"] in TERMINAL or t["status"] == "review":
+        if t["status"] in TERMINAL or t["status"] in OPEN_PR:
             continue
         if any(by_id.get(d, {}).get("status") != "done" for d in t.get("deps", [])):
             blocked += 1
@@ -993,8 +998,12 @@ def occupies_area(t):
     return t["status"] not in ("done", "not-planned")
 
 
-# doing + review: the in-flight set implement aborts on / auto skips.
-IN_FLIGHT = ("doing", "review")
+# Shipped, not yet landed: there is an open PR either way. `draft` adds
+# "the author is not asking for review yet" — the board owns that state,
+# and the PR's draft bit mirrors it where GitHub supports one.
+OPEN_PR = ("draft", "review")
+# The in-flight set implement negotiates over / auto skips.
+IN_FLIGHT = ("doing",) + OPEN_PR
 
 
 def areas_overlap(a, b):
@@ -1023,7 +1032,7 @@ def task_areas_overlap(a_areas, b_areas):
 
 
 def in_flight_area_collisions(task, tasks, exclude_ids=None):
-    """doing/review tasks whose areas overlap `task`, excluding itself.
+    """In-flight tasks whose areas overlap `task`, excluding itself.
 
     ``exclude_ids`` drops extra ids from the scan (batch peers — they are
     sequential, not outside occupancy).
@@ -1953,10 +1962,47 @@ def merge_fail_permanent_message(err):
     return f"error: merge failed (not retryable):\n{err}"
 
 
+def draft_unsupported(err):
+    """True when gh refused --draft because the repo/plan has no drafts.
+
+    Draft PRs need a paid plan on a private repo. That is a limit of the
+    mirror, not of the board: `draft` stays a real board state there, so
+    ship downgrades the PR, not the task.
+    """
+    e = (err or "").lower()
+    return "draft" in e and any(w in e for w in (
+        "not supported", "unsupported", "not available", "not enabled",
+        "upgrade", "plan"))
+
+
+def sync_pr_draft_bit(root, pr, want_draft):
+    """Mirror the board's draft/review state onto the PR's draft bit.
+
+    The board is the source of truth, so a refusal warns and returns False
+    rather than failing the caller — otherwise a repo without draft PRs
+    could not use the draft state at all. Already in the wanted state is a
+    no-op, which also re-converges a board that drifted from the PR.
+    """
+    info = pr_view(root, pr, soft=True) or {}
+    if info.get("isDraft") is want_draft:
+        return True
+    argv = ["pr", "ready", pr] + (["--undo"] if want_draft else [])
+    r = gh(*argv, cwd=root, check=False)
+    if r.returncode == 0:
+        return True
+    err = (r.stderr or r.stdout or "").strip()
+    want = "draft" if want_draft else "ready"
+    print(f"warning: could not mark the PR {want} (this repo may not "
+          f"support draft PRs); the board state stands:\n{err}",
+          file=sys.stderr)
+    return False
+
+
 def pr_view(root, pr, *, soft=False):
     """JSON fields for land/cleanup. soft=True returns None on failure."""
     r = gh("pr", "view", pr,
-           "--json", "state,mergedAt,mergeable,headRefName,baseRefName,body,url,title",
+           "--json", "state,mergedAt,mergeable,headRefName,baseRefName,"
+           "body,url,title,isDraft",
            cwd=root, check=False)
     if r.returncode != 0:
         err = (r.stderr or r.stdout or "").strip()
@@ -2226,6 +2272,11 @@ def cmd_land(args):
         cleanup_task_artifacts(root, scope, meta, branch)
         return
 
+    if meta["status"] == "draft":
+        sys.exit(f"error: T{tid} is draft — its author has not asked for "
+                 f"review yet. Promote it first: TASKS ready {tid} "
+                 f"(the user's call, not an agent's)")
+
     if not pr:
         # A landed recurring task has no pr: re-arming cleared it. That is the
         # idempotent re-run, not a missing PR — say so instead of asking for
@@ -2435,8 +2486,8 @@ def cmd_claim(args):
         sys.exit(f"error: T{tid} is {status}; cannot claim")
     if status == "proposed":
         sys.exit(f"error: T{tid} is proposed; approve via review before claim")
-    if status == "review":
-        sys.exit(f"error: T{tid} is in review; do not claim — resume via "
+    if status in OPEN_PR:
+        sys.exit(f"error: T{tid} is in {status}; do not claim — resume via "
                  f"diff (handoff: update --assignee first)")
     if (meta.get("needs") or "").strip() == "decision":
         sys.exit(f"error: T{tid} has needs: decision; resolve before claim")
@@ -2569,14 +2620,14 @@ def find_open_pr_for_branch(root, branch, base=""):
 
 
 def attach_review_branch(root, scope, tid, title, branch, integration):
-    """Attach a recorded review branch. Never create from integration."""
+    """Attach a recorded draft/review branch. Never create from integration."""
     remote = f"origin/{branch}"
     if has_remote(root):
         git("fetch", "origin",
             f"+refs/heads/{branch}:refs/remotes/origin/{branch}",
             cwd=root, check=False)
     if not ref_exists(root, remote):
-        sys.exit(f"error: T{tid} is in review but '{branch}' is not "
+        sys.exit(f"error: T{tid} has shipped but '{branch}' is not "
                  f"checked out and {remote} is missing")
     sync_task_branch_from_remote(root, branch)
     ready = resolve_task_ready_path(
@@ -2589,9 +2640,9 @@ def ship_work_cwd(root, scope, meta, branch, integration):
     """Directory that has the task branch checked out for committing/pushing.
 
     Prefer a claim-style linked worktree under .dev/worktrees/; fall back to
-    any checkout of the branch. A review task with no checkout attaches
-    origin/<branch> (never created from integration). Soft-warn when not
-    under .dev/worktrees/.
+    any checkout of the branch. A shipped task (draft/review) with no
+    checkout attaches origin/<branch> (never created from integration).
+    Soft-warn when not under .dev/worktrees/.
     """
     work = None
     for path in find_task_worktree_paths(root, scope, meta["id"], branch):
@@ -2604,7 +2655,7 @@ def ship_work_cwd(root, scope, meta, branch, integration):
     if work is None:
         work = branch_checkout_cwd(root, branch)
     if not work:
-        if (meta.get("status") or "").strip() == "review":
+        if (meta.get("status") or "").strip() in OPEN_PR:
             return attach_review_branch(
                 root, scope, meta["id"], meta["title"], branch, integration)
         sys.exit(f"error: task branch '{branch}' is not checked out anywhere; "
@@ -2623,8 +2674,8 @@ def cmd_diff(args):
     tid = meta["id"]
     branch = task_branch_name(meta)
     if not branch:
-        if meta["status"] == "review":
-            sys.exit(f"error: T{tid} is in review with no branch")
+        if meta["status"] in OPEN_PR:
+            sys.exit(f"error: T{tid} is in {meta['status']} with no branch")
         sys.exit(f"error: T{tid} has no branch; run claim first")
     work = ship_work_cwd(root, scope, meta, branch, integration)
     base = f"origin/{integration}"
@@ -2809,10 +2860,14 @@ def load_task_pr_stack_info(root, bw, scope, tid):
 
 
 def review_stack_infos(root, bw, scope):
-    """PR/stack info for every task currently in review, keyed by id."""
+    """PR/stack info for every task with an open PR, keyed by id.
+
+    Draft included: a child in review can be stacked on a draft parent,
+    and that is precisely the land order batch-gate must refuse.
+    """
     infos = {}
     for t in all_tasks(bw, scope):
-        if t["status"] == "review":
+        if t["status"] in OPEN_PR:
             infos[t["id"]] = load_task_pr_stack_info(root, bw, scope, t["id"])
     return infos
 
@@ -3169,8 +3224,11 @@ def derive_stack_base(root, bw, scope, meta, branch, integration):
 
 
 def cmd_ship(args):
-    """Ship end of implement: commit if needed, push, open PR, mark review.
+    """Ship end of implement: commit if needed, push, open PR, mark draft.
 
+    A first ship always lands in `draft`: the PR is out, but only the
+    user promotes it to `review` (TASKS ready). Re-shipping something
+    already in review leaves it there.
     Mirrors hand-rolled implement ship, with stricter guards: never commit
     .tasks/ paths, refuse empty ship, one push via push_task_branch.
     Version intent is agent-owned (optional --version-intent / --body only).
@@ -3183,9 +3241,11 @@ def cmd_ship(args):
     prefix = title_prefix(idx, tid)
     branch = task_branch_name(meta)
     if not branch:
-        if meta["status"] == "review":
-            sys.exit(f"error: T{tid} is in review with no branch")
+        if meta["status"] in OPEN_PR:
+            sys.exit(f"error: T{tid} is in {meta['status']} with no branch")
         sys.exit(f"error: T{tid} has no branch; run claim first")
+    # Only a re-ship of already-promoted work stays in review.
+    target = "review" if meta["status"] == "review" else "draft"
     if meta["status"] in ("done", "later", "not-planned", "proposed"):
         sys.exit(f"error: T{tid} is {meta['status']}; cannot ship")
 
@@ -3290,8 +3350,17 @@ def cmd_ship(args):
         if batch_line:
             body = ensure_dev_batch_in_text(body, batch_ids)
         body = ensure_shipped_in_text(body, shipped_records)
-        r = gh("pr", "create", "--base", pr_base, "--head", branch,
-               "--title", title, "--body", body, cwd=root, check=False)
+        create = ["pr", "create", "--base", pr_base, "--head", branch,
+                  "--title", title, "--body", body]
+        argv = create + ["--draft"] if target == "draft" else create
+        r = gh(*argv, cwd=root, check=False)
+        if r.returncode != 0 and draft_unsupported(r.stderr or r.stdout or ""):
+            # The board owns `draft`; the PR's draft bit only mirrors it
+            # where GitHub offers one. Never block a ship over the mirror.
+            print(f"warning: this repo cannot open draft PRs; opening a "
+                  f"normal PR — T{tid} is still draft on the board",
+                  file=sys.stderr)
+            r = gh(*create, cwd=root, check=False)
         if r.returncode != 0:
             err = (r.stderr or r.stdout or "").strip()
             pr_url = find_open_pr_for_branch(root, branch, pr_base)
@@ -3325,9 +3394,9 @@ def cmd_ship(args):
     integration, bw = resolve_board(root, scope)
     meta = find_task(bw, scope, tid)
     changes = []
-    if meta["status"] != "review":
-        meta["status"] = "review"
-        changes.append("status=review")
+    if meta["status"] != target:
+        meta["status"] = target
+        changes.append(f"status={target}")
     if meta.get("pr") != pr_url:
         meta["pr"] = pr_url
         changes.append(f"pr={pr_url}")
@@ -3344,6 +3413,69 @@ def cmd_ship(args):
                      f"dev: update T{tid} ({', '.join(changes)})")
         print(f"T{tid} updated: {', '.join(changes)}")
     print(f"T{tid}: shipped → {pr_url}")
+    if target == "draft":
+        print(f"  draft: not asking for review yet — TASKS ready {tid} "
+              f"when it is (the user's call)")
+
+
+def set_task_status(root, scope, integration, bw, meta, status):
+    """Write one status change and commit it to the board."""
+    meta["status"] = status
+    with open(meta["path"], "w") as f:
+        f.write(render_task(meta))
+    board_commit(root, integration, bw, scope,
+                 f"dev: update T{meta['id']} (status={status})")
+
+
+def cmd_ready(args):
+    """draft → review: hand the PR to the integrator.
+
+    Never automatic. Promoting is the user's call (SKILL.md *Humans
+    decide; agents draft*) — that gate is the whole point of `draft`.
+    """
+    root, scope, integration, bw = ctx()
+    meta = find_task(bw, scope, args.id)
+    tid = meta["id"]
+    if meta["status"] != "draft":
+        sys.exit(f"error: T{tid} is {meta['status']}, not draft; only a "
+                 f"draft is marked ready for review")
+    pr = (meta.get("pr") or "").strip()
+    if not pr:
+        sys.exit(f"error: T{tid} is draft with no PR URL; ship it first")
+    require_gh(root)
+    sync_pr_draft_bit(root, pr, False)
+    set_task_status(root, scope, integration, bw, meta, "review")
+    print(f"T{tid}: ready for review → {pr}")
+
+
+def cmd_unready(args):
+    """review → draft: take a PR back off the integrator's queue.
+
+    The assignee owns the branch, so they may pull their own work back
+    (shipped, then spotted more to do); the integrator may pull anything
+    back. Nobody else — this moves someone else's work.
+    """
+    root, scope, integration, bw = ctx()
+    meta = find_task(bw, scope, args.id)
+    tid = meta["id"]
+    if meta["status"] != "review":
+        sys.exit(f"error: T{tid} is {meta['status']}, not review; "
+                 f"nothing to take back")
+    pr = (meta.get("pr") or "").strip()
+    if not pr:
+        sys.exit(f"error: T{tid} is in review with no PR URL")
+    ident = identity_or_exit(root, scope)
+    assignee = (meta.get("assignee") or "").strip()
+    integrator = (read_board_cfg(bw, scope).get("integrator") or "").strip()
+    if ident != assignee and ident != integrator:
+        sys.exit(f"error: only T{tid}'s assignee "
+                 f"({assignee or 'unassigned'}) or the integrator "
+                 f"({integrator or 'unset'}) can unready it "
+                 f"(whoami='{ident}')")
+    require_gh(root)
+    sync_pr_draft_bit(root, pr, True)
+    set_task_status(root, scope, integration, bw, meta, "draft")
+    print(f"T{tid}: back to draft → {pr}")
 
 
 def scope_path_is_in_scope(scope, path):
@@ -3946,6 +4078,10 @@ def cmd_update(args):
                  f"status flip; record the verification instead: TASKS verify "
                  f"{meta['id']} \"<how the children met the goal>\" "
                  f"(or /dev implement {meta['id']} to do that pass)")
+    if args.status in OPEN_PR and (meta.get("pr") or "").strip():
+        sys.exit(f"error: T{meta['id']} has a PR; draft and review are not "
+                 f"set by hand — they move with the PR: TASKS ready "
+                 f"{meta['id']} / TASKS unready {meta['id']}")
     if meta["status"] == "doing":
         undone = [d for d in meta["deps"]
                   if find_task(bw, scope, d)["status"] != "done"]
@@ -4093,17 +4229,19 @@ def cmd_verify(args):
 
 
 def cmd_collisions(args):
-    """Area occupancy vs doing/review. Exit 2 blocked, 3 review-only.
+    """Area occupancy vs in-flight work. Exit 2 blocked, 3 PR open.
 
     One id matches watch-mode. Several ids: each vs in-flight *outside*
     the set (batch peers are sequential); then ``set:`` lines for
     in-set area overlap (informational, does not fail).
 
-    Exit 3 when every blocker is in ``review`` (any assignee): the work
-    is reviewed and about to land, so implement offers proceed / stack /
-    wait rather than aborting (flows/implement.md). A single ``doing``
-    blocker is unreviewed and still moving — that stays exit 2, and auto
-    skips both.
+    Exit 3 when every blocker already has a PR open (``draft`` or
+    ``review``, any assignee): there is a pushed tip to stack on, so
+    implement offers proceed / stack / wait rather than aborting
+    (flows/implement.md). Draft counts because a slow draft must not park
+    the areas it touches — its PR is out, whether or not its author has
+    asked for review yet. A single ``doing`` blocker has nothing pushed to
+    build on and is still moving — that stays exit 2, and auto skips both.
     """
     root, scope, branch, bw = ctx()
     tasks = all_tasks(bw, scope)
@@ -4129,11 +4267,11 @@ def cmd_collisions(args):
     if not blockers:
         return
     all_hits = [blockers[i] for i in sorted(blockers)]
-    if all(o.get("status") == "review" for o in all_hits):
+    if all(o.get("status") in OPEN_PR for o in all_hits):
         bits = ", ".join(
-            f"T{o['id']} ({o.get('assignee') or 'unassigned'})"
+            f"T{o['id']} [{o['status']}] ({o.get('assignee') or 'unassigned'})"
             for o in all_hits)
-        print(f"review-only: {bits} — proceed, stack, or wait "
+        print(f"pr-open: {bits} — proceed, stack, or wait "
               f"(flows/implement.md)")
         sys.exit(3)
     sys.exit(2)
@@ -4146,6 +4284,7 @@ _STATUS_COLOR = {
     "backlog": "34",      # blue
     "planned": "36",      # cyan
     "doing": "33",        # yellow
+    "draft": "2;35",      # dim magenta — review's colour, muted
     "review": "35",       # magenta
     "done": "32",         # green
     "later": "2",
@@ -4204,7 +4343,7 @@ def fmt_line(t, tasks, color=False):
     if is_umbrella(t):
         roll = umbrella_rollup(t, tasks)
         parts.append(_ansi(_DIM, roll) if color else roll)
-    elif blocked and t["status"] not in ("review",) + TERMINAL:
+    elif blocked and t["status"] not in OPEN_PR + TERMINAL:
         blk = f"⊘blocked-by:{','.join(str(d) for d in t['deps'])}"
         parts.append(_ansi(_ERR, blk) if color else blk)
     return " ".join(parts)
@@ -4971,7 +5110,7 @@ def cmd_iteration_close(args):
     # A recurring task at rest is perpetual, never "finished", so it does not
     # block a close: it archives like everything else and iteration-new
     # reseeds it, the same way later tasks carry over. One with a run in
-    # flight (doing/review) still blocks. Nothing is deleted by a --force
+    # flight (doing/draft/review) still blocks. Nothing is deleted by a --force
     # close — branch, worktree and PR all survive, and the archived file
     # keeps their names — but they are ORPHANED: the reseeded copy is a
     # fresh id with branch/pr cleared, land only reads the live board, and
@@ -5241,7 +5380,8 @@ def main():
     s.set_defaults(fn=cmd_verify)
 
     s = sub.add_parser("collisions",
-                       help="area occupancy vs doing/review (exit 2 if blocked)")
+                       help="area occupancy vs in-flight work "
+                            "(exit 2 blocked, 3 PR open)")
     s.add_argument("ids", nargs="+",
                    help="task id(s), e.g. 12 or 12,15,18")
     s.set_defaults(fn=cmd_collisions)
@@ -5310,7 +5450,8 @@ def main():
     s.set_defaults(fn=cmd_diff)
 
     s = sub.add_parser("ship",
-                       help="implement ship: commit [n/T<id>], push, open PR, status=review")
+                       help="implement ship: commit [n/T<id>], push, open "
+                            "draft PR, status=draft")
     s.add_argument("id", type=int)
     s.add_argument("--message", "-m",
                    help="commit message if worktree dirty "
@@ -5337,6 +5478,17 @@ def main():
                         "the task body as 'Shipped (<date>): …' and mirrored "
                         "onto the PR body on create and every re-ship")
     s.set_defaults(fn=cmd_ship)
+
+    s = sub.add_parser("ready",
+                       help="draft → review: mark the PR ready (user's call)")
+    s.add_argument("id", type=int)
+    s.set_defaults(fn=cmd_ready)
+
+    s = sub.add_parser("unready",
+                       help="review → draft: take a PR back "
+                            "(assignee or integrator)")
+    s.add_argument("id", type=int)
+    s.set_defaults(fn=cmd_unready)
 
     s = sub.add_parser("batch-gate",
                        help="exit 2 if --ids omits an open stack parent "
