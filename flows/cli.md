@@ -8,14 +8,26 @@ TASKS --scope <subdir> <subcommand> ...   # target another board in the repo
 TASKS init --name <handle> [--scope <subdir>] [--integration <branch>]
            [--parent <branch>] [--iteration N] [--iteration-name <name>]
            [--iteration-started YYYY-MM-DD]
-TASKS whoami                            # this checkout's identity (exits
-                                        # nonzero if not set)
-TASKS config [<key> [<value>]]          # settable: integrator, parent_branch,
+TASKS whoami [--role]                   # this checkout's identity (exits
+                                        # nonzero if not set); --role prints
+                                        # this identity's board role instead,
+                                        # 'integrator' or 'contributor' — the
+                                        # only way to ask, never compare
+                                        # identities against board config
+TASKS config [<key> [<value>]]          # settable: parent_branch,
                                         # iteration (renumber live index;
                                         # refused if that n is archived),
                                         # iteration_name, iteration_started
                                         # (all three refused once
-                                        # closed-not-landed)
+                                        # closed-not-landed). integrator is
+                                        # readable here but set below
+TASKS integrator list                   # who may land, '(you)' on the current
+                                        # identity
+TASKS integrator add <name>             # grant the role (idempotent)
+TASKS integrator rm <name>              # revoke it; refused for the last one
+                                        # (an empty roster blocks land for
+                                        # everyone). Ungated: any contributor
+                                        # may run add/rm
 TASKS area list
 TASKS area set <name> [--desc "<one-line scope>"]
 TASKS area rm <name> [--force]
@@ -147,7 +159,8 @@ TASKS restack --ids <id,id,…> [--after N] [--onto <ref>]
 TASKS preflight [--park|--discard]      # local integration ahead of origin
                                         # (check exits 2 if in-scope ahead;
                                         # --park / --discard are interactive)
-TASKS land <id>                         # integrator-only merge commit (never
+TASKS land <id>                         # integrator-only (any name on the
+                                        # roster) merge commit (never
                                         # squash, never rewrites the branch;
                                         # refuses a draft — ready it first):
                                         # merge, retarget stacked children to

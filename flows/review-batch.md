@@ -38,11 +38,11 @@ For each member (any order for reading; prefer stack bottom→top for context):
 
 Repeat until every open member is approved or the user abandons the batch.
 
-**Integrator sugar (a set of your own drafts)**: when `TASKS whoami` equals the board `integrator` and every `draft` member is assigned to them or to an `auto/…` identity (the batch form of the sugar in flows/review.md), there is no handoff to wait for. Once the whole set is approved, offer **ready + land** as one step; on the user's go-ahead, `TASKS ready <id>` each draft member — land refuses a draft, so promotion comes first for all of them — and then run phase 2's land wave in order. One explicit go-ahead covers the set, but never chain it silently, and never ready a member the user did not approve. A `draft` assigned to another human is outside the sugar: name it, promote nothing, and land it only after its author readies it.
+**Integrator sugar (a set of your own drafts)**: when `TASKS whoami --role` prints `integrator` and every `draft` member is assigned to this user or to an `auto/…` identity (the batch form of the sugar in flows/review.md), there is no handoff to wait for. Once the whole set is approved, offer **ready + land** as one step; on the user's go-ahead, `TASKS ready <id>` each draft member — land refuses a draft, so promotion comes first for all of them — and then run phase 2's land wave in order. One explicit go-ahead covers the set, but never chain it silently, and never ready a member the user did not approve. A `draft` assigned to another human is outside the sugar: name it, promote nothing, and land it only after its author readies it.
 
 ### 2. Phase 2 — Ordered land
 
-If `whoami` is not the board integrator, do not enter this phase. Report approvals and say only the integrator can land. Every member must also be in `review` — `land` refuses a `draft`; if any is still draft, name it and stop (its author, or the user, readies it first — the sugar above does exactly that for the integrator's own drafts).
+If `TASKS whoami --role` does not print `integrator`, do not enter this phase. Report approvals and say only the integrator can land. Every member must also be in `review` — `land` refuses a `draft`; if any is still draft, name it and stop (its author, or the user, readies it first — the sugar above does exactly that for the integrator's own drafts).
 
 Order edges = **union of**:
 
@@ -58,4 +58,4 @@ For each id in order:
 
 ### 3. Report
 
-What was approved, restacked, landed, or left open. If `whoami` equals `TASKS config integrator` and work remains, note it — but don't auto-start another review cycle in the same breath as implement (implement wrap-up still prefers a new session; review-batch itself is already the review session). Do not tell a non-match they are the integrator.
+What was approved, restacked, landed, or left open. If `TASKS whoami --role` prints `integrator` and work remains, note it — but don't auto-start another review cycle in the same breath as implement (implement wrap-up still prefers a new session; review-batch itself is already the review session). Do not tell a non-match they are the integrator.

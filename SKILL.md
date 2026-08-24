@@ -22,9 +22,10 @@ TASKS --scope <subdir> <subcommand> ...
 TASKS init --name <handle> [--scope <subdir>] [--integration <branch>]
            [--parent <branch>] [--iteration N] [--iteration-name <name>]
            [--iteration-started YYYY-MM-DD]
-TASKS whoami
-TASKS config [<key> [<value>]]          # integrator, parent_branch, iteration,
+TASKS whoami [--role]                   # --role: integrator | contributor
+TASKS config [<key> [<value>]]          # parent_branch, iteration,
                                         # iteration_name, iteration_started
+TASKS integrator list | add <name> | rm <name>
 TASKS area list | set <name> [--desc "<one-line scope>"] | rm <name> [--force]
 TASKS add --title "<title>" [--area <m>] [--deps <id,id>]
           [--desc "<1–3 sentences>"] [--assignee <who>]
@@ -114,8 +115,9 @@ Statuses: `proposed` (auto-filed, awaiting human approval) → `backlog` → `pl
 | `/dev delete <id>` | Confirm, then `TASKS delete <id>`. |
 | `/dev drop <id>` / "we're not doing this" | Not planned, below — offer delete as the alternative and let the user pick. |
 | `/dev show <id>` | `TASKS show <id>`. |
-| `/dev config [key] [value]` | `TASKS config ...` (settable: integrator, parent_branch, iteration, iteration_name, iteration_started). |
+| `/dev config [key] [value]` | `TASKS config ...` (settable: parent_branch, iteration, iteration_name, iteration_started). Who may land is `TASKS integrator list|add <name>|rm <name>` — see Branch & role conventions. |
 | `/dev area ...` | Area stewardship, below. |
+| `/dev integrator ...` | `TASKS integrator list|add <name>|rm <name>` — who may land; see Branch & role conventions. |
 | `/dev skill` | Read `flows/skill.md` (`SKILL_CMD status`). |
 | `/dev skill update` | Read `flows/skill.md` (`SKILL_CMD update`). |
 | `/dev skill update auto on/off` | Read `flows/skill.md` (`SKILL_CMD auto on/off`). |
@@ -180,12 +182,12 @@ For tasks in `draft` or `review` with a `pr`, when gh is available: `gh pr view 
 - `draft` → not on the integrator's queue. If it is **yours**, it is your move, and it belongs in your own review inbox: review it (`/dev review <id>`) or keep building (flows/implement.md), then `TASKS ready <id>` when you want eyes on it. An `auto/…` draft is listed the same way for whoever is here — auto cannot promote its own work and never returns. Another human's draft is never listed — not as a review item, not as information — and is never yours to `ready`.
 - Merged → `TASKS land <id>` (marks done, cleans local worktree/branch; safe if already done). If land/cleanup aborts, surface the script error — do not mark done by hand.
 - `CHANGES_REQUESTED` → the assignee's move; surface it (resume path in flows/implement.md).
-- `APPROVED` and unmerged → if `whoami` is the integrator, ready to land via review; otherwise waiting on the integrator.
+- `APPROVED` and unmerged → if `TASKS whoami --role` prints `integrator`, ready to land via review; otherwise waiting on the integrator.
 - Closed unmerged → flag it; only prompt for a decision if the current user is the assignee or integrator.
 
 ## Branch & role conventions
 
 - Branch-per-task: `dev/<id>-<slug>` (scoped boards: `dev/<scope-with-/->-<id>-<slug>`), owned by the task's assignee, short-lived, merged promptly via PR with a merge commit. Land never rewrites a task branch: divergence is absorbed by the merge, and a conflict or stale branch is merged forward (never rebased) so PRs stacked on it stay valid.
 - Review: anyone except the task's assignee; the integrator may review anything, including their own work. A `draft` is the exception — it is the author's own review loop until they `ready` it, except an `auto/…` draft, which any human may review and ready. Land: only the integrator (`TASKS land` refuses a live merge otherwise; already-merged cleanup stays allowed).
-- The `integrator` (default: board creator; `/dev config integrator <name>`) owns the integration branch: default reviewer, conflict arbitration, iteration close, and land.
+- The **integrator** role owns the integration branch: default reviewer, conflict arbitration, iteration close, and land. Ask the script who holds it — `TASKS whoami --role` prints `integrator` or `contributor` for the current identity — and never compare identities yourself. The board creator gets the role at init; `TASKS integrator list | add <name> | rm <name>` reads and changes it (a board may hold the role in more than one pair of hands; the last one cannot be removed, since an empty roster blocks land for everyone).
 - Code branches contain code only; the board never rides them — `.tasks/` may appear in a feature checkout (inherited from integration), which is fine as long as the PR does not modify it.

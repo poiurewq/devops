@@ -65,11 +65,15 @@ VIEWER_NAME = "board"
 # 5: draft status between doing and review. No new fields, but an older
 #    script refuses the value on update and drops those tasks from the
 #    board render (it iterates its own status list).
-SCHEMA_VERSION = 5
+# 6: the integrator field is a comma-separated roster. A one-name board is
+#    byte-identical to schema 5; on a multi-integrator board an older script
+#    fails closed (it compares the whole joined string, so land refuses for
+#    everyone) rather than granting anyone merge rights it should not.
+SCHEMA_VERSION = 6
 CONFIG_KEYS = ["schema_version", "integration_branch", "parent_branch",
                "iteration", "iteration_name", "iteration_started",
                "integrator", "contributors"]
-SETTABLE_KEYS = ["parent_branch", "integrator", "iteration",
+SETTABLE_KEYS = ["parent_branch", "iteration",
                  "iteration_name", "iteration_started"]
 # kind: optional. "" = normal task; "umbrella" = goal parent whose deps are
 # direct children (leaves or nested umbrellas); "recurring" = perpetual task
@@ -680,6 +684,18 @@ def read_board_cfg(bw, scope):
     # Schema 3: identity is a positive integer. No migrate-on-read.
     iteration_index(cfg)
     return cfg
+
+
+def board_integrators(cfg):
+    """The integrator roster: one comma-separated board.yml key, not a list
+    of keys, so a single-integrator board writes exactly what it always did.
+    Callers ask this or is_integrator(); nothing else splits the field."""
+    return [n.strip() for n in (cfg.get("integrator") or "").split(",")
+            if n.strip()]
+
+
+def is_integrator(ident, cfg):
+    return ident in board_integrators(cfg)
 
 
 def write_board_cfg(bw, scope, cfg):
@@ -2246,7 +2262,7 @@ def note_version_intent(intent, integration, product):
 def cmd_land(args):
     """Post-approval land: merge, retarget children, cleanup.
 
-    Merge is integrator-only (whoami == board integrator). Already-merged
+    Merge is integrator-only (whoami on the integrator roster). Already-merged
     and already-done paths are cleanup and stay allowed for anyone so
     board/status/review refresh can mark done.
     Merges with a merge commit and never rewrites the task branch: the
@@ -2323,13 +2339,13 @@ def cmd_land(args):
         sys.exit(f"error: T{tid} PR is closed without merge: {pr}")
 
     ident = identity_or_exit(root, scope)
-    integrator = (read_board_cfg(bw, scope).get("integrator") or "").strip()
-    if not integrator:
+    integrators = board_integrators(read_board_cfg(bw, scope))
+    if not integrators:
         sys.exit("error: no integrator configured; cannot land. "
-                 "Set: TASKS config integrator <name>")
-    if ident != integrator:
-        sys.exit(f"error: only the board integrator can land "
-                 f"(whoami='{ident}', integrator='{integrator}')")
+                 "Set: TASKS integrator add <name>")
+    if ident not in integrators:
+        sys.exit(f"error: only a board integrator can land "
+                 f"(whoami='{ident}', integrator: {', '.join(integrators)})")
 
     if base and base != integration:
         sys.exit(f"error: T{tid} PR base is '{base}', board integration is "
@@ -3466,11 +3482,11 @@ def cmd_unready(args):
         sys.exit(f"error: T{tid} is in review with no PR URL")
     ident = identity_or_exit(root, scope)
     assignee = (meta.get("assignee") or "").strip()
-    integrator = (read_board_cfg(bw, scope).get("integrator") or "").strip()
-    if ident != assignee and ident != integrator:
+    integrators = board_integrators(read_board_cfg(bw, scope))
+    if ident != assignee and ident not in integrators:
         sys.exit(f"error: only T{tid}'s assignee "
-                 f"({assignee or 'unassigned'}) or the integrator "
-                 f"({integrator or 'unset'}) can unready it "
+                 f"({assignee or 'unassigned'}) or a board integrator "
+                 f"({', '.join(integrators) or 'unset'}) can unready it "
                  f"(whoami='{ident}')")
     require_gh(root)
     sync_pr_draft_bit(root, pr, True)
@@ -3910,6 +3926,14 @@ def cmd_whoami(args):
         id_path = os.path.join(product_root(root, scope), ".dev", "identity")
         sys.exit(f"error: no identity set for this product "
                  f"({id_path}). Run: init --name <handle>")
+    if args.role:
+        # The board answers "am I an integrator?" so callers never have to
+        # compare identities themselves — and so the roster's shape stays
+        # the script's business.
+        _branch, bw = resolve_board(root, scope)
+        cfg = read_board_cfg(bw, scope)
+        print("integrator" if is_integrator(ident, cfg) else "contributor")
+        return
     print(ident)
 
 
@@ -3925,6 +3949,10 @@ def cmd_config(args):
             sys.exit(f"error: unknown key '{args.key}' (known: {', '.join(CONFIG_KEYS)})")
         print(cfg.get(args.key, ""))
     else:
+        if args.key == "integrator":
+            sys.exit("error: the integrator roster is not set via config; "
+                     "use TASKS integrator add <name> / rm <name> "
+                     "(TASKS integrator list to read it)")
         if args.key not in SETTABLE_KEYS:
             sys.exit(f"error: '{args.key}' is not settable via config "
                      f"(settable: {', '.join(SETTABLE_KEYS)})")
@@ -3964,6 +3992,46 @@ def cmd_config(args):
         write_board_cfg(bw, scope, cfg)
         board_commit(root, branch, bw, scope, f"dev: config {args.key}={value}")
         print(f"{args.key}: {value}")
+
+
+def cmd_integrator(args):
+    """CRUD the roster. Ungated on purpose: the board coordinates trusted
+    collaborators, and the real merge gate is branch protection — but the
+    last integrator cannot be removed, since an empty roster makes land
+    impossible for everyone."""
+    root, scope, branch, bw = ctx()
+    cfg = read_board_cfg(bw, scope)
+    roster = board_integrators(cfg)
+    if args.action == "list":
+        ident = read_local(root, scope, "identity")
+        for name in roster:
+            print(f"{name}{'  (you)' if name == ident else ''}")
+        if not roster:
+            print("(no integrator configured; land is blocked until one is "
+                  "set: TASKS integrator add <name>)")
+        return
+    name = args.name.strip()
+    if not name or "," in name:
+        sys.exit("error: integrator name must be non-empty and comma-free")
+    if args.action == "add":
+        if name in roster:
+            print(f"integrator: {', '.join(roster)} (unchanged)")
+            return
+        roster.append(name)
+    else:
+        if name not in roster:
+            sys.exit(f"error: '{name}' is not an integrator "
+                     f"(integrator: {', '.join(roster) or 'unset'})")
+        if len(roster) == 1:
+            sys.exit(f"error: '{name}' is the only integrator; removing them "
+                     "would block land for everyone. Add a replacement first: "
+                     "TASKS integrator add <name>")
+        roster.remove(name)
+    cfg["integrator"] = ", ".join(roster)
+    write_board_cfg(bw, scope, cfg)
+    board_commit(root, branch, bw, scope,
+                 f"dev: integrator {args.action} {name}")
+    print(f"integrator: {', '.join(roster)}")
 
 
 def cmd_area(args):
@@ -5295,12 +5363,24 @@ def main():
     s.set_defaults(fn=cmd_init)
 
     s = sub.add_parser("whoami", help="print this checkout's identity")
+    s.add_argument("--role", action="store_true",
+                   help="print this identity's board role instead: "
+                        "'integrator' or 'contributor'")
     s.set_defaults(fn=cmd_whoami)
 
     s = sub.add_parser("config", help="show or set board settings")
     s.add_argument("key", nargs="?")
     s.add_argument("value", nargs="?")
     s.set_defaults(fn=cmd_config)
+
+    s = sub.add_parser("integrator", help="manage the board's integrator roster")
+    isub = s.add_subparsers(dest="action", required=True)
+    m = isub.add_parser("list", help="who may land on this board")
+    m = isub.add_parser("add", help="grant the integrator role")
+    m.add_argument("name")
+    m = isub.add_parser("rm", help="revoke the integrator role")
+    m.add_argument("name")
+    s.set_defaults(fn=cmd_integrator)
 
     s = sub.add_parser("area", help="manage the board's area list")
     msub = s.add_subparsers(dest="action", required=True)
