@@ -254,7 +254,7 @@ def append_ignore_line(path, line):
 # Thin wrapper init writes. __TASKS_PY__ is replaced with repr(path).
 BOARD_VIEWER_SCRIPT = '''\
 #!/usr/bin/env python3
-"""Local board viewer (r/a/e/q; arrows scroll; type id↵). `./board update` rewrites this file from the installed skill. Written by dev init; left alone if you edit it."""
+"""Local board viewer (r/a/e/c/q; arrows scroll; type id↵). `./board update` rewrites this file from the installed skill. Written by dev init; left alone if you edit it."""
 import os, sys
 TASKS = __TASKS_PY__
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
@@ -1110,13 +1110,25 @@ def format_area_collisions(task, blockers, color=False):
     return f"{head} — {blocked}: {', '.join(bits)}"
 
 
+def watch_missing_tid(tid, color=False):
+    msg = f"T{tid} — no such task"
+    return _ansi(_ERR, msg) if color else msg
+
+
 def watch_collision_line(tid, tasks, color=False):
     task = next((t for t in tasks if t["id"] == tid), None)
     if task is None:
-        msg = f"T{tid} — no such task"
-        return _ansi(_ERR, msg) if color else msg
+        return watch_missing_tid(tid, color=color)
     return format_area_collisions(
         task, in_flight_area_collisions(task, tasks), color=color)
+
+
+def watch_task_view(tid, tasks):
+    """Frontmatter + body for the live viewer, or None if missing."""
+    task = next((t for t in tasks if t["id"] == tid), None)
+    if task is None:
+        return None
+    return render_task(task).rstrip()
 
 
 def parse_watch_tid(buf):
@@ -1494,13 +1506,58 @@ def find_task_worktree_paths(root, scope, tid, branch):
     return found
 
 
+def _git_path(cwd, name):
+    """Absolute path from `git rev-parse --git-path name` in `cwd`."""
+    if not cwd:
+        return ""
+    r = git("rev-parse", "--git-path", name, cwd=cwd, check=False)
+    path = (r.stdout or "").strip()
+    if r.returncode != 0 or not path:
+        return ""
+    if not os.path.isabs(path):
+        path = os.path.join(cwd, path)
+    return path
+
+
+def rebase_head_branch(cwd):
+    """Branch being rebased in `cwd`, or None if no in-progress rebase.
+
+    Mid-rebase, `git worktree list` reports the worktree as detached; the
+    branch name lives in rebase-merge/head-name (or rebase-apply).
+    """
+    for name in ("rebase-merge/head-name", "rebase-apply/head-name"):
+        path = _git_path(cwd, name)
+        if path and os.path.isfile(path):
+            raw = open(path).read().strip()
+            if raw.startswith("refs/heads/"):
+                return raw[len("refs/heads/"):]
+            return raw or None
+    return None
+
+
+def rebase_onto_sha(cwd):
+    """Commit an in-progress rebase in `cwd` is replaying onto, or None."""
+    for name in ("rebase-merge/onto", "rebase-apply/onto"):
+        path = _git_path(cwd, name)
+        if path and os.path.isfile(path):
+            return open(path).read().strip() or None
+    return None
+
+
 def branch_checkout_cwd(root, branch):
-    """Worktree path that has `branch` checked out, or None."""
+    """Worktree path that has `branch` checked out, or None.
+
+    Includes a worktree whose rebase is in progress on `branch` (porcelain
+    lists those as detached).
+    """
     if not branch:
         return None
     for t in list_worktrees(root):
+        path = t.get("path")
         if t.get("branch") == branch:
-            return t["path"]
+            return path
+        if path and rebase_head_branch(path) == branch:
+            return path
     return None
 
 
@@ -1526,19 +1583,20 @@ def rebase_in_progress(cwd):
     if not cwd:
         return False
     for name in ("rebase-merge", "rebase-apply"):
-        r = git("rev-parse", "--git-path", name, cwd=cwd, check=False)
-        path = (r.stdout or "").strip()
-        if r.returncode == 0 and path and os.path.isdir(path):
+        path = _git_path(cwd, name)
+        if path and os.path.isdir(path):
             return True
     return False
 
 
-def sync_task_branch_from_remote(root, branch):
+def sync_task_branch_from_remote(root, branch, keep_ahead=False):
     """Point local task branch at origin/<branch> when that ref exists.
 
     Restack and review-attach should start from the PR tip, not a stale
     local ref. Refuses when local is strictly ahead of origin (would
-    discard unpushed commits via reset/--force branch move).
+    discard unpushed commits via reset/--force branch move), unless
+    keep_ahead: restack keeps rewritten local commits (a rebase rewrites
+    SHAs, so the same patches look 'ahead') and the caller force-pushes.
     """
     remote = f"origin/{branch}"
     if not ref_exists(root, remote):
@@ -1548,6 +1606,8 @@ def sync_task_branch_from_remote(root, branch):
     ahead = git("rev-list", "--count", f"{remote}..{branch}",
                 cwd=root).stdout.strip()
     if ahead not in ("", "0"):
+        if keep_ahead:
+            return
         sys.exit(f"error: local '{branch}' is {ahead} commit(s) ahead of "
                  f"{remote}; not discarding unpushed commits "
                  f"(reset to {remote} if this leftover is stale)")
@@ -1570,9 +1630,94 @@ def _rebase_argv(upstream, old_base=None):
     return ["rebase", upstream]
 
 
+def _onto_label(upstream, old_base=None):
+    return f"{upstream} (excluding {old_base})" if old_base else upstream
+
+
+def _unmerged_paths(cwd):
+    r = git("diff", "--name-only", "--diff-filter=U", cwd=cwd, check=False)
+    return [p for p in (r.stdout or "").splitlines() if p]
+
+
+def _exit_conflicted_rebase(branch, onto, checkout, err=""):
+    """Leave the rebase in progress; tell the caller to resolve and re-run."""
+    files = _unmerged_paths(checkout)
+    listed = "".join(f"\n  {p}" for p in files)
+    extra = f"\nUnmerged:{listed}" if files else ""
+    detail = f"\n{err}" if err else ""
+    sys.exit(f"error: rebase of '{branch}' onto {onto} conflicted in "
+             f"{checkout}. Resolve, git add, then re-run restack."
+             f"{extra}{detail}")
+
+
+def _git_no_editor(*args, cwd=None):
+    """git with GIT_EDITOR=true so rebase --continue does not open an editor."""
+    env = os.environ.copy()
+    env["GIT_EDITOR"] = "true"
+    env["GIT_SEQUENCE_EDITOR"] = "true"
+    env["EDITOR"] = "true"
+    return subprocess.run(["git", *args], cwd=cwd, text=True,
+                          capture_output=True, env=env)
+
+
+def _is_restack_temp(path):
+    name = os.path.basename((path or "").rstrip(os.sep))
+    return name.startswith("dev-restack-rebase-")
+
+
+def _prune_restack_temp_worktree(root, path):
+    """Drop a restack temp worktree after a successful rebase/continue."""
+    if not path or not _is_restack_temp(path) or rebase_in_progress(path):
+        return
+    git("worktree", "remove", "--force", path, cwd=root, check=False)
+    shutil.rmtree(path, ignore_errors=True)
+    git("worktree", "prune", cwd=root, check=False)
+
+
+def _continue_in_progress_rebase(root, branch, checkout, upstream,
+                                 old_base=None):
+    """Continue a restack rebase left in `checkout`. Returns True (rewritten).
+
+    Only continues a rebase that is replaying onto this step's upstream —
+    someone else's in-progress rebase is refused, not adopted and
+    force-pushed. An unreadable `onto` is refused for the same reason.
+    """
+    want = git("rev-parse", f"{upstream}^{{commit}}", cwd=root,
+               check=False).stdout.strip()
+    onto = rebase_onto_sha(checkout)
+    if not onto or not want or onto != want:
+        sys.exit(f"error: a rebase of '{branch}' is in progress in "
+                 f"{checkout}, but onto {onto or '(unknown)'}, not "
+                 f"{upstream} ({want[:12] or '?'}); finish or abort it, "
+                 f"then re-run restack")
+    unmerged = _unmerged_paths(checkout)
+    if unmerged:
+        listed = "".join(f"\n  {p}" for p in unmerged)
+        sys.exit(f"error: rebase of '{branch}' still in progress in "
+                 f"{checkout} with unmerged paths. Resolve, git add, then "
+                 f"re-run restack:{listed}")
+    r = _git_no_editor("rebase", "--continue", cwd=checkout)
+    if r.returncode != 0:
+        err = (r.stderr or r.stdout or "").strip()
+        if rebase_in_progress(checkout):
+            _exit_conflicted_rebase(branch, _onto_label(upstream, old_base),
+                                    checkout, err)
+        sys.exit(f"error: rebase --continue of '{branch}' failed in "
+                 f"{checkout}:\n{err}")
+    _prune_restack_temp_worktree(root, checkout)
+    return True
+
+
 def _rebase_in_existing_checkout(root, branch, upstream, checkout,
                                  old_base=None):
-    """Rebase where `branch` is already checked out (task worktree or primary)."""
+    """Rebase where `branch` is already checked out (task worktree or primary).
+
+    A conflict is left in place so the worktree has something to resolve;
+    re-run restack continues it. Do not abort.
+    """
+    if rebase_in_progress(checkout):
+        return _continue_in_progress_rebase(root, branch, checkout, upstream,
+                                            old_base)
     dirty = git("status", "--porcelain", cwd=checkout,
                 check=False).stdout.strip()
     if dirty:
@@ -1582,11 +1727,11 @@ def _rebase_in_existing_checkout(root, branch, upstream, checkout,
     r = git(*_rebase_argv(upstream, old_base), cwd=checkout, check=False)
     if r.returncode != 0:
         err = (r.stderr or r.stdout or "").strip()
-        onto = f"{upstream} (excluding {old_base})" if old_base else upstream
-        git("rebase", "--abort", cwd=checkout, check=False)
-        sys.exit(f"error: rebase of '{branch}' onto {onto} failed "
-                 f"(conflicts?). Resolve in {checkout}, then re-run "
-                 f"restack.\n{err}")
+        onto = _onto_label(upstream, old_base)
+        if rebase_in_progress(checkout):
+            _exit_conflicted_rebase(branch, onto, checkout, err)
+        sys.exit(f"error: rebase of '{branch}' onto {onto} failed in "
+                 f"{checkout}:\n{err}")
     after = git("rev-parse", branch, cwd=root).stdout.strip()
     return before != after
 
@@ -1594,15 +1739,15 @@ def _rebase_in_existing_checkout(root, branch, upstream, checkout,
 def _rebase_via_temp_worktree(root, branch, upstream, old_base=None):
     """Rebase without touching the primary clone's checked-out branch.
 
-    Uses a detached temp worktree, then points `branch` at the new tip via
-    `git branch -f` (or reset if some other worktree has it). Never runs
+    Checks the branch out in a temp worktree (not detached) so a conflict
+    is findable on re-run via branch_checkout_cwd, then the branch ref is
+    already at the new tip when the worktree is removed. Never runs
     `git rebase <upstream> <branch>`, which would switch the primary checkout.
     """
     before = git("rev-parse", branch, cwd=root).stdout.strip()
     tmp = tempfile.mkdtemp(prefix="dev-restack-rebase-")
     try:
-        r = git("worktree", "add", "--detach", tmp, branch, cwd=root,
-                check=False)
+        r = git("worktree", "add", tmp, branch, cwd=root, check=False)
         if r.returncode != 0:
             err = (r.stderr or r.stdout or "").strip()
             sys.exit(f"error: could not create temp worktree to rebase "
@@ -1610,14 +1755,12 @@ def _rebase_via_temp_worktree(root, branch, upstream, old_base=None):
         r = git(*_rebase_argv(upstream, old_base), cwd=tmp, check=False)
         if r.returncode != 0:
             err = (r.stderr or r.stdout or "").strip()
-            onto = f"{upstream} (excluding {old_base})" if old_base else upstream
-            git("rebase", "--abort", cwd=tmp, check=False)
-            sys.exit(f"error: rebase of '{branch}' onto {onto} failed "
-                     f"(conflicts?). Fetch/rebase the task branch, resolve, "
-                     f"push, then re-run restack.\n{err}")
+            onto = _onto_label(upstream, old_base)
+            if rebase_in_progress(tmp):
+                # Leave tmp; finally must not delete a conflicted rebase.
+                _exit_conflicted_rebase(branch, onto, tmp, err)
+            sys.exit(f"error: rebase of '{branch}' onto {onto} failed:\n{err}")
         new = git("rev-parse", "HEAD", cwd=tmp).stdout.strip()
-        # Temp worktree still holds detached HEAD at `new`; drop it before
-        # moving the branch ref (and before any other worktree reset).
         git("worktree", "remove", "--force", tmp, cwd=root, check=False)
         if os.path.isdir(tmp):
             shutil.rmtree(tmp, ignore_errors=True)
@@ -1638,7 +1781,7 @@ def _rebase_via_temp_worktree(root, branch, upstream, old_base=None):
         after = git("rev-parse", branch, cwd=root).stdout.strip()
         return before != after
     finally:
-        if tmp and os.path.isdir(tmp):
+        if tmp and os.path.isdir(tmp) and not rebase_in_progress(tmp):
             git("worktree", "remove", "--force", tmp, cwd=root, check=False)
             shutil.rmtree(tmp, ignore_errors=True)
         git("worktree", "prune", cwd=root, check=False)
@@ -1648,17 +1791,19 @@ def rebase_task_onto_ref(root, branch, upstream, old_base=None):
     """Rebase task branch onto upstream ref. Returns True if rewritten.
 
     Restack only — land never rewrites a task branch. Force-push is the
-    caller's job when True; conflicts abort and exit. Rebases in the
-    existing checkout if the branch is already checked out; otherwise uses
-    a temp worktree so the primary clone is never switched onto the task
-    branch solely for the rebase. Never rewrites integration.
+    caller's job when True; conflicts leave the rebase in the worktree
+    and exit (re-run continues). Rebases in the existing checkout if the
+    branch is already checked out; otherwise uses a temp worktree so the
+    primary clone is never switched onto the task branch solely for the
+    rebase. Never rewrites integration.
 
-    old_base, when set, is the tip to exclude (`git rebase --onto upstream
-    old_base`) when a rewritten stack parent must not be replayed. Do not
-    skip when old_base is not an ancestor: the parent may have moved ahead
-    of the child. An already-moved child is a no-op (`rebase --onto`
-    reports up to date), and behind==0 is not a valid skip there — a
-    stacked child usually already contains integration.
+    Local commits ahead of origin are kept (rewritten restack progress),
+    not refused. old_base, when set, is the tip to exclude (`git rebase
+    --onto upstream old_base`) when a rewritten stack parent must not be
+    replayed. Do not skip when old_base is not an ancestor: the parent
+    may have moved ahead of the child. An already-moved child is a no-op
+    (`rebase --onto` reports up to date), and behind==0 is not a valid
+    skip there — a stacked child usually already contains integration.
     """
     if not ref_exists(root, upstream):
         # Try origin/<name> if bare branch name given
@@ -1670,9 +1815,9 @@ def rebase_task_onto_ref(root, branch, upstream, old_base=None):
     old_base = resolve_rebase_exclude(root, old_base)
     checkout = branch_checkout_cwd(root, branch)
     if checkout and rebase_in_progress(checkout):
-        sys.exit(f"error: rebase of '{branch}' still in progress in "
-                 f"{checkout}; finish or abort it, then re-run restack")
-    sync_task_branch_from_remote(root, branch)
+        return _continue_in_progress_rebase(root, branch, checkout, upstream,
+                                            old_base)
+    sync_task_branch_from_remote(root, branch, keep_ahead=True)
     if not old_base:
         behind = git("rev-list", "--count", f"{branch}..{upstream}",
                      cwd=root).stdout.strip()
@@ -3034,15 +3179,18 @@ def cmd_restack(args):
     """Fail-closed stack restack for a Dev-batch / stack set.
 
     Prints a plan, then applies unless --dry-run. force-with-lease only;
-    dirty worktrees refuse; conflicts abort the current rebase and stop
-    (earlier plan steps may already be force-pushed — re-run restack after
-    resolve; already-up-to-date members no-op). When a member's stack parent
-    is outside --ids, rebases onto integration and auto-retargets the PR
-    base (land-safe default); --onto / --retarget still force retarget.
-    --onto rebases every target onto that ref (does not cascade children
-    onto restacked parents); omit it to preserve in-set stack parents.
-    Moving onto a different ref uses `rebase --onto` excluding the old PR
-    base tip so a rewritten parent's commits are not replayed.
+    dirty worktrees refuse (except an in-progress rebase); conflicts leave
+    the rebase in the worktree and stop (earlier plan steps may already
+    be force-pushed — resolve, git add, re-run restack to continue;
+    already-up-to-date members no-op). Rewritten local commits that look
+    ahead of origin are kept and force-pushed, not refused. When a
+    member's stack parent is outside --ids, rebases onto integration and
+    auto-retargets the PR base (land-safe default); --onto / --retarget
+    still force retarget. --onto rebases every target onto that ref
+    (does not cascade children onto restacked parents); omit it to
+    preserve in-set stack parents. Moving onto a different ref uses
+    `rebase --onto` excluding the old PR base tip so a rewritten parent's
+    commits are not replayed.
     """
     root, scope, integration, bw = ctx()
     ids = parse_id_list(args.ids or "")
@@ -3142,9 +3290,11 @@ def cmd_restack(args):
         tid = step["id"]
         branch = step["branch"]
         upstream = step["upstream"]
-        # Dirty check on any checkout of the branch
+        # Dirty check on any checkout of the branch. An in-progress rebase
+        # is dirty by definition; restack continues it rather than refusing.
         checkout = branch_checkout_cwd(root, branch)
-        if checkout and worktree_is_dirty(checkout):
+        if (checkout and worktree_is_dirty(checkout)
+                and not rebase_in_progress(checkout)):
             sys.exit(f"error: T{tid} worktree dirty at {checkout}; "
                      "commit/stash before restack")
         exclude = step.get("exclude") or None
@@ -3155,7 +3305,11 @@ def cmd_restack(args):
                 root, branch, upstream, old_base=exclude)
         except SystemExit:
             raise
-        if rewritten:
+        local_sha = git("rev-parse", branch, cwd=root).stdout.strip()
+        remote = f"origin/{branch}"
+        remote_sha = (git("rev-parse", remote, cwd=root).stdout.strip()
+                      if ref_exists(root, remote) else "")
+        if rewritten or (remote_sha and local_sha != remote_sha):
             print(f"  rewritten; push --force-with-lease")
             push_task_branch(root, branch, force=True)
         else:
@@ -3908,7 +4062,7 @@ def cmd_init(args):
     if os.path.isdir(dest):
         print(f"viewer: skipped ({VIEWER_NAME} is a directory)")
     else:
-        print(f"viewer: ./{VIEWER_NAME}  (r refresh, a by area, e expand, q quit, arrows scroll, type id↵)")
+        print(f"viewer: ./{VIEWER_NAME}  (r refresh, a by area, e expand, c collisions, q quit, arrows scroll, type id↵)")
     print(f"identity: {args.name}")
     if scope != ".":
         print(f"note: commands target this board from inside '{scope}/' "
@@ -4776,11 +4930,18 @@ def _rows_of(lines, cols):
     return sum(_line_rows(ln, cols) for ln in lines)
 
 
-def _watch_help(by_area, expand, more_above=0, more_below=0):
+def _watch_help(by_area, expand, more_above=0, more_below=0, collision=False,
+                showing=False):
     other = "by status" if by_area else "by area"
     fold = "collapse" if expand else "expand"
-    help_line = (f"r refresh  a {other}  e {fold}  q quit"
-                 "  · type id↵  arrows scroll")
+    if showing:
+        query = "esc board"
+    elif collision:
+        query = "collision id↵"
+    else:
+        query = "type id↵"
+    help_line = (f"r refresh  a {other}  e {fold}  c collisions  q quit"
+                 f"  · {query}  arrows scroll")
     if more_above or more_below:
         bits = []
         if more_above:
@@ -4792,13 +4953,15 @@ def _watch_help(by_area, expand, more_above=0, more_below=0):
 
 
 def _watch_footer_lines(by_area, expand, buf, result,
-                        more_above=0, more_below=0):
-    help_line = _watch_help(by_area, expand, more_above, more_below)
+                        more_above=0, more_below=0, collision=False,
+                        showing=False):
+    help_line = _watch_help(by_area, expand, more_above, more_below,
+                           collision=collision, showing=showing)
     if _use_color():
         help_line = _ansi(_DIM, help_line)
     lines = ["", help_line]
-    if buf:
-        lines.append(f"> {buf}")
+    if collision or buf:
+        lines.append(f"c> {buf}".rstrip() if collision else f"> {buf}")
     if result:
         lines.append(result)
     return lines
@@ -4839,13 +5002,15 @@ def _window_lines(lines, offset, rows, cols):
     return shown, offset, len(lines) - i
 
 
-def _paint_watch(out, by_area, expand, buf, result, offset):
+def _paint_watch(out, by_area, expand, buf, result, offset, collision=False,
+                 showing=False):
     """Paint a terminal-height viewport. Returns the clamped offset."""
     rows, cols = _term_size()
     body = (out or "").splitlines()
     # First pass: footer without counts, so the body budget is stable.
     footer_rows = _rows_of(
-        _watch_footer_lines(by_area, expand, buf, result), cols)
+        _watch_footer_lines(by_area, expand, buf, result,
+                            collision=collision, showing=showing), cols)
     body_rows = max(1, rows - footer_rows)
     shown, offset, more_below = _window_lines(body, offset, body_rows, cols)
     more_above = offset
@@ -4853,14 +5018,16 @@ def _paint_watch(out, by_area, expand, buf, result, offset):
         # Counts on the help line can wrap an extra row; re-fit if so.
         footer_rows = _rows_of(
             _watch_footer_lines(by_area, expand, buf, result,
-                                more_above, more_below),
+                                more_above, more_below, collision=collision,
+                                showing=showing),
             cols)
         body_rows = max(1, rows - footer_rows)
         shown, offset, more_below = _window_lines(
             body, offset, body_rows, cols)
         more_above = offset
     footer = _watch_footer_lines(by_area, expand, buf, result,
-                                 more_above, more_below)
+                                 more_above, more_below, collision=collision,
+                                 showing=showing)
     _clear_screen()
     # No trailing newline: print() on the last row scrolls the first line off.
     frame = shown + footer
@@ -4916,18 +5083,33 @@ def cmd_board(args):
         buf = ""
         result = ""
         last_tid = None
+        last_kind = None  # "show" | "collision" | None
+        collision_mode = False
         offset = 0
         try:
             while True:
                 by_area = bool(getattr(args, "by_area", False))
                 expand = bool(getattr(args, "expand", False))
-                _plain, display, tasks = _render_board(args)
-                if last_tid is not None:
+                _plain, board, tasks = _render_board(args)
+                display = board
+                if last_kind == "collision" and last_tid is not None:
                     result = watch_collision_line(
                         last_tid, tasks, color=_use_color())
+                elif last_kind == "show" and last_tid is not None:
+                    view = watch_task_view(last_tid, tasks)
+                    if view is None:
+                        result = watch_missing_tid(
+                            last_tid, color=_use_color())
+                        last_tid = None
+                        last_kind = None
+                    else:
+                        display = view
+                        result = ""
                 while True:
                     offset = _paint_watch(
-                        display, by_area, expand, buf, result, offset)
+                        display, by_area, expand, buf, result, offset,
+                        collision=collision_mode,
+                        showing=last_kind == "show")
                     key = _read_key(cooked=old_term is None)
                     if key in ("q", "Q"):
                         print()
@@ -4952,10 +5134,23 @@ def cmd_board(args):
                     if key == "up":
                         offset = max(0, offset - 1)
                         continue
+                    if not buf and key in "cC":
+                        collision_mode = not collision_mode
+                        if collision_mode and last_kind == "show":
+                            last_tid = None
+                            last_kind = None
+                            result = ""
+                            display = board
+                            offset = 0
+                        continue
                     if key == "\x1b":
                         buf = ""
                         result = ""
                         last_tid = None
+                        last_kind = None
+                        collision_mode = False
+                        display = board
+                        offset = 0
                         continue
                     if key in ("\x7f", "\x08"):
                         buf = buf[:-1]
@@ -4965,15 +5160,34 @@ def cmd_board(args):
                             continue
                         tid = parse_watch_tid(buf)
                         buf = ""
+                        color = _use_color()
                         if tid is None:
                             result = (_ansi(_ERR, "not a task id")
-                                      if _use_color() else "not a task id")
+                                      if color else "not a task id")
                             last_tid = None
+                            last_kind = None
+                            display = board
+                            offset = 0
                             continue
-                        _plain, display, tasks = _render_board(args)
+                        _plain, board, tasks = _render_board(args)
                         last_tid = tid
-                        result = watch_collision_line(
-                            tid, tasks, color=_use_color())
+                        offset = 0
+                        if collision_mode:
+                            last_kind = "collision"
+                            result = watch_collision_line(
+                                tid, tasks, color=color)
+                            display = board
+                            continue
+                        view = watch_task_view(tid, tasks)
+                        if view is None:
+                            last_tid = None
+                            last_kind = None
+                            result = watch_missing_tid(tid, color=color)
+                            display = board
+                            continue
+                        last_kind = "show"
+                        result = ""
+                        display = view
                         continue
                     if not buf and key in "tT":
                         buf = key
@@ -5475,8 +5689,9 @@ def main():
                         "listed under each area)")
     s.add_argument("--watch", action="store_true",
                    help="interactive: r refresh, a toggle by-area, "
-                        "e toggle expand, q quit, arrows scroll, type "
-                        "id+Enter for area collisions (used by ./board)")
+                        "e toggle expand, c collision mode, q quit, "
+                        "arrows scroll, type id+Enter to show a task "
+                        "(used by ./board)")
     s.add_argument("--refresh-viewer", action="store_true",
                    help="rewrite ./board from this skill's template, even if "
                         "edited, then exit (used by ./board update)")

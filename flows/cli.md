@@ -82,9 +82,9 @@ TASKS board [--expand] [--by-area] [--watch]
                                         # children indented under the
                                         # parent; done/later/not-planned
                                         # fold to a count, --expand lists
-                                        # those three; --watch: r/a/e/q, arrows
-                                        # scroll, type id↵ for area
-                                        # collisions (./board)
+                                        # those three; --watch: r/a/e/c/q, arrows
+                                        # scroll, type id↵ to show a task, c then
+                                        # id↵ for area collisions (./board)
 TASKS iteration
 TASKS iteration-close [--force]
 TASKS iteration-new <branch> [--parent <branch>] [--name <name>]

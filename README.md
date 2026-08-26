@@ -26,7 +26,7 @@ In a repo (with at least one commit and a GitHub `origin`):
 /dev
 ```
 
-That walks you through identity + board setup. Then `/dev help` for the full command map. After init, `./board` (from the product directory) is a live view — `r` refresh, `a` toggle by-area, `e` toggle expand, `q` quit, arrows scroll, type a task id + Enter to see whether it is area-blocked by current doing/review work.
+That walks you through identity + board setup. Then `/dev help` for the full command map. After init, `./board` (from the product directory) is a live view — `r` refresh, `a` toggle by-area, `e` toggle expand, `c` collision mode, `q` quit, arrows scroll, type a task id + Enter to read it.
 
 ## The skill itself (`/dev skill`)
 

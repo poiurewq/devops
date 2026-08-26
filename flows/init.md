@@ -30,7 +30,7 @@ Prerequisites: at least one commit (the script pins its board worktree to the in
 
 4. **No board — adoption**:
    - *Integration branch*: propose the current or default branch; if the repo already uses iteration branches, ask which. Pass `--integration` (and `--parent`, `--iteration N`, `--iteration-name`, `--iteration-started` when applicable).
-   - Run `TASKS init --name <handle> [--scope s] [--integration b] [--parent p] [--iteration N] [--iteration-name <name>] [--iteration-started YYYY-MM-DD]`. Init writes a gitignored `./board` viewer at the product root (`r` refresh, `a` toggle by-area, `e` toggle expand, `q` quit, arrows scroll) if missing, and refreshes it when it is still a stock wrapper. `TASKS board` does the same. A user-edited `./board` is left alone — `./board update` rewrites it from the installed skill anyway.
+   - Run `TASKS init --name <handle> [--scope s] [--integration b] [--parent p] [--iteration N] [--iteration-name <name>] [--iteration-started YYYY-MM-DD]`. Init writes a gitignored `./board` viewer at the product root (`r` refresh, `a` toggle by-area, `e` toggle expand, `c` collisions, `q` quit, arrows scroll, type id↵ to show a task) if missing, and refreshes it when it is still a stock wrapper. `TASKS board` does the same. A user-edited `./board` is left alone — `./board update` rewrites it from the installed skill anyway.
    - *Areas*: first give the user this primer (verbatim or near):
 
      > Areas are coarse labels for regions of the codebase. Every task gets tagged with the area(s) it will touch. They keep the board organized — but their real job is coordination: dev steers contributors away from working in the same area at the same time, which is what prevents merge conflicts. More areas enable more concurrent work; there is no fixed upper bound. The natural limiter is multi-area occupancy — propose as many stable areas as enable parallelization without typical tasks needing many areas at once (over-granularity → confusing multi-area tags).
@@ -46,4 +46,4 @@ Prerequisites: at least one commit (the script pins its board worktree to the in
 
 6. **Happy path for product code** (say once, briefly): land work via a task branch and PR into the integration branch — don't pile long-lived feature commits only on local integration. Implement starts task branches from `origin/<integration>`, so unpushed local-main commits get in the way (flows/implement.md will ask to park them as a PR or discard). Board state still goes only through `TASKS`, never hand-edited.
 
-7. Report what was set up: scope, integration branch, integrator, areas, gh status, and the `./board` viewer (`r` refresh, `a` toggle by-area, `e` toggle expand, `q` quit, arrows scroll).
+7. Report what was set up: scope, integration branch, integrator, areas, gh status, and the `./board` viewer (`r` refresh, `a` toggle by-area, `e` toggle expand, `c` collisions, `q` quit, arrows scroll, type id↵ to show a task).

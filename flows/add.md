@@ -25,4 +25,4 @@ Do not ask the user which path. Decide:
    - Substantially the same task exists → say so and propose amending it (`TASKS update <id> ...`) instead of adding a duplicate. The user decides; add anyway if they want them separate.
    - Otherwise judge the neighbours it lists for **dependencies in both directions** — must something else land first (`--deps`), or does an existing task now depend on this one (update *its* deps)? Propose the links; don't invent ordering that isn't real.
    - A neighbour marked `☂` is an **umbrella** and may already cover this cluster → propose the new task as its child (`TASKS update <umbrella> --deps <existing+new>`). That is membership, not ordering.
-3. `TASKS add --title "..." [--area m] [--deps 1,2] [--desc "..."]`, then show the task as recorded (the script prints it).
+3. `TASKS add --title "..." [--area m] [--deps 1,2] [--desc "..."]`, then show the task as recorded (the script prints it). Perpetual work is `--kind recurring --cadence <N><unit>` (SKILL.md *Recurring*).
