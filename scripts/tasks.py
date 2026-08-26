@@ -4595,6 +4595,14 @@ def _fmt_ids(col, color=False):
     return " ".join(_status_ansi(t["status"], f"T{t['id']}") for t in col)
 
 
+def _sort_by_status(col, status_order=None):
+    """Hottest-first, then T3 recurrence, then id. Own status only."""
+    order = status_order or WATCH_STATUSES
+    rank = {s: i for i, s in enumerate(order)}
+    return sorted(col, key=lambda t: (rank.get(t["status"], 99),
+                                      recur_sort_rank(t), t["id"]))
+
+
 def _fmt_count(col):
     return f"({len(col)})"
 
@@ -4726,6 +4734,8 @@ def _board_by_area(bw, scope, tasks, expand=False, color=False,
     so the cut shows the full map; empty ad-hoc / all / untagged are omitted.
     Default keeps done/later/not-planned off area lines (own count rows)
     so open work stays scannable; --expand puts those ids on area lines too.
+    Ids on each area line use the same hottest-first status order as the
+    default view, so in-flight work sits left of the backlog.
     """
     indexed = tasks if expand else [
         t for t in tasks if t["status"] not in TERMINAL]
@@ -4746,13 +4756,16 @@ def _board_by_area(bw, scope, tasks, expand=False, color=False,
                 buckets[a].append(t)
             else:
                 ad_hoc.setdefault(a, []).append(t)
-    rows = [(name, _fmt_ids(buckets[name], color=color)) for name in known]
-    rows.extend((name, _fmt_ids(ad_hoc[name], color=color))
-                for name in sorted(ad_hoc))
+
+    def ids(col):
+        return _fmt_ids(_sort_by_status(col, status_order), color=color)
+
+    rows = [(name, ids(buckets[name])) for name in known]
+    rows.extend((name, ids(ad_hoc[name])) for name in sorted(ad_hoc))
     if all_col:
-        rows.append(("all", _fmt_ids(all_col, color=color)))
+        rows.append(("all", ids(all_col)))
     if untagged:
-        rows.append(("(untagged)", _fmt_ids(untagged, color=color)))
+        rows.append(("(untagged)", ids(untagged)))
     if not expand:
         for status in TERMINAL:
             col = [t for t in tasks if t["status"] == status]
