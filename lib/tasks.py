@@ -51,6 +51,10 @@ TERMINAL = ("done", "later", "not-planned")
 OUT_OF_PLAY = ("later", "not-planned")
 STATUS_LABEL = {"not-planned": "Not planned", "later": "Later"}
 TASKS_DIR = ".tasks"
+# Flow store: one procedure per file, <scope>/.flows/<name>.md. Same home
+# and rules as .tasks/ (integration branch only, written through the board
+# worktree), but flows outlive iterations — nothing archives them.
+FLOWS_DIR = ".flows"
 # Local live viewer dropped by init at <product>/board. Not .dev/board —
 # that path is the hidden board worktree.
 VIEWER_NAME = "board"
@@ -69,7 +73,14 @@ VIEWER_NAME = "board"
 #    byte-identical to schema 5; on a multi-integrator board an older script
 #    fails closed (it compares the whole joined string, so land refuses for
 #    everyone) rather than granting anyone merge rights it should not.
-SCHEMA_VERSION = 6
+# 7: optional `type` frontmatter (`ops` = a task run through /ops flows, no
+#    code, no branch, no PR; absent = dev). Omitted when empty, so dev task
+#    files are byte-identical to schema 6. An older script rewriting an ops
+#    task would drop the field (it renders only its own FIELDS).
+# 8: `type: dev` is written explicitly on every dev task this script renders
+#    (absent still reads as dev, so old files stay valid unmigrated). A
+#    schema-7 script refuses `type: dev` on any add/update that validates it.
+SCHEMA_VERSION = 8
 CONFIG_KEYS = ["schema_version", "integration_branch", "parent_branch",
                "iteration", "iteration_name", "iteration_started",
                "integrator", "contributors"]
@@ -80,11 +91,23 @@ SETTABLE_KEYS = ["parent_branch", "iteration",
 # on a time cadence (see Recurring tasks below). Hierarchy lives in deps;
 # reverse index is computed at board time. Readers ignore unknown kinds.
 RECURRING = "recurring"
-FIELDS = ["id", "title", "area", "status", "kind", "assignee", "branch", "deps",
-          "pr", "needs", "created", "cadence", "last_run"]
+# type: "dev" = code on a branch, PR, review; "ops" = a task run through
+# /ops flows: no code, no area, no branch, no PR. Absent or empty reads as
+# dev, and render writes it as `dev`. An ops task that turns out to need
+# code becomes a dev task and gains an area then. Orthogonal to kind (an
+# ops task may be recurring).
+DEV = "dev"
+OPS = "ops"
+# flow: optional. The flow(s) a run followed, as `<id> <name>` pairs, comma
+# separated (`7 send-invoice, 3 prep-agenda`), the name as it was at the
+# time. A record, not a pointer: lookups match on the id, so a flow rename
+# never rewrites a task. Set by `ran` (or `update --flow` at run start).
+FIELDS = ["id", "title", "area", "status", "kind", "type", "assignee", "branch",
+          "deps", "pr", "needs", "flow", "created", "cadence", "last_run"]
 # Written only when non-empty, so an ordinary task file is byte-identical to
 # what a pre-schema-4 script produced. Older readers ignore them either way.
-OPTIONAL_FIELDS = ("cadence", "last_run")
+# `type` is not among them: render always writes it (schema 8).
+OPTIONAL_FIELDS = ("flow", "cadence", "last_run")
 # Board push races on a shared integration branch: rebase onto origin and
 # retry this many times before queueing locally.
 PUSH_RETRIES = 5
@@ -217,6 +240,11 @@ def tdir(scope):
     return os.path.normpath(os.path.join(scope, TASKS_DIR))
 
 
+def fdir(scope):
+    """Flow store dir relative to repo root ('.flows' or '<scope>/.flows')."""
+    return os.path.normpath(os.path.join(scope, FLOWS_DIR))
+
+
 def product_root(root, scope):
     """Directory that owns the board: git toplevel for scope '.', else
     <toplevel>/<scope>. `root` is the primary clone (repo_root)."""
@@ -254,7 +282,7 @@ def append_ignore_line(path, line):
 # Thin wrapper init writes. __TASKS_PY__ is replaced with repr(path).
 BOARD_VIEWER_SCRIPT = '''\
 #!/usr/bin/env python3
-"""Local board viewer (r/a/e/c/q; arrows scroll; type id↵). `./board update` rewrites this file from the installed skill. Written by dev init; left alone if you edit it."""
+"""Local board viewer (r/a/e/c/f/q; arrows scroll; space/b page; type id↵). `./board update` rewrites this file from the installed skill. Written by dev init; left alone if you edit it."""
 import os, sys
 TASKS = __TASKS_PY__
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
@@ -572,6 +600,27 @@ def ctx():
     return root, scope, branch, bw
 
 
+def invoking_skill():
+    """The skill whose shim ran this script ('dev', 'ops'), from DEVOPS_SKILL.
+    Validated against the package so a stray value never names a skill that
+    is not there; defaults to 'dev'."""
+    name = (os.environ.get("DEVOPS_SKILL") or "").strip()
+    pkg = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    if name and os.path.isfile(os.path.join(pkg, name, "SKILL.md")):
+        return name
+    return "dev"
+
+
+def scoped_message(scope, message):
+    """Board commit subject: 'dev: …' → '<skill>: …', or '<skill>(<scope>): …'
+    on a scoped board, so an /ops commit never names /dev and boards sharing
+    one integration branch stay distinguishable in the log."""
+    if not message.startswith("dev: "):
+        return message
+    prefix = invoking_skill() if scope == "." else f"{invoking_skill()}({scope})"
+    return f"{prefix}: {message[len('dev: '):]}"
+
+
 def board_commit(root, branch, bw, scope, message):
     """Commit this board's changes, push to its integration branch (rebase/
     retry when the tip moved — shared-main policy A), fast-forward local
@@ -580,13 +629,15 @@ def board_commit(root, branch, bw, scope, message):
     operation flushes it (flush_queued_board_commits). Returns whether the
     commit reached origin (True when there is no remote)."""
     paths = [tdir(scope)]
+    if os.path.isdir(os.path.join(bw, fdir(scope))):
+        paths.append(fdir(scope))
     if os.path.exists(os.path.join(bw, ".gitignore")):
         paths.append(".gitignore")
     git("add", "-A", "--", *paths, cwd=bw)
     if git("diff", "--cached", "--quiet", cwd=bw, check=False).returncode == 0:
         print("no changes")
         return True
-    git("commit", "-m", message, cwd=bw)
+    git("commit", "-m", scoped_message(scope, message), cwd=bw)
     sha = git("rev-parse", "HEAD", cwd=bw).stdout.strip()
     private = board_branch_name(scope)
     if has_remote(root):
@@ -734,6 +785,534 @@ def write_areas(bw, scope, mods):
             f.write(f"- {name}: {desc}\n")
 
 
+# ---------- flow store (.flows/) ----------
+# <scope>/.flows/<name>.md :
+#   ---
+#   id: 7                  (numeric, assigned at create, never changes)
+#   name: send-invoice     (the file name; the only thing users type)
+#   description: one line, written like a skill description
+#   inputs: client, amount (defaults to today)
+#   uses: prep-agenda, other-flow      (flows this one follows)
+#   status: active | retired
+#   formerly: old-name, older-name     (past names; a matching hint only)
+#   created: 2026-09-18
+#   ---
+#   the procedure
+#
+# Renames free the old name at once — nothing is reserved. History matches
+# on the id (tasks record `flow: 7 send-invoice`), so no file is rewritten.
+# No verb accepts a bare number as a flow: a number is always a task id.
+
+FLOW_FIELDS = ["id", "name", "description", "inputs", "uses", "status",
+               "formerly", "created"]
+FLOW_STATUSES = ("active", "retired")
+FLOW_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+
+
+def flow_path(bw, scope, name):
+    return os.path.join(bw, fdir(scope), f"{name}.md")
+
+
+def validate_flow_name(name):
+    if not FLOW_NAME_RE.match(name or ""):
+        sys.exit(f"error: flow name '{name}' must be a slug: lowercase "
+                 "letters, digits, hyphens (send-invoice)")
+    if name.isdigit():
+        sys.exit("error: flows are referred to by name; a number is a task id")
+    return name
+
+
+def split_names(s):
+    """Comma-separated names → list (order kept, blanks dropped)."""
+    return [x.strip() for x in (s or "").split(",") if x.strip()]
+
+
+def parse_flow(path):
+    with open(path) as f:
+        text = f.read()
+    m = re.match(r"^---\n(.*?)\n---\n?(.*)$", text, re.DOTALL)
+    if not m:
+        sys.exit(f"error: malformed flow file {path}")
+    meta = parse_kv(m.group(1))
+    try:
+        meta["id"] = int(meta.get("id", ""))
+    except ValueError:
+        sys.exit(f"error: flow file {path} has no numeric id")
+    for k in FLOW_FIELDS:
+        meta.setdefault(k, "")
+    meta["body"] = m.group(2).strip()
+    meta["path"] = path
+    return meta
+
+
+def render_flow(meta):
+    lines = ["---"]
+    for k in FLOW_FIELDS:
+        lines.append(f"{k}: {meta.get(k, '')}")
+    lines.append("---")
+    body = (meta.get("body") or "").strip()
+    return "\n".join(lines) + ("\n\n" + body + "\n" if body else "\n")
+
+
+def all_flows(bw, scope):
+    d = os.path.join(bw, fdir(scope))
+    if not os.path.isdir(d):
+        return []
+    flows = [parse_flow(p) for p in sorted(glob.glob(os.path.join(d, "*.md")))]
+    return sorted(flows, key=lambda f: f["id"])
+
+
+def duplicate_flow_ids(flows):
+    """{id: [flows]} for every id held by more than one flow.
+
+    Ids are minted as max+1 against whatever the board worktree has just
+    synced, so two boards that mint one before either pushes both land it:
+    the file names differ, so the board rebase merges them with no conflict.
+    Run history matches on the id, so the collision has to be visible and
+    repairable (`flow reid`) rather than silently conflating two flows.
+    """
+    by_id = {}
+    for f in flows:
+        by_id.setdefault(f["id"], []).append(f)
+    return {i: fs for i, fs in by_id.items() if len(fs) > 1}
+
+
+def warn_duplicate_flow_ids(flows):
+    for fid, fs in sorted(duplicate_flow_ids(flows).items()):
+        names = ", ".join(f["name"] for f in fs)
+        print(f"warning: flow id {fid} is held by {len(fs)} flows ({names}); "
+              f"run history matches on the id, so repair it: flow reid <name>",
+              file=sys.stderr)
+
+
+def flow_ref_holders(bw, scope, flow):
+    """Task files recording a run of this flow: its id paired with a name the
+    flow has held. Live tasks and archived ones — an archive is verbatim and
+    can never be rewritten, so a reid must not orphan one. Name-aware on
+    purpose: when two flows share an id, the name in the record is what says
+    whose run it was.
+    """
+    names = {flow["name"]} | set(split_names(flow.get("formerly")))
+    want = {f"{flow['id']} {n}" for n in names}
+    d = os.path.join(bw, tdir(scope))
+    paths = sorted(glob.glob(os.path.join(d, "[0-9]*.md")))
+    paths += sorted(glob.glob(os.path.join(d, "archive", "*", "[0-9]*.md")))
+    hits = []
+    for path in paths:
+        try:
+            with open(path) as fh:
+                text = fh.read()
+        except OSError:
+            continue
+        m = re.search(r"^flow:[ \t]*(.*)$", text, re.M)
+        if m and any(t in want for t in split_names(m.group(1))):
+            hits.append(os.path.relpath(path, d))
+    return hits
+
+
+# One run record, split: Ran (<date>): [<refs>] <text>. The refs tag is
+# what format_ran writes; a landed recurring run leaves the bare
+# `Ran (<date>).` line instead, which parses with no tag and no text.
+RAN_PARTS_RE = re.compile(
+    r"^Ran \((\d{4}-\d{2}-\d{2})\)[:.][ \t]*(?:\[([^\]]*)\])?[ \t]*(.*)$",
+    re.S)
+
+
+# Left on a task reseed_later_tasks carried onto the next board.
+CARRIED_FROM_RE = re.compile(r"^carried from (\d+)/T(\d+)$", re.M)
+
+
+def flow_run_entries(bw, scope, flow):
+    """Every recorded run of this flow, newest first.
+
+    A run is a `Ran (<date>)` record, not a task: a recurring task holds one
+    per run. Records are matched on their refs tag, which pairs the flow's
+    fixed id with a name it held — the same id+name rule flow_ref_holders
+    uses, so a rename never loses history and two flows sharing an id are
+    still told apart. A tagless record (a landed recurring run) counts when
+    the task's own `flow` field points here. A task that points here with no
+    record yet is a run in flight, listed first with no date.
+
+    A carried task (later or recurring, reseeded by iteration-new) is copied
+    body and all, so its predecessor's records live in two files at once.
+    The `carried from <n>/T<id>` marker reseed leaves is what tells them
+    apart: a record the ancestor already holds is the ancestor's run, counted
+    where it happened and skipped here. Without that, every iteration close
+    would duplicate a recurring task's whole history.
+    """
+    names = {flow["name"]} | set(split_names(flow.get("formerly")))
+    want = {f"{flow['id']} {n}" for n in names}
+    d = os.path.join(bw, tdir(scope))
+    paths = [(p, None) for p in sorted(glob.glob(os.path.join(d, "[0-9]*.md")))]
+    for p in sorted(glob.glob(os.path.join(d, "archive", "*", "[0-9]*.md"))):
+        paths.append((p, archive_dir_index(os.path.basename(os.path.dirname(p)))))
+    loaded = []
+    by_key = {}
+    for path, arch in paths:
+        try:
+            meta = parse_task(path)
+        except SystemExit:
+            continue
+        recs = [" ".join(r.split()) for r in collect_ran(meta["body"])]
+        loaded.append((arch, meta, recs))
+        by_key.setdefault((arch, meta["id"]), set()).update(recs)
+    entries = []
+    for arch, meta, recs in loaded:
+        inherited = set()
+        for anc in CARRIED_FROM_RE.finditer(meta["body"]):
+            inherited |= by_key.get((int(anc.group(1)), int(anc.group(2))),
+                                    set())
+        on_task = bool(set(split_names(meta.get("flow", ""))) & want)
+        label = f"{arch}/T{meta['id']}" if arch else f"T{meta['id']}"
+        found = 0
+        for rec in recs:
+            if rec in inherited:
+                continue
+            m = RAN_PARTS_RE.match(rec)
+            if not m:
+                continue
+            date, tag, text = m.group(1), m.group(2), m.group(3).strip()
+            if tag is None:
+                if not on_task:
+                    continue
+            elif not (set(split_names(tag)) & want):
+                continue
+            found += 1
+            entries.append({"date": date, "label": label, "id": meta["id"],
+                            "title": meta.get("title", ""),
+                            "status": meta["status"], "text": text,
+                            "archived": arch is not None})
+        if on_task and not found:
+            entries.append({"date": "", "label": label, "id": meta["id"],
+                            "title": meta.get("title", ""),
+                            "status": meta["status"], "text": "",
+                            "archived": arch is not None})
+    entries.sort(key=lambda e: (e["date"] or "9999-99-99", e["id"]),
+                 reverse=True)
+    return entries
+
+
+def format_flow_run(e, color=False):
+    """One run line: when, which task, and what the record said."""
+    when = e["date"] or "in flight"
+    head = f"  {when:<10}  {e['label']} {e['title']}"
+    if color:
+        head = f"  {when:<10}  {_ansi(_DIM, e['label'])} {e['title']}"
+    bits = []
+    if not e["date"]:
+        bits.append(e["status"])
+    if e["archived"]:
+        bits.append("archived")
+    if bits:
+        head += f" [{', '.join(bits)}]"
+    if e["text"]:
+        head += f"\n{' ' * 14}{e['text']}"
+    return head
+
+
+def flow_runs_text(bw, scope, flow, color=False):
+    """`flow runs <name>` body: the header line plus every run."""
+    entries = flow_run_entries(bw, scope, flow)
+    head = f"{flow['name']} (id {flow['id']})"
+    if not flow_is_active(flow):
+        head += " [retired]"
+    n = len(entries)
+    head += f" — {n} run{'' if n == 1 else 's'}"
+    lines = [head]
+    if not entries:
+        lines.append("  (no runs recorded)")
+    lines.extend(format_flow_run(e, color=color) for e in entries)
+    return "\n".join(lines)
+
+
+def flow_is_active(f):
+    return (f.get("status") or "active") != "retired"
+
+
+def find_flow(bw, scope, text, flows=None, quiet=False):
+    """Resolve a loosely typed name to one flow, or exit.
+
+    Exact active name, then exact retired name, then a `formerly` entry
+    (active first), then a fuzzy match over those same names when one
+    candidate stands clear of the rest. Never a bare number.
+    """
+    text = (text or "").strip()
+    if not text:
+        sys.exit("error: flow name required")
+    if text.isdigit():
+        sys.exit(f"error: flows are referred to by name; {text} would be "
+                 f"task T{text}. See: flow list")
+    flows = all_flows(bw, scope) if flows is None else flows
+    if not flows:
+        sys.exit(f"error: no flows yet ({fdir(scope)}/ is empty); "
+                 "create one: flow create <name> --desc \"…\"")
+    ranked = sorted(flows, key=lambda f: (not flow_is_active(f), f["id"]))
+    for f in ranked:
+        if f["name"] == text:
+            return f
+    for f in ranked:
+        if text in split_names(f.get("formerly")):
+            if not quiet:
+                print(f"matched: {text} → {f['name']} (formerly)",
+                      file=sys.stderr)
+            return f
+    names = {}
+    for f in ranked:
+        for n in [f["name"]] + split_names(f.get("formerly")):
+            names.setdefault(n, f)
+    scored = sorted(((difflib.SequenceMatcher(None, text, n).ratio(), n)
+                     for n in names), reverse=True)
+    top = [(r, n) for r, n in scored if r >= 0.6]
+    if top and (len(top) == 1 or top[0][0] - top[1][0] >= 0.15
+                or names[top[0][1]] is names[top[1][1]]):
+        f = names[top[0][1]]
+        if not quiet:
+            print(f"matched: {text} → {f['name']}", file=sys.stderr)
+        return f
+    if top:
+        cands = ", ".join(names[n]["name"] for _, n in top[:4])
+        sys.exit(f"error: '{text}' is ambiguous between flows: {cands}")
+    sys.exit(f"error: no flow matches '{text}'. See: flow list")
+
+
+def flow_body_from_args(args):
+    """--body text, or --file (a path or '-' for stdin); None if neither."""
+    body = getattr(args, "body", None)
+    path = getattr(args, "file", None)
+    if path and body is not None:
+        sys.exit("error: pass --body or --file, not both")
+    if path:
+        if path == "-":
+            return sys.stdin.read().strip()
+        with open(path) as f:
+            return f.read().strip()
+    if body is not None:
+        return body.strip()
+    return None
+
+
+def check_uses(uses, flows, self_name=None):
+    names = {f["name"] for f in flows if flow_is_active(f)}
+    for u in uses:
+        if u == self_name:
+            sys.exit(f"error: a flow cannot use itself ({u})")
+        if u not in names:
+            print(f"warning: uses '{u}' is not an active flow", file=sys.stderr)
+
+
+def flow_line(f, show_status=False):
+    tag = ""
+    if show_status and not flow_is_active(f):
+        tag = " [retired]"
+    return f"{f['name']}{tag} — {f.get('description') or '(no description)'}"
+
+
+def write_flow(meta):
+    with open(meta["path"], "w") as f:
+        f.write(render_flow(meta))
+
+
+FLOW_REF_RE = re.compile(r"^(\d+) (\S+)$")
+
+
+def resolve_flow_refs(bw, scope, text, flows=None):
+    """Comma-separated flow names (or `<id> <name>` refs) → the canonical
+    `<id> <name>` list a task records. Names resolve through find_flow;
+    an explicit ref only needs its id to exist (the name is history)."""
+    flows = all_flows(bw, scope) if flows is None else flows
+    by_id = {f["id"]: f for f in flows}
+    dups = duplicate_flow_ids(flows)
+    refs = []
+    for tok in split_names(text):
+        m = FLOW_REF_RE.match(tok)
+        if m:
+            fid = int(m.group(1))
+            if fid not in by_id:
+                sys.exit(f"error: no flow with id {fid} ('{tok}')")
+            ref = f"{fid} {m.group(2)}"
+        else:
+            f = find_flow(bw, scope, tok, flows)
+            ref = f"{f['id']} {f['name']}"
+        fid = int(ref.split(" ", 1)[0])
+        if fid in dups:
+            # Recording it now would make this run indistinguishable from the
+            # other flow's, and an archived record can never be rewritten.
+            names = ", ".join(f["name"] for f in dups[fid])
+            sys.exit(f"error: flow id {fid} is held by {len(dups[fid])} flows "
+                     f"({names}); a run recorded against it could not be told "
+                     f"from the other's. Repair first: flow reid <name>")
+        if ref not in refs:
+            refs.append(ref)
+    return refs
+
+
+def parse_flow_refs(text):
+    """A task's `flow` field → [(id, name)], skipping malformed tokens."""
+    out = []
+    for tok in split_names(text):
+        m = FLOW_REF_RE.match(tok)
+        if m:
+            out.append((int(m.group(1)), m.group(2)))
+    return out
+
+
+def cmd_flow(args):
+    root, scope, branch, bw = ctx()
+    flows = all_flows(bw, scope)
+    warn_duplicate_flow_ids(flows)
+    act = args.action
+    if act == "list":
+        sel = flows if args.all else [f for f in flows if flow_is_active(f)]
+        if args.json:
+            print(json.dumps([{k: f.get(k, "") for k in FLOW_FIELDS}
+                              for f in sel], indent=1))
+            return
+        if not sel:
+            print("(no flows)" if args.all else "(no active flows)")
+            return
+        for f in sel:
+            print(flow_line(f, show_status=args.all))
+        return
+    if act == "show":
+        f = find_flow(bw, scope, args.name, flows)
+        with open(f["path"]) as fh:
+            print(fh.read().rstrip())
+        return
+    if act == "runs":
+        f = find_flow(bw, scope, args.name, flows)
+        if args.json:
+            print(json.dumps(flow_run_entries(bw, scope, f), indent=1))
+            return
+        print(flow_runs_text(bw, scope, f, color=_use_color()))
+        return
+    if act == "create":
+        name = validate_flow_name((args.name or "").strip())
+        taken = next((f for f in flows if f["name"] == name), None)
+        if taken:
+            if flow_is_active(taken):
+                sys.exit(f"error: flow '{name}' already exists (id {taken['id']})")
+            sys.exit(f"error: retired flow '{name}' still holds that name; "
+                     f"rename it first: flow rename {name} <new-name>")
+        desc = " ".join((args.desc or "").split())
+        if not desc:
+            sys.exit("error: flow create needs --desc \"<one line: what it "
+                     "does and when to use it>\"")
+        uses = split_names(args.uses)
+        check_uses(uses, flows, name)
+        os.makedirs(os.path.join(bw, fdir(scope)), exist_ok=True)
+        meta = {
+            "id": max((f["id"] for f in flows), default=0) + 1,
+            "name": name, "description": desc,
+            "inputs": ", ".join(split_names(args.inputs)),
+            "uses": ", ".join(uses), "status": "active", "formerly": "",
+            "created": datetime.date.today().isoformat(),
+            "body": flow_body_from_args(args) or "",
+            "path": flow_path(bw, scope, name),
+        }
+        write_flow(meta)
+        board_commit(root, branch, bw, scope, f"dev: flow create {name}")
+        print(render_flow(meta).rstrip())
+        return
+    f = find_flow(bw, scope, args.name, flows)
+    name = f["name"]
+    if act == "update":
+        changes = []
+        if args.desc is not None:
+            f["description"] = " ".join(args.desc.split())
+            changes.append("description")
+        if args.inputs is not None:
+            f["inputs"] = ", ".join(split_names(args.inputs))
+            changes.append("inputs")
+        if args.uses is not None:
+            uses = split_names(args.uses)
+            check_uses(uses, flows, name)
+            f["uses"] = ", ".join(uses)
+            changes.append("uses")
+        if args.status is not None:
+            if args.status not in FLOW_STATUSES:
+                sys.exit(f"error: status must be one of {list(FLOW_STATUSES)}")
+            f["status"] = args.status
+            changes.append(f"status={args.status}")
+        body = flow_body_from_args(args)
+        if body is not None:
+            f["body"] = body
+            changes.append("body")
+        if args.append is not None:
+            f["body"] = append_body(f["body"], args.append)
+            changes.append("append")
+        if not changes:
+            sys.exit("error: nothing to update")
+        write_flow(f)
+        board_commit(root, branch, bw, scope,
+                     f"dev: flow update {name} ({', '.join(changes)})")
+        print(f"flow {name} updated: {', '.join(changes)}")
+        return
+    if act == "rename":
+        new = validate_flow_name((args.new_name or "").strip())
+        if new == name:
+            sys.exit(f"error: flow is already named '{name}'")
+        if any(x["name"] == new for x in flows):
+            sys.exit(f"error: flow '{new}' already exists")
+        old_path = f["path"]
+        formerly = [n for n in split_names(f.get("formerly")) if n != new]
+        if name not in formerly:
+            formerly.append(name)
+        f["formerly"] = ", ".join(formerly)
+        f["name"] = new
+        f["path"] = flow_path(bw, scope, new)
+        # Other flows that use the old name follow the rename — `uses` is a
+        # live pointer, unlike a task's recorded run.
+        followers = []
+        for x in flows:
+            if x is f:
+                continue
+            u = split_names(x.get("uses"))
+            if name in u:
+                x["uses"] = ", ".join(new if n == name else n for n in u)
+                write_flow(x)
+                followers.append(x["name"])
+        os.replace(old_path, f["path"])
+        write_flow(f)
+        board_commit(root, branch, bw, scope, f"dev: flow rename {name} → {new}")
+        print(f"flow {name} → {new} (id {f['id']}; '{name}' is free again)")
+        if followers:
+            print(f"  uses updated in: {', '.join(followers)}")
+        return
+    if act == "reid":
+        dups = duplicate_flow_ids(flows)
+        if f["id"] not in dups:
+            sys.exit(f"error: flow '{name}' holds id {f['id']} alone; reid "
+                     f"only repairs an id two flows minted independently")
+        held = flow_ref_holders(bw, scope, f)
+        if held:
+            others = ", ".join(x["name"] for x in dups[f["id"]] if x is not f)
+            sys.exit(f"error: {len(held)} task(s) already record this flow's "
+                     f"runs ({', '.join(held)}); a new id would orphan them. "
+                     f"Reid the other flow instead: flow reid {others}")
+        old_id = f["id"]
+        f["id"] = max(x["id"] for x in flows) + 1
+        write_flow(f)
+        board_commit(root, branch, bw, scope,
+                     f"dev: flow reid {name} ({old_id} → {f['id']})")
+        print(f"flow {name}: id {old_id} → {f['id']} (no runs recorded, so "
+              f"nothing points at the old id)")
+        return
+    if act == "retire":
+        if not flow_is_active(f):
+            sys.exit(f"error: flow '{name}' is already retired")
+        users = [x["name"] for x in flows
+                 if flow_is_active(x) and name in split_names(x.get("uses"))]
+        if users:
+            print(f"warning: active flows still use '{name}': "
+                  f"{', '.join(users)}", file=sys.stderr)
+        f["status"] = "retired"
+        write_flow(f)
+        board_commit(root, branch, bw, scope, f"dev: flow retire {name}")
+        print(f"flow {name} retired (id {f['id']} keeps resolving its runs; "
+              f"revive with flow update {name} --status active)")
+        return
+
+
 # ---------- task file format ----------
 # <scope>/.tasks/NNN.md :
 #   ---
@@ -784,6 +1363,8 @@ def render_task(meta):
         v = meta.get(k, "")
         if k == "deps":
             v = "[" + ", ".join(str(d) for d in meta.get("deps", [])) + "]"
+        elif k == "type":
+            v = task_type(meta)
         elif k in OPTIONAL_FIELDS and not v:
             continue
         lines.append(f"{k}: {v}")
@@ -794,6 +1375,46 @@ def render_task(meta):
 
 def is_umbrella(t):
     return (t.get("kind") or "").strip() == "umbrella"
+
+
+def task_type(t):
+    """The task's type, with absent/empty read as dev."""
+    return (t.get("type") or "").strip() or DEV
+
+
+def is_ops(t):
+    return task_type(t) == OPS
+
+
+def validate_type(meta, set_type=False, set_area=False, new=False):
+    """type is dev, ops, or empty (= dev); an ops task carries no area.
+    Exits on error.
+
+    Both remedies are valid when the two collide, so the message leads with
+    the one matching what the caller just asked for: setting `--type ops`
+    on a tagged task means drop the area, while tagging an ops task means
+    it has to become a dev task first. `new` is an add, where no task
+    exists yet to point an update at.
+    """
+    typ = (meta.get("type") or "").strip()
+    if typ not in ("", DEV, OPS):
+        sys.exit(f"error: type must be '{DEV}' or '{OPS}'")
+    if typ == OPS and split_areas(meta.get("area", "")):
+        why = "(areas lock code; ops touches none)"
+        if new:
+            sys.exit(f"error: an ops task carries no area {why}. Add it "
+                     f"without --area, or without --type {OPS} if it needs "
+                     f"code")
+        tid = meta["id"]
+        head = f"error: T{tid} is an ops task and carries no area {why}"
+        to_ops = f"drop the area: update {tid} --type {OPS} --area \"\""
+        to_dev = (f"make it a dev task first: update {tid} --type {DEV} "
+                  f"--area <name>")
+        if set_type and not set_area:
+            sys.exit(f"{head}. To run it through /ops flows, {to_ops}")
+        if set_area and not set_type:
+            sys.exit(f"{head}. If it needs code, {to_dev}")
+        sys.exit(f"{head}. Either {to_ops}, or if it needs code, {to_dev}")
 
 
 # --- Recurring tasks -------------------------------------------------
@@ -902,18 +1523,20 @@ def validate_recurring(meta):
         parse_iso_date(last, "last_run")
 
 
-def rearm_recurring(root, scope, branch, bw, meta, ran_on=None):
+def rearm_recurring(root, scope, branch, bw, meta, ran_on=None, record=None):
     """Record a run: stamp last_run and re-arm instead of going terminal.
 
     Callers pass a freshly read record. Clears the per-run fields (assignee,
     branch, pr) so the next cycle starts clean; the run itself is recorded in
-    the body and, for a shipped run, in the Shipped record already there.
+    the body — a bare `Ran (<date>).` for a landed or `recur ran` run (the
+    Shipped record already says what happened), or the full `Ran (<date>):
+    …` line an ops run passes in.
     """
     ran = ran_on or datetime.date.today()
     meta["last_run"] = ran.isoformat()
     meta["status"] = "backlog"
     meta["assignee"] = meta["branch"] = meta["pr"] = ""
-    meta["body"] = append_body(meta["body"], f"Ran ({ran.isoformat()}).")
+    meta["body"] = append_body(meta["body"], record or f"Ran ({ran.isoformat()}).")
     with open(meta["path"], "w") as f:
         f.write(render_task(meta))
     board_commit(root, branch, bw, scope,
@@ -1090,11 +1713,15 @@ def set_area_overlaps(ids, tasks):
     return pairs
 
 
-def format_area_collisions(task, blockers, color=False):
-    label = task.get("area") or "(untagged)"
+def _task_head(task, color=False):
+    label = task.get("area") or ("(ops)" if is_ops(task) else "(untagged)")
     tid = f"T{task['id']}"
-    head = (f"{_status_ansi(task['status'], tid)} {_ansi(_DIM, label)}"
+    return (f"{_status_ansi(task['status'], tid)} {_ansi(_DIM, label)}"
             if color else f"{tid} {label}")
+
+
+def format_area_collisions(task, blockers, color=False):
+    head = _task_head(task, color=color)
     if not blockers:
         clear = _ansi(_OK, "clear") if color else "clear"
         return f"{head} — {clear}"
@@ -1110,17 +1737,53 @@ def format_area_collisions(task, blockers, color=False):
     return f"{head} — {blocked}: {', '.join(bits)}"
 
 
+def unfinished_deps(task, tasks):
+    """Direct deps whose status is not done. Missing ids count as unfinished."""
+    by_id = {t["id"]: t for t in tasks}
+    hits = []
+    for d in task.get("deps") or []:
+        other = by_id.get(d)
+        if other is None or other.get("status") != "done":
+            hits.append(other if other is not None else {
+                "id": d, "status": "missing"})
+    return hits
+
+
+def format_unfinished_deps(blockers, color=False):
+    bits = []
+    for o in blockers:
+        oid, st = f"T{o['id']}", o["status"]
+        if color:
+            bits.append(f"{_status_ansi(st, oid)} {_status_ansi(st, st)}")
+        else:
+            bits.append(f"{oid} {st}")
+    blocked = _ansi(_ERR, "blocked") if color else "blocked"
+    return f"deps {blocked}: {', '.join(bits)}"
+
+
 def watch_missing_tid(tid, color=False):
     msg = f"T{tid} — no such task"
     return _ansi(_ERR, msg) if color else msg
 
 
-def watch_collision_line(tid, tasks, color=False):
+def watch_check_line(tid, tasks, color=False):
+    """Watch-mode c: occupancy plus unfinished deps.
+
+    Only blocked sides print; both clear → one 'clear'.
+    Not cmd_collisions — that stays the implement gate (exit 2/3).
+    """
     task = next((t for t in tasks if t["id"] == tid), None)
     if task is None:
         return watch_missing_tid(tid, color=color)
-    return format_area_collisions(
-        task, in_flight_area_collisions(task, tasks), color=color)
+    occ_hits = in_flight_area_collisions(task, tasks)
+    dep_hits = unfinished_deps(task, tasks)
+    if not dep_hits:
+        return format_area_collisions(task, occ_hits, color=color)
+    deps = format_unfinished_deps(dep_hits, color=color)
+    if not occ_hits:
+        return f"{_task_head(task, color=color)} — {deps}"
+    occ = format_area_collisions(task, occ_hits, color=color)
+    return f"{occ} · {deps}"
 
 
 def watch_task_view(tid, tasks):
@@ -1129,6 +1792,61 @@ def watch_task_view(tid, tasks):
     if task is None:
         return None
     return render_task(task).rstrip()
+
+
+def flows_pane_text(bw, scope, color=False):
+    """Watch-mode f: the playbook index, one line per flow."""
+    flows = all_flows(bw, scope)
+    title = "# Flows"
+    if scope != ".":
+        title += f" ({scope})"
+    lines = [title, ""]
+    if not flows:
+        lines.append("(no flows yet)")
+        return "\n".join(lines)
+    active = [f for f in flows if flow_is_active(f)]
+    retired = [f for f in flows if not flow_is_active(f)]
+    width = max(len(f["name"]) for f in flows)
+    for group, head in ((active, None), (retired, "Retired")):
+        if not group:
+            continue
+        if head:
+            lines.extend(["", head])
+        for f in group:
+            fid = f"{f['id']:>3}"
+            line = (f"{_ansi(_DIM, fid) if color else fid}  "
+                    f"{f['name'].ljust(width)}  "
+                    f"{f.get('description', '')}").rstrip()
+            uses = split_names(f.get("uses"))
+            if uses:
+                tail = f"uses {', '.join(uses)}"
+                line += f"  \u00b7 {_ansi(_DIM, tail) if color else tail}"
+            lines.append(line)
+    return "\n".join(lines)
+
+
+def watch_flow_view(bw, scope, fid):
+    """One flow's file plus its run history, or None if no such id."""
+    flow = next((f for f in all_flows(bw, scope) if f["id"] == fid), None)
+    if flow is None:
+        return None
+    try:
+        with open(flow["path"]) as fh:
+            text = fh.read().rstrip()
+    except OSError:
+        text = render_flow(flow).rstrip()
+    return f"{text}\n\n{flow_runs_text(bw, scope, flow, color=_use_color())}"
+
+
+def watch_missing_fid(fid, color=False):
+    msg = f"flow {fid} — no such flow"
+    return _ansi(_ERR, msg) if color else msg
+
+
+def parse_watch_fid(buf):
+    """Digits only. In the flows pane a number is a flow id, not a task."""
+    s = buf.strip()
+    return int(s) if s.isdigit() else None
 
 
 def parse_watch_tid(buf):
@@ -1466,6 +2184,25 @@ def parse_version_intent(body):
     """Pull `Version intent: <token>` from a PR body, if present."""
     m = re.search(r"(?im)^\s*Version intent:\s*(\S+)", body or "")
     return m.group(1) if m else None
+
+
+def version_intent_bump(intent):
+    """Real bump token, or None when missing/none (stay silent)."""
+    intent = (intent or "").strip()
+    if not intent or intent.lower() == "none":
+        return None
+    return intent
+
+
+def set_version_intent_in_text(text, intent):
+    """Replace, add, or (for none) drop the Version intent line."""
+    intent = version_intent_bump(intent)
+    text = re.sub(r"(?im)^[ \t]*Version intent:.*(?:\n|\Z)", "",
+                  text or "")
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    if intent:
+        text = text.rstrip() + f"\n\nVersion intent: {intent}\n"
+    return text
 
 
 def task_branch_name(meta, pr_head=None):
@@ -2395,8 +3132,9 @@ def cmd_cleanup(args):
 
 
 def note_version_intent(intent, integration, product):
-    """Post-land bump reminder. No-op when intent is missing or none."""
-    if not intent or intent.lower() == "none":
+    """Post-land bump reminder. Silent when intent is missing or none."""
+    intent = version_intent_bump(intent)
+    if not intent:
         return
     print(f"note: Version intent is '{intent}' — apply one bump "
           f"on '{integration}' when this set is done (per product "
@@ -2417,8 +3155,9 @@ def cmd_land(args):
     handed back to the author. Immediate children are retargeted to
     integration after the merge and before cleanup deletes the branch —
     deleting it first would close them. Already-done is cleanup only.
-    Does not approve the PR. Surfaces Version intent from the PR body only —
-    product version file edits stay with the merger / product docs.
+    Does not approve the PR. Surfaces a non-none Version intent from the
+    PR body only — omitted or none stays silent; product version file
+    edits stay with the merger / product docs.
     """
     root, scope, integration, bw = ctx()
     meta = find_task(bw, scope, args.id)
@@ -2455,7 +3194,7 @@ def cmd_land(args):
     head = info.get("headRefName") or ""
     base = (info.get("baseRefName") or "").strip()
     body = info.get("body") or ""
-    intent = parse_version_intent(body)
+    intent = version_intent_bump(parse_version_intent(body))
     branch = task_branch_name(meta, head)
     if not branch:
         sys.exit(f"error: T{tid} has no branch and PR head is empty")
@@ -2464,7 +3203,8 @@ def cmd_land(args):
     print(f"  branch: {branch}")
     print(f"  base:   {base or integration}")
     print(f"  state:  {state}")
-    print(f"  Version intent: {intent if intent is not None else '(not stated)'}")
+    if intent:
+        print(f"  Version intent: {intent}")
 
     if pr_is_merged(info):
         print(f"T{tid}: PR already merged — retargeting children, then done")
@@ -2656,6 +3396,10 @@ def cmd_claim(args):
         sys.exit(f"error: T{tid} is an umbrella: a goal, not a unit of code. "
                  f"It gets no branch and no PR — run /dev implement {tid} for "
                  f"the verification pass, and file any real code as a child.")
+    if is_ops(meta):
+        sys.exit(f"error: T{tid} is an ops task: no branch, no PR — run it "
+                 f"with /ops run {tid}. If it needs code, make it a dev task "
+                 f"first: update {tid} --type {DEV} --area <name>")
     if not split_areas(meta.get("area", "")):
         sys.exit(f"error: T{tid} has no area; set a real name "
                  f"(reuse or area set) before claim")
@@ -2720,9 +3464,10 @@ def cmd_claim(args):
 # ---------- ship (implement: commit, push, open PR) ----------
 
 def path_is_tasks_dir(path):
-    """True if path is inside a .tasks board directory (must not ship on code)."""
+    """True if path is inside a .tasks or .flows directory (board state —
+    must not ship on a code branch)."""
     norm = path.replace("\\", "/")
-    return bool(re.search(r"(^|/)\.tasks(/|$)", norm))
+    return bool(re.search(r"(^|/)\.(tasks|flows)(/|$)", norm))
 
 
 def path_under_task_worktrees(root, scope, path):
@@ -2839,16 +3584,30 @@ def cmd_diff(args):
             sys.exit(f"error: T{tid} is in {meta['status']} with no branch")
         sys.exit(f"error: T{tid} has no branch; run claim first")
     work = ship_work_cwd(root, scope, meta, branch, integration)
-    base = f"origin/{integration}"
-    if not ref_exists(root, base):
-        base = integration
-        if not ref_exists(root, base):
-            sys.exit(f"error: no {base} to diff against")
 
     print(f"T{tid}: diff")
     print(f"  workdir: {work}")
     print(f"  product: {product_root(work, scope)}")
     print(f"  branch:  {branch}")
+    # Diff against what the PR is (or will be) based on: a stacked task
+    # measured against integration shows its parent's files as its own.
+    # An open PR's base is authoritative (--base, land's retarget);
+    # before the PR exists, ship's own derivation says what it will be.
+    base_branch = ""
+    pr_url = (meta.get("pr") or "").strip()
+    if pr_url:
+        info = pr_view(root, pr_url, soft=True) or {}
+        if (info.get("state") or "").upper() == "OPEN":
+            base_branch = (info.get("baseRefName") or "").strip()
+    if not base_branch:
+        base_branch = derive_stack_base(root, bw, scope, meta, branch,
+                                        integration, soft=True)
+    base_branch = base_branch or integration
+    base = f"origin/{base_branch}"
+    if not ref_exists(root, base):
+        base = base_branch
+        if not ref_exists(root, base):
+            sys.exit(f"error: no {base} to diff against")
     print(f"  base:    {base}")
 
     st = git("status", "--porcelain", cwd=work, check=False)
@@ -2975,6 +3734,65 @@ def format_verified(text, date=None):
 def collect_verified(text):
     """Every verification record in a task body, in order."""
     return [m.group(0).strip() for m in VERIFIED_RE.finditer(text or "")]
+
+
+# ---------- ran record (ops run close) ----------
+
+# An ops task never ships; its close records the run instead:
+#   Ran (2026-09-18): [7 send-invoice] inputs: client=acme; deviations: none.
+# `[no flow]` marks a run that followed no stored flow (the chunked loop).
+RAN_RE = re.compile(
+    r"(?ims)^Ran \(\d{4}-\d{2}-\d{2}\)[:.].*?(?=\n[ \t]*\n|\Z)")
+
+
+def format_ran(text, refs, date=None):
+    """One run record, collapsed to a single paragraph."""
+    text = " ".join((text or "").split())
+    date = date or datetime.date.today().isoformat()
+    tag = ", ".join(refs) if refs else "no flow"
+    return f"Ran ({date}): [{tag}] {text}"
+
+
+def collect_ran(text):
+    """Every run record in a task body, in order (bare `Ran (<date>).` lines
+    from landed recurring runs included)."""
+    return [m.group(0).strip() for m in RAN_RE.finditer(text or "")]
+
+
+# ---------- paused record (ops run stopped partway) ----------
+
+# A run that stops mid-flow and will be picked up in a later session, or on
+# another machine, records where it stopped and what it has produced:
+#   Paused (2026-09-29): [7 send-invoice step 4] invoice drafted on `laptop`…
+# It is not an outcome: the task stays `doing`, `ran` still closes it, and
+# nothing collects these into log.md — the closing record is the trace that
+# outlives the task. Only written on the user's explicit call, so an ordinary
+# run that finishes in one sitting carries none.
+def format_paused(text, refs, at, date=None):
+    """One pause record, collapsed to a single paragraph."""
+    text = " ".join((text or "").split())
+    at = " ".join((at or "").split())
+    date = date or datetime.date.today().isoformat()
+    tag = ", ".join(refs) if refs else "no flow"
+    return f"Paused ({date}): [{tag} {at}] {text}"
+
+
+# ---------- note record (what an ops run's flow did not predict) ----------
+
+# A line of run history the flow could not have told you: a step the user
+# did themselves, a step inserted mid-run, a correction.
+#   Note (2026-09-29): [7 send-invoice step 4] user phoned the vendor…
+# Like a pause it is not an outcome — nothing collects it into log.md — but
+# it is what the closing record's deviations, the post-run flow tweak and
+# `flow create from <id>` read. Steps that went as written get none.
+def format_note(text, refs, at, date=None):
+    """One note, collapsed to a single paragraph; the tag is dropped when
+    there is neither a flow nor a step to name."""
+    text = " ".join((text or "").split())
+    at = " ".join((at or "").split())
+    date = date or datetime.date.today().isoformat()
+    tag = " ".join(x for x in (", ".join(refs), at) if x)
+    return f"Note ({date}): [{tag}] {text}" if tag else f"Note ({date}): {text}"
 
 
 def ensure_shipped_in_text(text, records):
@@ -3327,7 +4145,8 @@ def cmd_restack(args):
     print("restack: done")
 
 
-def derive_stack_base(root, bw, scope, meta, branch, integration):
+def derive_stack_base(root, bw, scope, meta, branch, integration, *,
+                      soft=False):
     """PR base for a stacked task branch, or '' when it stands alone.
 
     A collision-driven stack stores nothing: the stack edge is the PR
@@ -3346,7 +4165,8 @@ def derive_stack_base(root, bw, scope, meta, branch, integration):
     other (one of them moved after the fork) is ambiguous — git cannot
     tell which side moved, and the error must not blame one — so ship
     refuses and asks for an explicit --base rather than opening a PR
-    whose diff silently contains someone else's commits.
+    whose diff silently contains someone else's commits. soft=True (diff,
+    which only reads) warns and returns '' instead.
     """
     remote_int = f"origin/{integration}"
     if not ref_exists(root, remote_int):
@@ -3381,6 +4201,11 @@ def derive_stack_base(root, bw, scope, meta, branch, integration):
             murky.append(obranch)
     if murky:
         names = ", ".join(sorted(murky))
+        if soft:
+            print(f"warning: '{branch}' shares unmerged commits with {names} "
+                  f"but is not based on its current tip; diffing against "
+                  f"integration", file=sys.stderr)
+            return ""
         sys.exit(f"error: '{branch}' shares unmerged commits with {names}, "
                  f"but neither branch is based on the other's current tip "
                  f"(one of them moved since the stack); cannot derive a PR "
@@ -3401,7 +4226,9 @@ def cmd_ship(args):
     already in review leaves it there.
     Mirrors hand-rolled implement ship, with stricter guards: never commit
     .tasks/ paths, refuse empty ship, one push via push_task_branch.
-    Version intent is agent-owned (optional --version-intent / --body only).
+    Version intent is agent-owned (optional --version-intent / --body only;
+    omitted or none is silent — no PR line, no land print). The flag also
+    rewrites the line on a re-ship, so a changed intent can be corrected.
     """
     root, scope, integration, bw = ctx()
     cfg = read_board_cfg(bw, scope)
@@ -3418,6 +4245,9 @@ def cmd_ship(args):
     target = "review" if meta["status"] == "review" else "draft"
     if meta["status"] in ("done", "later", "not-planned", "proposed"):
         sys.exit(f"error: T{tid} is {meta['status']}; cannot ship")
+    if is_ops(meta):
+        sys.exit(f"error: T{tid} is an ops task; nothing ships — it closes "
+                 f"with its run record (/ops run {tid})")
 
     # A ship without a result record is what leaves the PR body a stale copy
     # of pre-implementation intent. Required on every ship, including re-ship
@@ -3482,8 +4312,8 @@ def cmd_ship(args):
             sys.exit(f"error: T{tid} PR already merged: {pr_url}")
         if not (info and (info.get("state") or "").upper() == "OPEN"):
             # Closed/unknown recorded URL — look for a live open PR.
-            # Open PR is reused as-is; --title/--body/--version-intent/--base
-            # apply only when creating below.
+            # Open PR is reused as-is; --title/--body/--base apply only
+            # when creating below (--version-intent also corrects a re-ship).
             pr_url = find_open_pr_for_branch(root, branch, pr_base)
     else:
         pr_url = find_open_pr_for_branch(root, branch, pr_base)
@@ -3514,9 +4344,8 @@ def cmd_ship(args):
         body = (args.body or "").strip()
         if not body:
             body = (meta.get("body") or "").strip() or meta["title"]
-        intent = (args.version_intent or "").strip()
-        if intent and not re.search(r"(?im)^\s*Version intent:", body):
-            body = body.rstrip() + f"\n\nVersion intent: {intent}\n"
+        if args.version_intent is not None:
+            body = set_version_intent_in_text(body, args.version_intent)
         if batch_line:
             body = ensure_dev_batch_in_text(body, batch_ids)
         body = ensure_shipped_in_text(body, shipped_records)
@@ -3545,21 +4374,34 @@ def cmd_ship(args):
         # Re-ship: refresh the shipped records on the open PR (and the
         # Dev-batch stamp when --batch given). The task body is the source of
         # truth; a failed edit only costs the mirror, so it warns.
-        info = pr_view(root, pr_url, soft=True) or {}
-        body = info.get("body") or ""
-        new_body = body
-        if batch_ids and parse_dev_batch(new_body) != batch_ids:
-            new_body = ensure_dev_batch_in_text(new_body, batch_ids)
-        new_body = ensure_shipped_in_text(new_body, shipped_records)
-        if new_body.strip() != body.strip():
-            r = gh("pr", "edit", pr_url, "--body", new_body, cwd=root,
-                   check=False)
-            if r.returncode != 0:
-                err = (r.stderr or r.stdout or "").strip()
-                print(f"  warning: could not update PR body: {err}",
-                      file=sys.stderr)
-            else:
-                print(f"  updated PR body: {shipped_line}")
+        info = pr_view(root, pr_url, soft=True)
+        if info is None:
+            # Unread body: treating it as "" would make the edit below
+            # overwrite the live PR body with these blocks alone. The
+            # record lands on the task either way, so leave the mirror.
+            print(f"  warning: could not read the PR body; leaving the PR "
+                  f"as it is (the task body keeps the record)",
+                  file=sys.stderr)
+        else:
+            body = info.get("body") or ""
+            new_body = body
+            if batch_ids and parse_dev_batch(new_body) != batch_ids:
+                new_body = ensure_dev_batch_in_text(new_body, batch_ids)
+            # An intent can change after the first ship (a batch member turns
+            # breaking); land reads this line, so the flag must correct it.
+            if args.version_intent is not None:
+                new_body = set_version_intent_in_text(new_body,
+                                                      args.version_intent)
+            new_body = ensure_shipped_in_text(new_body, shipped_records)
+            if new_body.strip() != body.strip():
+                r = gh("pr", "edit", pr_url, "--body", new_body, cwd=root,
+                       check=False)
+                if r.returncode != 0:
+                    err = (r.stderr or r.stdout or "").strip()
+                    print(f"  warning: could not update PR body: {err}",
+                          file=sys.stderr)
+                else:
+                    print(f"  updated PR body: {shipped_line}")
 
     integration, bw = resolve_board(root, scope)
     meta = find_task(bw, scope, tid)
@@ -3831,8 +4673,8 @@ def cmd_preflight(args):
     )
 
 
-def iteration_close_ready(bw, scope, index):
-    """Return an error string if the board is not closed for land, else None.
+def iteration_close_ready(bw, scope, index, next_cmd="iteration-land"):
+    """Return an error string if the board is not closed for land/new, else None.
 
     Ready means: no live task files, and log.md has a close heading for this
     iteration index (written by iteration-close as ``## {n}`` or
@@ -3842,7 +4684,7 @@ def iteration_close_ready(bw, scope, index):
     if tasks:
         ids = ", ".join(f"T{t['id']}" for t in tasks)
         return (f"board still has tasks ({ids}); run TASKS iteration-close "
-                f"before iteration-land")
+                f"before {next_cmd}")
     log_path = os.path.join(bw, tdir(scope), "log.md")
     rel = f"{tdir(scope)}/log.md"
     if not os.path.isfile(log_path):
@@ -3873,8 +4715,10 @@ def cmd_iteration_land(args):
     cfg = read_board_cfg(bw, scope)
     parent = (cfg.get("parent_branch") or "").strip()
     if not parent:
-        sys.exit("error: no parent_branch configured; iteration land needs a "
-                 "parent to merge into (main-with-no-parent boards never close)")
+        sys.exit("error: no parent_branch configured; iteration-land merges "
+                 "into a parent. Close a no-parent board in place: "
+                 "TASKS iteration-close, then TASKS iteration-new --name "
+                 "<name>")
     if parent == integration:
         sys.exit(f"error: parent_branch equals integration_branch "
                  f"('{integration}')")
@@ -4035,7 +4879,7 @@ def cmd_init(args):
         for line in ignore_lines:
             append_ignore_line(gi, line)
         if not board_commit(root, branch, bw, scope,
-                            f"dev: init task board ({scope})"):
+                            "dev: init task board"):
             # Nothing was fast-forwarded into this checkout, so the board is
             # not discoverable yet (find_scope reads the checkout).
             sys.exit(f"error: the new board is queued on "
@@ -4062,7 +4906,7 @@ def cmd_init(args):
     if os.path.isdir(dest):
         print(f"viewer: skipped ({VIEWER_NAME} is a directory)")
     else:
-        print(f"viewer: ./{VIEWER_NAME}  (r refresh, a by area, e expand, c collisions, q quit, arrows scroll, type id↵)")
+        print(f"viewer: ./{VIEWER_NAME}  (r refresh, a by area, e expand, c check, f flows, q quit, arrows scroll, space/b page, type id↵)")
     print(f"identity: {args.name}")
     if scope != ".":
         print(f"note: commands target this board from inside '{scope}/' "
@@ -4117,10 +4961,16 @@ def cmd_config(args):
             # (and, for a renumber, the archive path already written).
             if live_iteration_closed(bw, scope, cfg):
                 cur = iteration_index(cfg)
+                parent = (cfg.get("parent_branch") or "").strip()
+                if parent:
+                    sys.exit(f"error: iteration {cur} is already closed in "
+                             f"{tdir(scope)}/log.md; changing {args.key} now "
+                             "would break iteration-land. Land it, then start "
+                             "the next one with iteration-new.")
                 sys.exit(f"error: iteration {cur} is already closed in "
                          f"{tdir(scope)}/log.md; changing {args.key} now "
-                         "would break iteration-land. Land it, then start "
-                         "the next one with iteration-new.")
+                         "would desync the close heading. Start the next "
+                         "one in place: TASKS iteration-new --name <name>")
         if args.key == "iteration":
             new = parse_positive_int(value, "iteration")
             cur = iteration_index(cfg)
@@ -4235,6 +5085,7 @@ def cmd_add(args):
     meta = {
         "id": tid, "title": args.title, "area": args.area or "",
         "status": args.status, "kind": kind,
+        "type": (args.type or "").strip() or DEV,
         "assignee": args.assignee or "", "branch": "",
         "deps": [int(x) for x in re.findall(r"\d+", args.deps or "")], "pr": "",
         "needs": "", "created": datetime.date.today().isoformat(),
@@ -4242,6 +5093,7 @@ def cmd_add(args):
         "body": args.desc or "",
     }
     validate_recurring(meta)
+    validate_type(meta, new=True)
     known = {t["id"] for t in tasks}
     for d in meta["deps"]:
         if d not in known:
@@ -4262,14 +5114,20 @@ def cmd_update(args):
     root, scope, branch, bw = ctx()
     meta = find_task(bw, scope, args.id)
     changes = []
-    for field in ("title", "area", "status", "kind", "assignee", "branch", "pr",
-                  "needs", "desc", "cadence", "last_run"):
+    for field in ("title", "area", "status", "kind", "type", "assignee",
+                  "branch", "pr", "needs", "desc", "cadence", "last_run"):
         v = getattr(args, field, None)
         if v is not None:
             key = "body" if field == "desc" else field
-            strip = field in ("kind",) + OPTIONAL_FIELDS
+            strip = field in ("kind", "type") + OPTIONAL_FIELDS
             meta[key] = v.strip() if strip and isinstance(v, str) else v
+            if field == "type":
+                meta[key] = v = meta[key] or DEV
             changes.append(f"{field}={v}" if field != "desc" else "desc")
+    if args.flow is not None:
+        # Names resolve now so the field always holds `<id> <name>` refs.
+        meta["flow"] = ", ".join(resolve_flow_refs(bw, scope, args.flow))
+        changes.append(f"flow={meta['flow']}")
     if args.deps is not None:
         meta["deps"] = [int(x) for x in re.findall(r"\d+", args.deps)]
         changes.append(f"deps={meta['deps']}")
@@ -4292,6 +5150,8 @@ def cmd_update(args):
     if meta.get("needs") not in ("", "decision"):
         sys.exit("error: needs must be 'decision' or empty")
     validate_recurring(meta)
+    validate_type(meta, set_type=args.type is not None,
+                  set_area=args.area is not None)
     if is_recurring(meta) and meta["status"] == "done":
         sys.exit(f"error: T{meta['id']} is recurring and never goes done; "
                  f"record a run instead: TASKS recur ran {meta['id']}")
@@ -4371,9 +5231,13 @@ def cmd_list(args):
     sel = [t for t in tasks
            if (not args.assignee or t.get("assignee") == args.assignee)
            and (not args.status or t.get("status") == args.status)
-           and (not args.needs or t.get("needs") == args.needs)]
+           and (not args.needs or t.get("needs") == args.needs)
+           and (args.type is None
+                or task_type(t) == (args.type.strip() or DEV))]
     if args.json:
         out = [{k: t.get(k, "") for k in FIELDS + ["body"]} for t in sel]
+        for o, t in zip(out, sel):
+            o["type"] = task_type(t)
         print(json.dumps(out, indent=1))
     elif not sel:
         print("(no matching tasks)")
@@ -4448,6 +5312,132 @@ def cmd_verify(args):
     board_commit(root, branch, bw, scope,
                  f"dev: verify T{meta['id']} (closed)")
     print(f"T{meta['id']} closed: {format_verified(text)}")
+
+
+def cmd_ran(args):
+    """Close an ops task with its run record.
+
+    The ops analogue of ship + land in one step: there is no branch and no
+    PR, so the record is the whole outcome. Appends `Ran (<date>): …`,
+    stamps the task's `flow` field with the flows followed, and closes —
+    done for a normal task, re-armed via rearm_recurring for a recurring
+    one (same as a landed run).
+    """
+    root, scope, branch, bw = ctx()
+    meta = find_task(bw, scope, args.id)
+    tid = meta["id"]
+    if not is_ops(meta):
+        sys.exit(f"error: T{tid} is a dev task; it closes when its PR lands "
+                 f"(TASKS land {tid}). Only ops tasks close with a run record")
+    if meta["status"] in ("done", "later", "not-planned", "proposed"):
+        sys.exit(f"error: T{tid} is {meta['status']}; nothing to record")
+    if (meta.get("pr") or "").strip() or (meta.get("branch") or "").strip():
+        sys.exit(f"error: T{tid} has a branch/PR set; an ops task never "
+                 f"should — clear them first (update {tid} --branch \"\" --pr \"\")")
+    text = " ".join((args.record or "").split())
+    if not text:
+        sys.exit(f"error: ran needs --record \"<inputs; deviations>\": what "
+                 f"the run was given and where it departed from the flow")
+    refs = resolve_flow_refs(bw, scope, args.flow) if args.flow else []
+    if not refs and meta.get("flow"):
+        refs = [f"{i} {n}" for i, n in parse_flow_refs(meta["flow"])]
+    ran = iso_date(args.date, "date") if args.date else datetime.date.today()
+    record = format_ran(text, refs, ran.isoformat())
+    meta["flow"] = ", ".join(refs)
+    if is_recurring(meta):
+        meta = rearm_recurring(root, scope, branch, bw, meta, ran_on=ran,
+                               record=record)
+        due = task_due_date(meta)
+        print(f"T{tid} ran {meta['last_run']}, re-armed to backlog; "
+              f"next due {due.isoformat()}")
+    else:
+        meta["status"] = "done"
+        meta["body"] = append_body(meta["body"], record)
+        with open(meta["path"], "w") as f:
+            f.write(render_task(meta))
+        board_commit(root, branch, bw, scope, f"dev: T{tid} ran (closed)")
+        print(f"T{tid} closed")
+    print(f"  {record}")
+
+
+def cmd_pause(args):
+    """Record where a run stopped so a later session resumes from it.
+
+    The counterpart to `ran`: same shape, but the task stays `doing` and
+    keeps its assignee — a paused run is open, not finished, and sending it
+    back to `backlog` would throw away the fact that it is half-done. The
+    flows followed are stamped on the task now rather than at close, so the
+    session that picks it up sees them in the frontmatter.
+    """
+    root, scope, branch, bw = ctx()
+    meta = find_task(bw, scope, args.id)
+    tid = meta["id"]
+    if not is_ops(meta):
+        sys.exit(f"error: T{tid} is a dev task; its work in progress lives on "
+                 f"the branch, and implement resumes from there. Only ops "
+                 f"runs pause with a record")
+    if meta["status"] != "doing":
+        sys.exit(f"error: T{tid} is {meta['status']}; only a run under way "
+                 f"(doing) can pause")
+    at = " ".join((args.at or "").split())
+    if not at:
+        sys.exit(f"error: pause needs --at \"<step>\": where the run stopped "
+                 f"— the flow's step, or what was last done without one")
+    text = " ".join((args.record or "").split())
+    if not text:
+        sys.exit(f"error: pause needs --record \"<what exists so far>\": what "
+                 f"the run produced, and where it lives, so the next session "
+                 f"can pick it up")
+    refs = resolve_flow_refs(bw, scope, args.flow) if args.flow else []
+    if not refs and meta.get("flow"):
+        refs = [f"{i} {n}" for i, n in parse_flow_refs(meta["flow"])]
+    if refs:
+        meta["flow"] = ", ".join(refs)
+    record = format_paused(text, refs, at,
+                           iso_date(args.date, "date").isoformat()
+                           if args.date else None)
+    meta["body"] = append_body(meta["body"], record)
+    with open(meta["path"], "w") as f:
+        f.write(render_task(meta))
+    board_commit(root, branch, bw, scope, f"dev: T{tid} paused")
+    print(f"T{tid} paused (still doing, assigned to "
+          f"{meta.get('assignee') or 'nobody'})")
+    print(f"  {record}")
+    print(f"  resume with: /ops run {tid}")
+
+
+def cmd_note(args):
+    """Append a note to an ops task's run history.
+
+    Open to any status a run has touched or will touch — `done` included,
+    since a forgotten note is most often remembered at the post-run flow
+    tweak, after the close. `proposed` and `not-planned` never ran. Status,
+    assignee and the `flow` field are left alone: a note records, it does not
+    move the task.
+    """
+    root, scope, branch, bw = ctx()
+    meta = find_task(bw, scope, args.id)
+    tid = meta["id"]
+    if not is_ops(meta):
+        sys.exit(f"error: T{tid} is a dev task; record decisions there with "
+                 f"update {tid} --append \"Decision: …\". Only ops tasks "
+                 f"take notes")
+    if meta["status"] in ("proposed", "not-planned"):
+        sys.exit(f"error: T{tid} is {meta['status']}; nothing has run to "
+                 f"note")
+    text = " ".join((args.text or "").split())
+    if not text:
+        sys.exit("error: note needs its text: what the flow did not predict")
+    refs = [f"{i} {n}" for i, n in parse_flow_refs(meta.get("flow") or "")]
+    record = format_note(text, refs, args.at,
+                         iso_date(args.date, "date").isoformat()
+                         if args.date else None)
+    meta["body"] = append_body(meta["body"], record)
+    with open(meta["path"], "w") as f:
+        f.write(render_task(meta))
+    board_commit(root, branch, bw, scope, f"dev: T{tid} note")
+    print(f"T{tid} noted")
+    print(f"  {record}")
 
 
 def cmd_collisions(args):
@@ -4549,6 +5539,12 @@ def fmt_line(t, tasks, color=False):
     if color:
         tid, st = _status_ansi(t["status"], tid), _status_ansi(t["status"], st)
     parts = [tid, st]
+    if is_ops(t):
+        parts.append(_ansi(_DIM, "⚙ops") if color else "⚙ops")
+    if t.get("flow"):
+        names = ",".join(n for _, n in parse_flow_refs(t["flow"]))
+        if names:
+            parts.append(_ansi(_DIM, f"⇢{names}") if color else f"⇢{names}")
     if t.get("area"):
         area = f"({t['area']})"
         parts.append(_ansi(_DIM, area) if color else area)
@@ -4943,18 +5939,28 @@ def _rows_of(lines, cols):
     return sum(_line_rows(ln, cols) for ln in lines)
 
 
-def _watch_help(by_area, expand, more_above=0, more_below=0, collision=False,
-                showing=False):
+def _watch_help(by_area, expand, more_above=0, more_below=0, check=False,
+                showing=False, flows=False):
+    if flows:
+        query = "esc index" if showing else "type flow id↵"
+        return _watch_help_counts(
+            f"r refresh  f board  q quit  · {query}  arrows  space/b page",
+            more_above, more_below)
     other = "by status" if by_area else "by area"
     fold = "collapse" if expand else "expand"
     if showing:
         query = "esc board"
-    elif collision:
-        query = "collision id↵"
+    elif check:
+        query = "check id↵"
     else:
         query = "type id↵"
-    help_line = (f"r refresh  a {other}  e {fold}  c collisions  q quit"
-                 f"  · {query}  arrows scroll")
+    help_line = (f"r refresh  a {other}  e {fold}  c check  f flows  q quit"
+                 f"  · {query}  arrows  space/b page")
+    return _watch_help_counts(help_line, more_above, more_below)
+
+
+def _watch_help_counts(help_line, more_above, more_below):
+    """Append the off-screen line counts to a help line."""
     if more_above or more_below:
         bits = []
         if more_above:
@@ -4966,15 +5972,18 @@ def _watch_help(by_area, expand, more_above=0, more_below=0, collision=False,
 
 
 def _watch_footer_lines(by_area, expand, buf, result,
-                        more_above=0, more_below=0, collision=False,
-                        showing=False):
+                        more_above=0, more_below=0, check=False,
+                        showing=False, flows=False):
     help_line = _watch_help(by_area, expand, more_above, more_below,
-                           collision=collision, showing=showing)
+                           check=check, showing=showing, flows=flows)
     if _use_color():
         help_line = _ansi(_DIM, help_line)
     lines = ["", help_line]
-    if collision or buf:
-        lines.append(f"c> {buf}".rstrip() if collision else f"> {buf}")
+    if check or buf:
+        if check:
+            lines.append(f"c> {buf}".rstrip())
+        else:
+            lines.append(f"{'f> ' if flows else '> '}{buf}")
     if result:
         lines.append(result)
     return lines
@@ -5015,15 +6024,25 @@ def _window_lines(lines, offset, rows, cols):
     return shown, offset, len(lines) - i
 
 
-def _paint_watch(out, by_area, expand, buf, result, offset, collision=False,
-                 showing=False):
-    """Paint a terminal-height viewport. Returns the clamped offset."""
+def _watch_page_offsets(body, offset, body_rows, cols):
+    """Start offsets one viewport up and down from `offset`."""
+    shown, offset, _more = _window_lines(body, offset, body_rows, cols)
+    return (_max_watch_offset(body[:offset], body_rows, cols),
+            offset + len(shown))
+
+
+def _paint_watch(out, by_area, expand, buf, result, offset, check=False,
+                 showing=False, flows=False):
+    """Paint a terminal-height viewport.
+
+    Returns (clamped offset, page-up offset, page-down offset).
+    """
     rows, cols = _term_size()
     body = (out or "").splitlines()
     # First pass: footer without counts, so the body budget is stable.
     footer_rows = _rows_of(
         _watch_footer_lines(by_area, expand, buf, result,
-                            collision=collision, showing=showing), cols)
+                            check=check, showing=showing, flows=flows), cols)
     body_rows = max(1, rows - footer_rows)
     shown, offset, more_below = _window_lines(body, offset, body_rows, cols)
     more_above = offset
@@ -5031,23 +6050,24 @@ def _paint_watch(out, by_area, expand, buf, result, offset, collision=False,
         # Counts on the help line can wrap an extra row; re-fit if so.
         footer_rows = _rows_of(
             _watch_footer_lines(by_area, expand, buf, result,
-                                more_above, more_below, collision=collision,
-                                showing=showing),
+                                more_above, more_below, check=check,
+                                showing=showing, flows=flows),
             cols)
         body_rows = max(1, rows - footer_rows)
         shown, offset, more_below = _window_lines(
             body, offset, body_rows, cols)
         more_above = offset
     footer = _watch_footer_lines(by_area, expand, buf, result,
-                                 more_above, more_below, collision=collision,
-                                 showing=showing)
+                                 more_above, more_below, check=check,
+                                 showing=showing, flows=flows)
     _clear_screen()
     # No trailing newline: print() on the last row scrolls the first line off.
     frame = shown + footer
     if frame:
         sys.stdout.write("\n".join(frame))
     sys.stdout.flush()
-    return offset
+    page_up, page_down = _watch_page_offsets(body, offset, body_rows, cols)
+    return offset, page_up, page_down
 
 
 def cmd_board_refresh_viewer(root, scope):
@@ -5075,7 +6095,7 @@ def cmd_board_refresh_viewer(root, scope):
 
 
 def cmd_board(args):
-    root, scope, _branch, _bw = ctx()
+    root, scope, _branch, bw = ctx()
     if getattr(args, "refresh_viewer", False):
         cmd_board_refresh_viewer(root, scope)
         return
@@ -5096,8 +6116,10 @@ def cmd_board(args):
         buf = ""
         result = ""
         last_tid = None
-        last_kind = None  # "show" | "collision" | None
-        collision_mode = False
+        last_kind = None  # "show" | "check" | None
+        last_fid = None   # flows pane: the flow being shown
+        check_mode = False
+        flows_mode = False
         offset = 0
         try:
             while True:
@@ -5105,8 +6127,19 @@ def cmd_board(args):
                 expand = bool(getattr(args, "expand", False))
                 _plain, board, tasks = _render_board(args)
                 display = board
-                if last_kind == "collision" and last_tid is not None:
-                    result = watch_collision_line(
+                if flows_mode:
+                    display = flows_pane_text(bw, scope, color=_use_color())
+                    if last_fid is not None:
+                        view = watch_flow_view(bw, scope, last_fid)
+                        if view is None:
+                            result = watch_missing_fid(
+                                last_fid, color=_use_color())
+                            last_fid = None
+                        else:
+                            display = view
+                            result = ""
+                elif last_kind == "check" and last_tid is not None:
+                    result = watch_check_line(
                         last_tid, tasks, color=_use_color())
                 elif last_kind == "show" and last_tid is not None:
                     view = watch_task_view(last_tid, tasks)
@@ -5119,10 +6152,11 @@ def cmd_board(args):
                         display = view
                         result = ""
                 while True:
-                    offset = _paint_watch(
+                    offset, page_up, page_down = _paint_watch(
                         display, by_area, expand, buf, result, offset,
-                        collision=collision_mode,
-                        showing=last_kind == "show")
+                        check=check_mode, flows=flows_mode,
+                        showing=(last_fid is not None) if flows_mode
+                        else last_kind == "show")
                     key = _read_key(cooked=old_term is None)
                     if key in ("q", "Q"):
                         print()
@@ -5131,12 +6165,22 @@ def cmd_board(args):
                         buf = ""
                         offset = 0
                         break
-                    if key in ("a", "A"):
+                    if not buf and key in "fF":
+                        flows_mode = not flows_mode
+                        buf = ""
+                        result = ""
+                        last_tid = None
+                        last_kind = None
+                        last_fid = None
+                        check_mode = False
+                        offset = 0
+                        break
+                    if key in ("a", "A") and not flows_mode:
                         buf = ""
                         offset = 0
                         args.by_area = not by_area
                         break
-                    if key in ("e", "E"):
+                    if key in ("e", "E") and not flows_mode:
                         buf = ""
                         offset = 0
                         args.expand = not expand
@@ -5147,9 +6191,15 @@ def cmd_board(args):
                     if key == "up":
                         offset = max(0, offset - 1)
                         continue
-                    if not buf and key in "cC":
-                        collision_mode = not collision_mode
-                        if collision_mode and last_kind == "show":
+                    if key == " ":
+                        offset = page_down
+                        continue
+                    if key in ("b", "B"):
+                        offset = page_up
+                        continue
+                    if not buf and key in "cC" and not flows_mode:
+                        check_mode = not check_mode
+                        if check_mode and last_kind == "show":
                             last_tid = None
                             last_kind = None
                             result = ""
@@ -5161,15 +6211,40 @@ def cmd_board(args):
                         result = ""
                         last_tid = None
                         last_kind = None
-                        collision_mode = False
-                        display = board
+                        last_fid = None
+                        check_mode = False
                         offset = 0
+                        if flows_mode:
+                            display = flows_pane_text(
+                                bw, scope, color=_use_color())
+                        else:
+                            display = board
                         continue
                     if key in ("\x7f", "\x08"):
                         buf = buf[:-1]
                         continue
                     if key in ("\n", "\r"):
                         if not buf:
+                            continue
+                        if flows_mode:
+                            fid = parse_watch_fid(buf)
+                            buf = ""
+                            color = _use_color()
+                            offset = 0
+                            index = flows_pane_text(bw, scope, color=color)
+                            view = (watch_flow_view(bw, scope, fid)
+                                    if fid is not None else None)
+                            if view is None:
+                                last_fid = None
+                                display = index
+                                result = (watch_missing_fid(fid, color=color)
+                                          if fid is not None else
+                                          (_ansi(_ERR, "not a flow id")
+                                           if color else "not a flow id"))
+                                continue
+                            last_fid = fid
+                            result = ""
+                            display = view
                             continue
                         tid = parse_watch_tid(buf)
                         buf = ""
@@ -5185,9 +6260,9 @@ def cmd_board(args):
                         _plain, board, tasks = _render_board(args)
                         last_tid = tid
                         offset = 0
-                        if collision_mode:
-                            last_kind = "collision"
-                            result = watch_collision_line(
+                        if check_mode:
+                            last_kind = "check"
+                            result = watch_check_line(
                                 tid, tasks, color=color)
                             display = board
                             continue
@@ -5202,7 +6277,7 @@ def cmd_board(args):
                         result = ""
                         display = view
                         continue
-                    if not buf and key in "tT":
+                    if not buf and key in "tT" and not flows_mode:
                         buf = key
                         continue
                     if key.isdigit() and len(buf) < 8:
@@ -5374,6 +6449,11 @@ def reseed_later_tasks(bw, scope, old_index):
             "status": (t["status"] if t.get("status") in ("later", "proposed")
                        else "backlog"),
             "kind": t.get("kind") or "",
+            # Carry the type: a recurring ops task that came back as a dev
+            # task would be refused by `ran` and demand an area it must not
+            # have. `flow` is deliberately not carried — it records runs
+            # this new task has not done yet.
+            "type": task_type(t),
             "cadence": t.get("cadence") or "",
             "last_run": t.get("last_run") or "",
             "assignee": "",
@@ -5395,8 +6475,8 @@ def reseed_later_tasks(bw, scope, old_index):
 def cmd_iteration_close(args):
     """Archive task files under .tasks/archive/{n}-{slug}/, index them in
     .tasks/log.md, and remove the live files, committing on the integration
-    branch. Landing the integration branch in the parent (via PR) happens
-    afterwards and is not this script's job."""
+    branch. A parented board then lands via iteration-land; a no-parent
+    board rolls the next iteration in place via iteration-new --name."""
     root, scope, branch, bw = ctx()
     cfg = read_board_cfg(bw, scope)
     tasks = all_tasks(bw, scope)
@@ -5422,7 +6502,7 @@ def cmd_iteration_close(args):
     name = iteration_name(cfg)
     started = iteration_started(cfg)
     today = datetime.date.today().isoformat()
-    parent = cfg.get("parent_branch", "")
+    parent = (cfg.get("parent_branch") or "").strip()
     require_schema3_archive_slug(idx, name)
     arel = archive_dir(scope, idx, name)
     adir = os.path.join(bw, arel)
@@ -5466,7 +6546,8 @@ def cmd_iteration_close(args):
         # Shipped/Verified records ride along so the result is visible at a
         # skim — an umbrella has no ship, so Verified is its only outcome line.
         body = t.get("body") or ""
-        for rec in collect_shipped(body) + collect_verified(body):
+        for rec in (collect_shipped(body) + collect_verified(body)
+                    + collect_ran(body)):
             entry.append("  - " + " ".join(rec.split()))
     log = os.path.join(bw, tdir(scope), "log.md")
     existing = open(log).read() if os.path.exists(log) else "# Iteration log\n"
@@ -5485,16 +6566,73 @@ def cmd_iteration_close(args):
     if parent:
         print(f"next: TASKS iteration-land  # merge-commit PR into '{parent}'")
         print(f"      then after merge: TASKS iteration-new <branch>")
+    else:
+        print(f"next: TASKS iteration-new --name <name>  "
+              f"# same branch '{branch}', no land")
+
+
+def stamp_next_iteration(bw, scope, cfg, old_idx, args):
+    """Write the next iteration identity onto cfg. Returns the new index."""
+    if args.iteration is not None:
+        new_idx = parse_positive_int(args.iteration, "iteration")
+    else:
+        new_idx = next_iteration_index(bw, scope, old_idx)
+    new_name = (args.name or "").strip()
+    require_schema3_archive_slug(new_idx, new_name)
+    # Visible here (close already wrote the outgoing archive) and free to
+    # fix — pick another number rather than discovering it at the next
+    # close, with a board full of tasks.
+    taken = archive_taken(bw, scope, new_idx, new_name)
+    if taken:
+        sys.exit(f"error: iteration {new_idx} already has an archive at "
+                 f"{taken}/; closing it later would overwrite that "
+                 "iteration. Pick another number: iteration-new "
+                 "--iteration <n>")
+    started = parse_iso_date(
+        args.iteration_started or datetime.date.today().isoformat(),
+        "iteration_started")
+    cfg["iteration"] = str(new_idx)
+    cfg["iteration_name"] = new_name
+    cfg["iteration_started"] = started
+    return new_idx
 
 
 def cmd_iteration_new(args):
     root, scope, old_branch, bw = ctx()
     cfg = read_board_cfg(bw, scope)
     old_idx = iteration_index(cfg)
-    parent = args.parent or cfg.get("parent_branch", "")
+    parent = (args.parent or cfg.get("parent_branch") or "").strip()
+    new_branch = (args.branch or "").strip()
     if not parent:
-        sys.exit("error: no parent branch known; pass --parent <branch>")
-    if args.branch in (old_branch, parent):
+        # No parent to merge into: archive is already on this branch, so
+        # roll the next iteration in place. Do not reset — that would
+        # drop the close's archive dir and log.md section.
+        if new_branch and new_branch != old_branch:
+            sys.exit(
+                f"error: no parent_branch; in-place iteration-new stays on "
+                f"'{old_branch}' — omit the branch. To start a branched "
+                "iteration, pass --parent <branch> and a new branch name")
+        not_ready = iteration_close_ready(
+            bw, scope, old_idx, next_cmd="iteration-new")
+        if not_ready:
+            sys.exit(f"error: {not_ready}")
+        new_idx = stamp_next_iteration(bw, scope, cfg, old_idx, args)
+        write_board_cfg(bw, scope, cfg)
+        reseeded = reseed_later_tasks(bw, scope, old_idx)
+        board_commit(root, old_branch, bw, scope,
+                     f"dev: start iteration {new_idx}")
+        label = (f" — {cfg['iteration_name']}"
+                 if cfg.get("iteration_name") else "")
+        print(f"iteration {new_idx}{label} started in place on '{old_branch}'")
+        if reseeded:
+            bits = ", ".join(f"T{m['id']} ← {old_idx}/T{oid}"
+                             for m, oid in reseeded)
+            print(f"reseeded {len(reseeded)} carried task(s): {bits}")
+        return
+    if not new_branch:
+        sys.exit("error: iteration-new on a parented board needs a new "
+                 f"integration branch (not '{old_branch}')")
+    if new_branch in (old_branch, parent):
         sys.exit(f"error: new iteration branch must differ from '{old_branch}' "
                  f"and parent '{parent}'")
     git("fetch", "origin", parent, old_branch, cwd=bw, check=False)
@@ -5523,34 +6661,13 @@ def cmd_iteration_new(args):
     for p in task_glob(bw, scope):
         os.remove(p)
     os.makedirs(os.path.join(bw, tdir(scope)), exist_ok=True)
-    cfg["integration_branch"] = args.branch
+    cfg["integration_branch"] = new_branch
     cfg["parent_branch"] = parent
-    if args.iteration is not None:
-        new_idx = parse_positive_int(args.iteration, "iteration")
-    else:
-        new_idx = next_iteration_index(bw, scope, old_idx)
-    new_name = (args.name or "").strip()
-    require_schema3_archive_slug(new_idx, new_name)
-    # The gate above makes the parent carry every closed iteration's archive,
-    # so this is the moment a collision is both visible and free to fix —
-    # pick another number rather than discovering it at close, with a board
-    # full of tasks.
-    taken = archive_taken(bw, scope, new_idx, new_name)
-    if taken:
-        sys.exit(f"error: iteration {new_idx} already has an archive at "
-                 f"{taken}/; closing it later would overwrite that "
-                 "iteration. Pick another number: iteration-new <branch> "
-                 "--iteration <n>")
-    started = parse_iso_date(
-        args.iteration_started or datetime.date.today().isoformat(),
-        "iteration_started")
-    cfg["iteration"] = str(new_idx)
-    cfg["iteration_name"] = new_name
-    cfg["iteration_started"] = started
+    new_idx = stamp_next_iteration(bw, scope, cfg, old_idx, args)
     write_board_cfg(bw, scope, cfg)
-    write_cache(root, scope, args.branch)
+    write_cache(root, scope, new_branch)
     reseeded = reseed_later_tasks(bw, scope, old_idx)
-    board_commit(root, args.branch, bw, scope,
+    board_commit(root, new_branch, bw, scope,
                  f"dev: start iteration {new_idx}")
     # leave a pointer on the parent so other contributors' stale checkouts
     # resolve to the new iteration (resolve_board follows it)
@@ -5560,12 +6677,12 @@ def cmd_iteration_new(args):
     board_commit(root, parent, bw, scope,
                  f"dev: point board at iteration {new_idx}")
     print(f"iteration {new_idx} started on new branch "
-          f"'{args.branch}' (parent: {parent})")
+          f"'{new_branch}' (parent: {parent})")
     if reseeded:
         bits = ", ".join(f"T{m['id']} ← {old_idx}/T{oid}"
                          for m, oid in reseeded)
         print(f"reseeded {len(reseeded)} carried task(s): {bits}")
-    print(f"note: switch your checkout when ready: git checkout {args.branch}")
+    print(f"note: switch your checkout when ready: git checkout {new_branch}")
 
 
 def main():
@@ -5620,6 +6737,46 @@ def main():
     m.add_argument("--force", action="store_true")
     s.set_defaults(fn=cmd_area)
 
+    s = sub.add_parser("flow", help="the flow store (.flows/): procedures "
+                                    "ops tasks run; referred to by name")
+    fsub = s.add_subparsers(dest="action", required=True)
+    m = fsub.add_parser("list", help="active flows: name — description")
+    m.add_argument("--all", action="store_true", help="include retired")
+    m.add_argument("--json", action="store_true")
+    m = fsub.add_parser("show", help="print one flow file")
+    m.add_argument("name", help="flow name (closest match is accepted)")
+    m = fsub.add_parser("runs", help="every recorded run of one flow, "
+                                     "newest first")
+    m.add_argument("name", help="flow name (closest match is accepted)")
+    m.add_argument("--json", action="store_true")
+    m = fsub.add_parser("create", help="add a flow")
+    m.add_argument("name", help="slug: lowercase letters, digits, hyphens")
+    m.add_argument("--desc", help="one line: what it does, when to use it")
+    m.add_argument("--inputs", help="comma-separated: what a run must be "
+                                    "told, e.g. \"client, amount (USD)\"")
+    m.add_argument("--uses", help="comma-separated flows this one follows")
+    m.add_argument("--body", help="the procedure")
+    m.add_argument("--file", help="read the procedure from a file ('-' = stdin)")
+    m = fsub.add_parser("update", help="change a flow's fields or body")
+    m.add_argument("name")
+    m.add_argument("--desc")
+    m.add_argument("--inputs")
+    m.add_argument("--uses")
+    m.add_argument("--status", help="active | retired")
+    m.add_argument("--body", help="replace the procedure")
+    m.add_argument("--file", help="replace the procedure from a file ('-' = stdin)")
+    m.add_argument("--append", help="append a paragraph to the procedure")
+    m = fsub.add_parser("rename", help="rename a flow; the old name is free "
+                                       "at once and kept as a matching hint")
+    m.add_argument("name")
+    m.add_argument("new_name")
+    m = fsub.add_parser("reid", help="give a flow a fresh id when two boards "
+                                     "minted the same one")
+    m.add_argument("name")
+    m = fsub.add_parser("retire", help="mark a flow retired (kept for the record)")
+    m.add_argument("name")
+    s.set_defaults(fn=cmd_flow)
+
     s = sub.add_parser("add", help="add a task")
     s.add_argument("--title", required=True)
     s.add_argument("--area")
@@ -5628,6 +6785,9 @@ def main():
     s.add_argument("--assignee")
     s.add_argument("--kind", default="",
                    help="optional kind (umbrella, recurring); empty = normal")
+    s.add_argument("--type", default="",
+                   help="ops = run through /ops flows (no area, no branch, "
+                        "no PR); dev (the default) = code work")
     s.add_argument("--cadence",
                    help="recurring tasks only: <N><unit>, unit d/w/m (2w, 1m)")
     s.add_argument("--status",
@@ -5637,12 +6797,15 @@ def main():
 
     s = sub.add_parser("update", help="update task fields")
     s.add_argument("id", type=int)
-    for f in ("title", "area", "status", "kind", "assignee", "branch", "pr",
-              "needs", "deps", "desc", "cadence"):
+    for f in ("title", "area", "status", "kind", "type", "assignee", "branch",
+              "pr", "needs", "deps", "desc", "cadence"):
         s.add_argument(f"--{f}")
     s.add_argument("--last-run", dest="last_run",
                    help="recurring tasks only: YYYY-MM-DD of the last run "
                         "(empty string clears; due date is derived from it)")
+    s.add_argument("--flow", help="flow name(s) this task runs, comma-"
+                                  "separated; stored as `<id> <name>` refs "
+                                  "(empty string clears)")
     s.add_argument("--append", help="append a paragraph to the body "
                                     "(leaves existing text untouched)")
     s.add_argument("--reason", help="why this task is not being pursued; "
@@ -5665,6 +6828,8 @@ def main():
     s.add_argument("--assignee")
     s.add_argument("--status")
     s.add_argument("--needs")
+    s.add_argument("--type", help="ops, or dev for dev tasks only (untyped "
+                                  "tasks count as dev)")
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_list)
 
@@ -5677,6 +6842,42 @@ def main():
     m.add_argument("id", type=int)
     m.add_argument("--date", help="run date (default today), YYYY-MM-DD")
     s.set_defaults(fn=cmd_recur)
+
+    s = sub.add_parser("ran", help="close an ops task with its run record")
+    s.add_argument("id", type=int)
+    s.add_argument("--flow", help="flow name(s) followed, comma-separated; "
+                                  "omit to keep the task's flow field, or "
+                                  "for a run with no stored flow")
+    s.add_argument("--record", help="inputs the run was given; deviations "
+                                    "from the flow — recorded as Ran (<date>): …")
+    s.add_argument("--date", help="YYYY-MM-DD the run happened (default today)")
+    s.set_defaults(fn=cmd_ran)
+
+    s = sub.add_parser("pause",
+                       help="record where an ops run stopped; it stays doing")
+    s.add_argument("id", type=int)
+    s.add_argument("--at", help="where the run stopped: the flow's step "
+                                "(numbered, or its text), or what was last "
+                                "done when no flow was followed")
+    s.add_argument("--record", help="what the run has produced so far and "
+                                    "where it lives — recorded in the body "
+                                    "as Paused (<date>): …")
+    s.add_argument("--flow", help="flow name(s) being followed, comma-"
+                                  "separated; omit to keep the task's flow "
+                                  "field")
+    s.add_argument("--date", help="YYYY-MM-DD of the pause (default today)")
+    s.set_defaults(fn=cmd_pause)
+
+    s = sub.add_parser("note",
+                       help="note on an ops task what its flow did not "
+                            "predict")
+    s.add_argument("id", type=int)
+    s.add_argument("text", help="a step the user did, a step inserted, a "
+                                "correction — recorded as Note (<date>): …")
+    s.add_argument("--at", help="the step it happened at (numbered, or its "
+                                "text); omit outside a run")
+    s.add_argument("--date", help="YYYY-MM-DD it happened (default today)")
+    s.set_defaults(fn=cmd_note)
 
     s = sub.add_parser("verify",
                        help="close an umbrella: record how its children met "
@@ -5702,9 +6903,9 @@ def main():
                         "listed under each area)")
     s.add_argument("--watch", action="store_true",
                    help="interactive: r refresh, a toggle by-area, "
-                        "e toggle expand, c collision mode, q quit, "
-                        "arrows scroll, type id+Enter to show a task "
-                        "(used by ./board)")
+                        "e toggle expand, c check mode, q quit, "
+                        "arrows scroll, space/b page, type id+Enter to "
+                        "show a task (used by ./board)")
     s.add_argument("--refresh-viewer", action="store_true",
                    help="rewrite ./board from this skill's template, even if "
                         "edited, then exit (used by ./board update)")
@@ -5718,8 +6919,12 @@ def main():
                    help="close even with unfinished tasks")
     s.set_defaults(fn=cmd_iteration_close)
 
-    s = sub.add_parser("iteration-new", help="start a fresh board on a new integration branch")
-    s.add_argument("branch")
+    s = sub.add_parser("iteration-new",
+                       help="start a fresh board on a new integration branch, "
+                            "or in place when there is no parent")
+    s.add_argument("branch", nargs="?",
+                   help="new integration branch; omit to roll in place on a "
+                        "no-parent board")
     s.add_argument("--parent")
     s.add_argument("--name",
                    help="optional display name (not the identity)")
@@ -5770,9 +6975,10 @@ def main():
     s.add_argument("--body",
                    help="PR body on create only (default: task body)")
     s.add_argument("--version-intent",
-                   help="on create only: append 'Version intent: …' when body lacks "
-                        "that line (agent only; no default — omit when product does "
-                        "not version)")
+                   help="set the PR body's 'Version intent: …' line, on create "
+                        "or re-ship (replaces a stale one; 'none' removes it). "
+                        "Agent only; omit when product does not version or "
+                        "the intent is unchanged")
     s.add_argument("--base",
                    help="PR base on create only (default: derived — the "
                         "live task branch this one was started on, else "

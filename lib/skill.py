@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
-"""Skill-meta commands for the public dev skill (github.com/poiurewq/dev).
+"""Skill-meta commands for the devops package (github.com/poiurewq/devops).
 
-Backs the `/dev skill ...` namespace: everything acting on the installed
-skill itself rather than on the user's product board.
+Backs the `/dev skill ...` and `/ops skill ...` namespaces: everything
+acting on the installed skills themselves rather than on the user's board.
+Both skills live in one clone and update together, so every message here
+names the package, not a single skill.
 
-Install (public consumers): git clone into an agent skills directory, e.g.
-  git clone https://github.com/poiurewq/dev.git ~/.grok/skills/dev
+Install (public consumers): one clone, symlinked into each agent skills
+directory by the installer —
+  curl -fsSL https://raw.githubusercontent.com/poiurewq/devops/main/install.py | python3 -
 
 User prefs live outside the skill tree so they survive updates:
-  ~/.config/dev-skill/config.yml
+  ~/.config/devops-skill/config.yml   (~/.config/dev-skill/ is read as a
+  fallback for installs that predate the dev + ops package)
 
 Config schema (schema_version integer, like board.yml):
   schema_version: 1
@@ -31,6 +35,7 @@ Commands:
 from __future__ import annotations
 
 import argparse
+import os
 import platform
 import re
 import shutil
@@ -44,12 +49,21 @@ from pathlib import Path
 # --- constants ---
 
 CONFIG_SCHEMA_VERSION = 1
-CANONICAL_REPO = "https://github.com/poiurewq/dev"
-REPO_SLUG = "poiurewq/dev"
-VERSION_URL = "https://raw.githubusercontent.com/poiurewq/dev/main/VERSION"
+CANONICAL_REPO = "https://github.com/poiurewq/devops"
+REPO_SLUG = "poiurewq/devops"
+VERSION_URL = "https://raw.githubusercontent.com/poiurewq/devops/main/VERSION"
+# install.py carries its own copy of the two constants above: it runs before
+# any clone exists, so it cannot import this module. Keep them in step.
+RAW_INSTALLER_URL = (
+    "https://raw.githubusercontent.com/poiurewq/devops/main/install.py"
+)
 DEFAULT_INTERVAL_HOURS = 24
-CONFIG_DIR = Path.home() / ".config" / "dev-skill"
+CONFIG_DIR = Path.home() / ".config" / "devops-skill"
 CONFIG_PATH = CONFIG_DIR / "config.yml"
+# Prefs governed one skill before dev and ops shared a package. Reads fall
+# back to the old path when the new file is absent; writes always go to the
+# new one, and the old file is left alone rather than moved or deleted.
+LEGACY_CONFIG_PATH = Path.home() / ".config" / "dev-skill" / "config.yml"
 
 # Ordered keys we always write; unknown keys preserved after these.
 CONFIG_KEYS = (
@@ -59,7 +73,29 @@ CONFIG_KEYS = (
     "last_check_at",
 )
 
-SKILL_DIR = Path(__file__).resolve().parent.parent
+# Package root (devops/): lib/skill.py -> lib -> devops. VERSION lives here,
+# and a public install is a clone whose toplevel is this directory; the
+# skill dirs (dev/, ops/) are symlinked into agent skill roots.
+PKG_DIR = Path(__file__).resolve().parent.parent
+
+# Which skill's shim exec'd us, so printed guidance names a command the user
+# actually has: an ops-only install has no /dev. Set by <skill>/scripts/
+# skill.py; running this file directly, or through a pre-2.1 shim, has no
+# answer and keeps the historical "dev".
+SKILL_ENV = "DEVOPS_SKILL"
+DEFAULT_SKILL = "dev"
+
+
+def invoking_skill() -> str:
+    """Skill namespace to name in output ('dev', 'ops', …).
+
+    Validated against the package so a stray environment value can never put
+    a command the user does not have into a help line.
+    """
+    name = (os.environ.get(SKILL_ENV) or "").strip()
+    if name and (PKG_DIR / name / "SKILL.md").is_file():
+        return name
+    return DEFAULT_SKILL
 
 
 # --- small YAML subset (key: value lines; no deps) ---
@@ -92,18 +128,28 @@ def default_config() -> dict[str, str]:
     }
 
 
+def config_source() -> Path | None:
+    """The prefs file to read: the current one, else the pre-devops one."""
+    if CONFIG_PATH.is_file():
+        return CONFIG_PATH
+    if LEGACY_CONFIG_PATH.is_file():
+        return LEGACY_CONFIG_PATH
+    return None
+
+
 def read_config() -> dict[str, str]:
-    if not CONFIG_PATH.is_file():
+    source = config_source()
+    if source is None:
         return default_config()
     cfg = default_config()
-    on_disk = parse_kv(CONFIG_PATH.read_text(encoding="utf-8"))
+    on_disk = parse_kv(source.read_text(encoding="utf-8"))
     # Preserve unknown keys; overlay known defaults then file values.
     for k, v in on_disk.items():
         cfg[k] = v
     v = config_schema_version(cfg)
     if v > CONFIG_SCHEMA_VERSION:
         print(
-            f"warning: dev-skill config schema_version {v} is newer than "
+            f"warning: devops-skill config schema_version {v} is newer than "
             f"this skill.py (supports {CONFIG_SCHEMA_VERSION}); "
             f"unknown fields may be ignored",
             file=sys.stderr,
@@ -146,7 +192,7 @@ def parse_semver(s: str) -> tuple[int, int, int] | None:
 
 
 def local_version() -> str:
-    path = SKILL_DIR / "VERSION"
+    path = PKG_DIR / "VERSION"
     if not path.is_file():
         return "0.0.0"
     ver = path.read_text(encoding="utf-8").strip()
@@ -157,7 +203,7 @@ def fetch_public_version(timeout: float = 5.0) -> str | None:
     try:
         req = urllib.request.Request(
             VERSION_URL,
-            headers={"User-Agent": "dev-skill-self-update"},
+            headers={"User-Agent": "devops-skill-self-update"},
         )
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             body = resp.read().decode("utf-8", errors="replace").strip()
@@ -232,9 +278,9 @@ def stamp_last_check(cfg: dict[str, str]) -> None:
 def is_skill_git_root(path: Path) -> bool:
     """True only when path itself is a git worktree root (not a subdir of another repo).
 
-    qskill-synced installs have no .git. Public installs are a clone whose
-    toplevel *is* SKILL_DIR. Developing the skill inside skills-internal must
-    never be treated as an updatable install (pull would hit the monorepo).
+    Copied installs have no .git. Public installs are a clone whose
+    toplevel *is* PKG_DIR (the devops package root, not a skill dir). A package tree nested inside another repo must
+    never be treated as an updatable install (pull would hit that repo's remote).
     """
     try:
         inside = subprocess.run(
@@ -259,9 +305,11 @@ def is_skill_git_root(path: Path) -> bool:
 
 
 def origin_looks_canonical(url: str) -> bool:
-    """True only for github.com/poiurewq/dev (https/ssh/scp forms, optional .git).
+    """True only for github.com/poiurewq/devops (https/ssh/scp forms, optional .git).
 
-    Rejects substring traps (poiurewq/devtools) and other owners' dev repos.
+    Rejects substring traps (poiurewq/devops-extras) and other owners' repos.
+    The pre-devops repo (poiurewq/dev) is deliberately absent: install.py
+    migrates such a clone away rather than pulling into it.
     """
     u = (url or "").strip().lower().rstrip("/")
     if u.endswith(".git"):
@@ -272,11 +320,11 @@ def origin_looks_canonical(url: str) -> bool:
     if u.startswith("ssh://"):
         u = u[len("ssh://") :]
     return u in (
-        "https://github.com/poiurewq/dev",
-        "http://github.com/poiurewq/dev",
-        "git@github.com:poiurewq/dev",
-        "github.com/poiurewq/dev",
-        "github.com:poiurewq/dev",
+        "https://github.com/poiurewq/devops",
+        "http://github.com/poiurewq/devops",
+        "git@github.com:poiurewq/devops",
+        "github.com/poiurewq/devops",
+        "github.com:poiurewq/devops",
     )
 
 
@@ -296,16 +344,17 @@ def git_pull_ff(path: Path) -> tuple[bool, str]:
     if not is_skill_git_root(path):
         return (
             False,
-            "skill dir is not a standalone git clone of poiurewq/dev; install with:\n"
-            f"  git clone {CANONICAL_REPO}.git <agent-skills>/dev",
+            "this install is not a standalone git clone of poiurewq/devops "
+            "(a copied tree, or one nested inside another repo); reinstall with:\n"
+            f"  curl -fsSL {RAW_INSTALLER_URL} | python3 -",
         )
     url = origin_url(path)
     if not url:
-        return False, "no git remote 'origin'; set origin to poiurewq/dev and retry"
+        return False, "no git remote 'origin'; set origin to poiurewq/devops and retry"
     if not origin_looks_canonical(url):
         return (
             False,
-            f"origin is {url!r}, expected poiurewq/dev; "
+            f"origin is {url!r}, expected poiurewq/devops; "
             "refusing to pull a different remote",
         )
     r = subprocess.run(
@@ -343,37 +392,38 @@ def cmd_check(*, force: bool = False) -> int:
 
     # Behind.
     if parse_bool(cfg.get("auto_update", "false")):
-        ok, msg = git_pull_ff(SKILL_DIR)
+        ok, msg = git_pull_ff(PKG_DIR)
         if ok:
             new_local = local_version()
-            print(f"dev skill updated: {local} → {new_local}")
+            print(f"devops updated: {local} → {new_local}")
             return 0
         print(
-            f"dev skill {public} available (you have {local}); "
+            f"devops {public} available (you have {local}); "
             f"auto-update failed: {msg}",
             file=sys.stderr,
         )
         return 1
 
+    skill = invoking_skill()
     print(
-        f"dev skill {public} available (you have {local}) — "
-        f"/dev skill update, or /dev skill update auto on"
+        f"devops {public} available (you have {local}) — "
+        f"/{skill} skill update, or /{skill} skill update auto on"
     )
     return 0
 
 
 def cmd_update() -> int:
     local = local_version()
-    ok, msg = git_pull_ff(SKILL_DIR)
+    ok, msg = git_pull_ff(PKG_DIR)
     if not ok:
         print(f"error: {msg}", file=sys.stderr)
         return 1
     new_local = local_version()
     if new_local != local:
-        print(f"dev skill updated: {local} → {new_local}")
+        print(f"devops updated: {local} → {new_local}")
     else:
         # pull may have moved commits without VERSION change, or already current
-        print(f"dev skill up to date ({new_local})")
+        print(f"devops up to date ({new_local})")
     # Refresh throttle stamp so a following check stays quiet.
     cfg = read_config()
     stamp_last_check(cfg)
@@ -402,10 +452,11 @@ def cmd_auto(value: str | None) -> int:
 def cmd_status() -> int:
     cfg = read_config()
     on = parse_bool(cfg.get("auto_update", "false"))
-    print(f"dev skill {local_version()}")
+    print(f"devops {local_version()} (dev + ops)")
     print(f"auto-update: {'on' if on else 'off'}")
-    print("update:  /dev skill update")
-    print("feedback:  /dev skill feedback <text>")
+    skill = invoking_skill()
+    print(f"update:  /{skill} skill update")
+    print(f"feedback:  /{skill} skill feedback <text>")
     return 0
 
 
@@ -415,9 +466,9 @@ def install_kind() -> str:
     Only the canonical clone is updatable, so distinguish it from a git root
     pointing elsewhere (fork, or the skill developed inside another repo).
     """
-    if not is_skill_git_root(SKILL_DIR):
+    if not is_skill_git_root(PKG_DIR):
         return "copied (no git)"
-    if origin_looks_canonical(origin_url(SKILL_DIR)):
+    if origin_looks_canonical(origin_url(PKG_DIR)):
         return "git clone"
     return "git clone (other origin)"
 
@@ -430,7 +481,7 @@ def feedback_context() -> str:
     """
     return "\n".join(
         [
-            f"- dev skill: {local_version()}",
+            f"- devops: {local_version()}",
             f"- install: {install_kind()}",
             f"- python: {platform.python_version()}",
             f"- os: {platform.system()} {platform.release()}",
@@ -476,7 +527,7 @@ def cmd_feedback(title: str, body: str | None) -> int:
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         prog="skill.py",
-        description="Skill-meta commands for the dev skill (github.com/poiurewq/dev)",
+        description="Skill-meta commands for devops (github.com/poiurewq/devops)",
     )
     sub = p.add_subparsers(dest="cmd", required=True)
 

@@ -19,7 +19,8 @@ TASKS config [<key> [<value>]]          # settable: parent_branch,
                                         # refused if that n is archived),
                                         # iteration_name, iteration_started
                                         # (all three refused once
-                                        # closed-not-landed). integrator is
+                                        # closed, before land or in-place
+                                        # new). integrator is
                                         # readable here but set below
 TASKS integrator list                   # who may land, '(you)' on the current
                                         # identity
@@ -31,15 +32,58 @@ TASKS integrator rm <name>              # revoke it; refused for the last one
 TASKS area list
 TASKS area set <name> [--desc "<one-line scope>"]
 TASKS area rm <name> [--force]
+TASKS flow list [--all] [--json]        # active flows, name — description;
+                                        # --all adds retired ([retired])
+TASKS flow show <name>                  # print the flow file
+TASKS flow runs <name> [--json]         # every recorded run, newest first
+TASKS flow create <new-name> --desc "<one line: what it does, when to use it>"
+           [--inputs "<a, b (hint)>"]   # what a run must be told
+           [--uses "<flow, flow>"]      # flows this one follows
+           [--body "<procedure>" | --file <path|->]
+                                        # <new-name>: lowercase letters, digits,
+                                        # hyphens; id is minted max+1. Refused
+                                        # if an active flow has the name, or a
+                                        # retired one still holds it (rename
+                                        # that first)
+TASKS flow update <name> [--desc] [--inputs] [--uses]
+           [--status active|retired]
+           [--body "<procedure>" | --file <path|->]   # REPLACE the procedure
+           [--append "<paragraph>"]     # add to the procedure
+TASKS flow rename <name> <new-name>     # old name is free at once and kept in
+                                        # `formerly` as a matching hint; other
+                                        # flows' `uses` follow, tasks' recorded
+                                        # runs do not (they resolve by id)
+TASKS flow reid <name>                  # fresh id for a flow whose id another
+                                        # flow also holds; refused when a task
+                                        # already records it (reid the other)
+TASKS flow retire <name>                # kept for the record; revive with
+                                        # update --status active
+                                        # <name> is an existing flow: closest
+                                        # match (exact, then formerly, then
+                                        # fuzzy with a clear leader; ambiguous
+                                        # errors) — never a number, which is
+                                        # always a task id. <new-name> is a
+                                        # fresh slug and is never matched
 TASKS add --title "<title>" [--area <m>] [--deps <id,id>]
           [--desc "<1–3 sentences>"] [--assignee <who>]
           [--kind umbrella|recurring]           # empty = normal
           [--cadence <N><unit>]                 # recurring only, unit d/w/m
+          [--type ops|dev]                      # default dev; ops = run
+                                                # through /ops flows, and
+                                                # refuses --area
           [--status proposed|backlog|planned|later]  # default backlog
 TASKS update <id> [--title "<t>"] [--area <m>] [--status <s>]
           [--kind umbrella|recurring|""] [--assignee <who>|""]
           [--branch <b>|""] [--pr <url>] [--needs decision|""]
           [--deps <id,id>]
+          [--type ops|dev]                      # an ops task carries no area:
+                                                # to ops is --type ops
+                                                # --area "", to dev is
+                                                # --type dev --area <m>
+                                                # (one call, any flag order)
+          [--flow <name[,name]>|""]             # flow(s) governing this task;
+                                                # names resolve to `<id>
+                                                # <name>` refs at write time
           [--append "<paragraph>"]              # add to body, keeping it
           [--desc "<new body>"]                 # REPLACE whole body
           [--cadence <N><unit>] [--last-run YYYY-MM-DD|""]
@@ -54,6 +98,26 @@ TASKS verify <id> "<how the children met the goal>"
                                         # close an umbrella; the record is
                                         # required, and --status done on one
                                         # is refused in favour of this
+TASKS ran <id> --record "<inputs; deviations>"
+               [--flow <name[,name]>] [--date YYYY-MM-DD]
+                                        # close an ops task with its run
+                                        # record (Ran (<date>): …); --flow
+                                        # omitted keeps the task's flow
+                                        # field. Recurring re-arms to backlog
+                                        # instead of done. Refused on a dev
+                                        # task, or one with a branch/PR
+TASKS pause <id> --at "<step>" --record "<what exists so far, where>"
+                 [--flow <name[,name]>] [--date YYYY-MM-DD]
+                                        # an ops run stopped partway:
+                                        # appends Paused (<date>): …, stays
+                                        # doing with its assignee. Only a
+                                        # doing ops task; resume is
+                                        # /ops run <id>
+TASKS note <id> "<text>" [--at "<step>"] [--date YYYY-MM-DD]
+                                        # ops only: appends Note (<date>):
+                                        # [<flow> <step>] …; any status but
+                                        # proposed/not-planned (done too);
+                                        # moves nothing
 TASKS delete <id>
 TASKS show <id>
 TASKS collisions <id[,id…]>             # area occupancy vs doing/draft/review;
@@ -66,7 +130,9 @@ TASKS collisions <id[,id…]>             # area occupancy vs doing/draft/review
                                         # (batch peers excluded from that check)
 TASKS related "<text>"                  # existing tasks similar to <text>;
                                         # run before every add
-TASKS list [--assignee <who>] [--status <s>] [--needs decision] [--json]
+TASKS list [--assignee <who>] [--status <s>] [--needs decision]
+           [--type ops|dev] [--json]    # --type dev also matches untyped
+                                        # tasks
 TASKS recur list [--due]                # recurring tasks + derived due dates
                                         # (overdue and never-run first);
                                         # --due limits to due/overdue now
@@ -83,15 +149,20 @@ TASKS board [--expand] [--by-area] [--watch]
                                         # parent; done/later/not-planned
                                         # fold to a count, --expand lists
                                         # those three; --watch: r/a/e/c/q, arrows
-                                        # scroll, type id↵ to show a task, c then
-                                        # id↵ for area collisions (./board)
+                                        # scroll, space/b page, type id↵ to show
+                                        # a task, c then id↵ for check (area
+                                        # collisions + unfinished deps)
+                                        # (./board)
 TASKS iteration
 TASKS iteration-close [--force]
-TASKS iteration-new <branch> [--parent <branch>] [--name <name>]
+TASKS iteration-new [<branch>] [--parent <branch>] [--name <name>]
                     [--iteration N] [--iteration-started YYYY-MM-DD]
+                                        # omit branch: roll in place on a
+                                        # no-parent board (after close)
 TASKS iteration-land [--create-only] [--title T] [--body B]
                                         # open/merge iteration PR into parent
-                                        # with merge commit (not squash)
+                                        # with merge commit (not squash);
+                                        # refuses when there is no parent
 TASKS claim <id> [--assignee <who>] [--branch <b>] [--stack-on <id>]
                                         # branch from origin/integration, or
                                         # from that task's pushed tip with
@@ -117,8 +188,10 @@ TASKS ship <id> --shipped "<what actually shipped>"
                                         # ship always lands in draft; only
                                         # ready promotes it). Re-ship
                                         # reuses the open PR, so --title /
-                                        # --body / --version-intent / --base
-                                        # apply on create only.
+                                        # --body / --base apply on create
+                                        # only; --version-intent also
+                                        # rewrites the PR line on re-ship
+                                        # ('none' drops it).
                                         # --shipped is REQUIRED on every ship
                                         # (result, not plan): appended to the
                                         # task body as Shipped (<date>): … and
