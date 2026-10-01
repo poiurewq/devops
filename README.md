@@ -3,7 +3,7 @@
 Two agent skills that share one task board living inside your repo, synced through git so every contributor, on any machine or branch, sees the same board.
 
 - **`/dev`** — the development workflow: tasks, branches, PRs, review, iterations.
-- **`/ops`** — procedures that are not code: a playbook of flows, each run recorded on its task. In development; it is part of this package and installs alongside `/dev` once released.
+- **`/ops`** — procedures that are not code: a playbook of flows, each run recorded on its task.
 
 They ship and update together, and either can be installed on its own.
 
@@ -33,11 +33,11 @@ In a repo (with at least one commit and a GitHub `origin`):
 /dev
 ```
 
-That walks you through identity + board setup. Then `/dev help` for the full command map. After init, `./board` (from the product directory) is a live view — `r` refresh, `a` toggle by-area, `e` toggle expand, `c` check, `q` quit, arrows scroll, space/b page, type a task id + Enter to read it.
+That walks you through identity + board setup. Then `/dev help` for the full command map. After init, `./board` (from the product directory) is a live view — `r` refresh, `a` toggle by-area, `e` toggle expand, `c` check, `f` flows pane, `q` quit, arrows scroll, space/b page, type a task id + Enter to read it.
 
-## Updating (`/dev skill`)
+## Updating (`/dev skill`, `/ops skill`)
 
-`/dev skill ...` acts on the installed package; every other command acts on your board. The package tracks `main` on this repo, and a throttled check on common entry points prints one quiet line when you are behind. One update moves both skills.
+`/dev skill ...` and `/ops skill ...` act on the installed package (same subcommands, so an install with only `/ops` has them too); every other command acts on your board. The package tracks `main` on this repo, and a throttled check on common entry points prints one quiet line when you are behind. One update moves both skills.
 
 | Command | Effect |
 |---|---|

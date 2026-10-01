@@ -12,7 +12,7 @@
    - **Explicit id** (digits, or multi-id list): `TASKS show` / load each. Unknown id → stop and say so; do **not** treat a bare number as a freeform goal to add.
    - **Goal**: `TASKS list`, match on title/body; confirm if not obvious. Clear match → that task. Ambiguous → ask. **No match** → **file first**: run the full `/dev add` path on that text (`flows/add.md`), and mention once that implement filed new work. Direct add → continue resolve/preflight on the new id, with no second confirmation to start building (the user already asked to implement). Plan or shape flow → after the user approves and tasks are filed, continue implement on them (several → `flows/implement-batch.md`); if that path stops without filing, stop.
 
-   Read the resolved task's body and any `Decision:` lines. Then **preflight** its current state:
+   Read the resolved task's body and any `Decision:` lines. The last `Intent:` line is the task's intent (earlier ones are history). Then **preflight** its current state:
    - `backlog`/`planned`, unassigned or assigned to this user → proceed. Picking first is not required; the claim in step 2 assigns it.
    - Assigned to **someone else** → stop and say who owns it; proceed only if the user explicitly reassigns (`TASKS update <id> --assignee <who>`). A review handoff stays `review` — do not claim.
    - `doing` → someone (possibly this user, in another session) is on it; confirm before touching it.
@@ -25,6 +25,8 @@
    - `later` → parked for a future iteration; stop. Proceed only if the user revives it (`--status backlog` or `/dev pick <id>`).
 
    If the task now looks pointless (already solved, superseded, false premise), say so before writing code — the user chooses whether to drop it.
+
+   **No `Intent:` line** → once preflight clears the task to start, ask the user what they want out of it (flows/add.md *Intent*) and record their answer with `TASKS update <id> --append "Intent: …"` before going further.
 
    A `kind: umbrella` task stops here: go to **Umbrella: the verification pass** (bottom). Nothing below applies to it.
 

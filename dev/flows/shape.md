@@ -46,7 +46,7 @@ Only on explicit go-ahead. Then:
 
 1. If area names emerged, `TASKS area set` them (founding is when areas may appear before the usual ~3-task cluster).
 2. `TASKS related "<title + desc>"` per drafted task. Fold duplicates; wire deps the neighbours imply (either direction).
-3. This-iteration leaves first (`TASKS add`, default backlog), umbrella last with `--kind umbrella --deps <child-ids>`. Umbrella body = the current cut in a few sentences + constraints that mattered — not a restatement of the later shelf.
+3. Every task's body ends with its `Intent:` line (flows/add.md *Intent*); the umbrella's is *What this is*. This-iteration leaves first (`TASKS add`, default backlog), umbrella last with `--kind umbrella --deps <child-ids>`. Umbrella body = the current cut in a few sentences + constraints that mattered — not a restatement of the later shelf.
 4. Later threads: `TASKS add --status later` (and a later umbrella if a parked cluster is itself a goal).
 5. Show `TASKS board`. Stop proposing structure. Don't auto-offer `/dev meta` after every add; a one-liner after a large filing is enough.
 
