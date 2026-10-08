@@ -26,7 +26,7 @@ Prerequisites: at least one commit (the script pins its board worktree to the in
 
 2. **Scope** (monorepo support): if the repo hosts multiple products and the user wants a board for a subdir, confirm which one and pass `--scope <subdir>`. Default (no `--scope`) is the nearest board at/above cwd, else the repo root (create path only). Day-to-day commands require cwd under the product or `--scope`. Don't create scoped boards unprompted — one root board is the norm for single-product repos.
 
-3. **Existing board** (`.tasks/board.yml` present for that scope): just run `TASKS init --name <handle>` — it joins and registers the contributor. Then check gh (step 5). Done.
+3. **Existing board** (`.tasks/board.yml` present for that scope): just run `TASKS init --name <handle>` — it joins and registers the contributor. Then check gh (step 5) and offer the tour (step 8). Done.
 
 4. **No board — adoption**:
    - *Integration branch*: propose the current or default branch; if the repo already uses iteration branches, ask which. Pass `--integration` (and `--parent`, `--iteration N`, `--iteration-name`, `--iteration-started` when applicable).
@@ -48,3 +48,5 @@ Prerequisites: at least one commit (the script pins its board worktree to the in
 6. **Happy path for product code** (say once, briefly): land work via a task branch and PR into the integration branch — don't pile long-lived feature commits only on local integration. Implement starts task branches from `origin/<integration>`, so unpushed local-main commits get in the way (flows/implement.md will ask to park them as a PR or discard). Board state still goes only through `TASKS`, never hand-edited.
 
 7. Report what was set up: scope, integration branch, integrator, areas, gh status, and the `./board` viewer (`r` refresh, `a` toggle by-area, `e` toggle expand, `c` check (an id, or `id,id…` for a group), `s` search tasks by words (flows, in the flows pane), `f` flows pane, `q` quit, arrows scroll, space/b page, type id↵ to show a task).
+
+8. **Offer the tour**, once, as the last line: `/dev tour` walks the key concepts on this board, a card at a time. Offer only — never start it unasked.

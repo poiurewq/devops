@@ -1,6 +1,6 @@
 ---
 name: dev
-description: Multi-contributor task board and dev workflow for a repo, or per-subdir boards in a monorepo. Use for /dev and subcommands (init, add, plan, board, kanban, status, pick, implement, review, audit, auto, absorb, change, delete, show, config, area, meta, iteration, update), and whenever the user asks to add/see/assign/implement/review tasks on the repo's task board, or asks "what should I work on".
+description: Multi-contributor task board and dev workflow for a repo, or per-subdir boards in a monorepo. Use for /dev and subcommands (init, tour, add, plan, board, kanban, status, pick, implement, review, audit, auto, absorb, change, delete, show, config, area, meta, iteration, update), and whenever the user asks to add/see/assign/implement/review tasks on the repo's task board, or asks "what should I work on".
 ---
 
 # dev — coordinated development for humans and agents
@@ -110,6 +110,7 @@ Statuses: `proposed` (auto-filed, awaiting human approval) → `backlog` → `pl
 |---|---|
 | `/dev` (bare) | Read `flows/first-contact.md`. |
 | `/dev help` | Read `flows/first-contact.md`. No board/identity → same setup path as bare. |
+| `/dev tour` | Read `flows/tour.md` (the key concepts, one card at a time, on the user's own board). Only when asked; never run it unprompted. No board or identity yet → still give it (its no-board path); do not run init first. |
 | `/dev init` | Read `flows/init.md` (identity, board creation/adoption, gh setup, areas). |
 | `/dev add <task-or-goal>` | Read `flows/add.md` (triage, then direct add, plan, or shape). |
 | `/dev plan <goal>` | Alias of `/dev add` (same triage). |

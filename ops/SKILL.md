@@ -1,6 +1,6 @@
 ---
 name: ops
-description: Playbook of flows plus the runs that follow them, on a shared task board inside the user's repo. Use for /ops and subcommands (init, add, run, flow list/show/create/edit/retire, status, board, show, change, drop, delete, meta), and whenever the user asks to run a procedure or checklist, follow or write a flow, record what a run did, or work a task that is not code.
+description: Playbook of flows plus the runs that follow them, on a shared task board inside the user's repo. Use for /ops and subcommands (init, tour, add, run, flow list/show/create/edit/retire, status, board, show, change, drop, delete, meta), and whenever the user asks to run a procedure or checklist, follow or write a flow, record what a run did, or work a task that is not code.
 ---
 
 # ops — procedures that run, recorded where they ran
@@ -94,6 +94,7 @@ Statuses for an ops task: `proposed` (filed for approval) → `backlog` → `pla
 |---|---|
 | `/ops` (bare) | Read `flows/first-contact.md`. |
 | `/ops help` | Read `flows/first-contact.md`. No board/identity → same setup path as bare. |
+| `/ops tour` | Read `flows/tour.md` (the key concepts, one card at a time, on the user's own board). Only when asked; never run it unprompted. No board or identity yet → still give it (its no-board path); do not run init first. |
 | `/ops init` | Read `flows/init.md` (identity, board creation or joining). |
 | `/ops add <task-or-goal>` | Read `flows/add.md`. |
 | Freeform new work | Same as `/ops add`. |

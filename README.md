@@ -27,13 +27,14 @@ Requires `git`, `python3`, and for board workflows `gh` (GitHub CLI) authenticat
 
 ## Getting started
 
-In a repo (with at least one commit and a GitHub `origin`):
+In a repo with at least one commit, start with the skill that fits the work:
 
 ```text
-/dev
+/dev     # code: tasks, branches, PRs, review (needs a GitHub `origin` and `gh`)
+/ops     # procedures that are not code: flows and their recorded runs
 ```
 
-That walks you through identity + board setup. Then `/dev help` for the full command map. After init, `./board` (from the product directory) is a live view — `r` refresh, `a` toggle by-area, `e` toggle expand, `c` check (an id, or `id,id…` for a group), `s` search tasks by words (flows, in the flows pane), `f` flows pane, `q` quit, arrows scroll, space/b page, type a task id + Enter to read it.
+Either one walks you through identity + board setup; both share one board and one identity, so setting up the second is only a join. Then `/dev tour` or `/ops tour` walks the key concepts on your own board, a card at a time, and `/dev help` or `/ops help` is the full command map. After init, `./board` (from the product directory) is a live view — `r` refresh, `a` toggle by-area, `e` toggle expand, `c` check (an id, or `id,id…` for a group), `s` search tasks by words (flows, in the flows pane), `f` flows pane, `q` quit, arrows scroll, space/b page, type a task id + Enter to read it.
 
 ## Updating (`/dev skill`, `/ops skill`)
 

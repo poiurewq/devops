@@ -35,6 +35,7 @@ Every agent shows the same menu, so the user learns one map of the tool. Emit it
 
 | | |
 |---|---|
+| **Learn** | `/ops tour` — the key concepts, one at a time, on your own board |
 | **See** | `/ops board` — the whole board · `/ops status` — your plate · `/ops show <id>` — one task |
 | **Add work** | `/ops add <task-or-goal>` — file something to be done · `/ops absorb <source>` — import a list of things to do |
 | **Do work** | `/ops pick <id>` — claim it for later · `/ops run <id[, id…]>` — run a task and record it · `/ops run <flow-name>` — run a flow now · `/ops run <description>` — file it and run it |

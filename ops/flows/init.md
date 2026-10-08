@@ -26,7 +26,7 @@ Prerequisites: a git repository with at least one commit, and a remote named `or
 
 2. **Scope**: if the repo holds several projects and the user wants a board for a subdir, confirm which and pass `--scope <subdir>`. Default is the nearest board at or above cwd, else the repo root. Don't create scoped boards unprompted — one board is the norm.
 
-3. **Board already exists** (`.tasks/board.yml` present for that scope — including one `/dev` created): just run `TASKS init --name <handle>`. It joins and registers the contributor. Say that the board is shared: their ops tasks and any dev tasks live side by side, marked. Done.
+3. **Board already exists** (`.tasks/board.yml` present for that scope — including one `/dev` created): just run `TASKS init --name <handle>`. It joins and registers the contributor. Say that the board is shared: their ops tasks and any dev tasks live side by side, marked. Offer the tour (step 7). Done.
 
 4. **No board yet**: propose the current branch as the board's home (`--integration <branch>`; `main` is the usual answer, and a board that lives on `main` never has to be closed or landed). Then `TASKS init --name <handle> [--scope s] [--integration b]`. This also writes a gitignored `./board` viewer at the project root (`r` refresh, `f` flows pane, `q` quit, arrows scroll, type an id + Enter).
 
@@ -35,3 +35,5 @@ Prerequisites: a git repository with at least one commit, and a remote named `or
 5. **First flow — offer, don't build.** A new playbook is empty, and that is the normal state: flows are written from runs, not up front. Say so, and offer the two ways in: `/ops add <task-or-goal>` then `/ops run <id>` (the run writes itself down as it goes, and at the end you can keep it as a flow), or `/ops flow create` now if they already have a procedure written down somewhere. A list of things to do that already lives in a document is `/ops absorb <source>` (`flows/absorb.md`).
 
 6. Report what was set up: project, board branch, identity, whether a remote is syncing it, and the `./board` viewer.
+
+7. **Offer the tour**, once, as the last line: `/ops tour` walks the key concepts on this board, a card at a time. Offer only — never start it unasked.
