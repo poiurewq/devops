@@ -6,6 +6,10 @@ Covers `/ops add <task-or-goal>` and freeform new work. One entry point; sit wit
 
 Sit with the ask before filing (SKILL.md *User specs are one guess*). What is the user actually trying to get done? Does what they described achieve it? If a flow already covers this, say so — the task may just be "run `<flow-name>`". If you need context to judge, ask them; there is no codebase to read your way to an answer here, and guessing at someone's process is worse than one question. If you see a better approach, say so — the outcome beats the wording. Real concerns only; do not invent nits. Push-back is conversation; if you raised one, wait for a direction. The task body is only what the user accepted.
 
+## Intent
+
+Every task filed here ends its body with one `Intent:` line: what the user actually wants out of the work, the outcome they would judge it by, not the steps. A run's closing check is judged against it (`flows/run.md`), so it is the user's aim in their terms, never your inference dressed as theirs. Premise usually answers it already; ask (one question) only when the invocation leaves it unclear. It is a body line, not a frontmatter field: pass it as the last paragraph of `--desc`. Several tasks from one ask each carry their own: an umbrella's is the user's goal, a child's is the part of that goal it serves. When the intent changes later (`/ops change <id> intent <new intent>`), append a new line with `TASKS update <id> --append "Intent: …"` rather than rewriting the body: the last `Intent:` line wins, and earlier ones stay as the record that the aim moved.
+
 ## Is it an ops task?
 
 Ops tasks change the world: send, file, publish, order, schedule, review with human eyes, decide. If doing this means editing the project's code, it is a dev task — say so and stop filing it here. `/dev add <task-or-goal>` is where it goes if that skill is installed; if it is not, say plainly that this skill does not do code work.
@@ -24,7 +28,7 @@ Say which you did, once ("filed as one task" / "filed three, the third waits on 
 
 ## Filing
 
-1. Draft a title and a one-to-three sentence description from what the user said. Do not add constraints, approvals, or non-goals they did not state — a future agent will treat the task file as approved by them. No area: ops tasks carry none.
+1. Draft a title and a one-to-three sentence description from what the user said, then its `Intent:` line (*Intent* above). Do not add constraints, approvals, or non-goals they did not state — a future agent will treat the task file as approved by them. No area: ops tasks carry none.
 2. **Check the board first**: `TASKS related "<title + description>"`.
    - Substantially the same task already exists → say so and propose amending it (`TASKS update <id> …`) rather than filing a duplicate. The user decides.
    - A near-identical task that is already `done` is usually not a duplicate — recurring work legitimately comes round again. Check whether it should be `--kind recurring` instead (SKILL.md *Recurring*): offer, and let the user choose the cadence. Never set one on your own.

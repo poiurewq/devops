@@ -1775,8 +1775,14 @@ def watch_check_line(tid, tasks, color=False):
     task = next((t for t in tasks if t["id"] == tid), None)
     if task is None:
         return watch_missing_tid(tid, color=color)
-    occ_hits = in_flight_area_collisions(task, tasks)
-    dep_hits = unfinished_deps(task, tasks)
+    return _check_line(task, tasks, color=color)
+
+
+def _check_line(task, tasks, group=(), color=False):
+    """One task's check against the board, ignoring ``group`` peers."""
+    occ_hits = in_flight_area_collisions(task, tasks, exclude_ids=group)
+    dep_hits = [o for o in unfinished_deps(task, tasks)
+                if o["id"] not in group]
     if not dep_hits:
         return format_area_collisions(task, occ_hits, color=color)
     deps = format_unfinished_deps(dep_hits, color=color)
@@ -1786,12 +1792,86 @@ def watch_check_line(tid, tasks, color=False):
     return f"{occ} · {deps}"
 
 
+def watch_group_check_lines(ids, tasks, color=False):
+    """Watch-mode c with several ids: outside the group, then within it.
+
+    Outside: each member as the single-id check, peers ignored. Within:
+    area overlap and unfinished deps between members — both rule out
+    running in parallel, but only order a batch (a dep cycle blocks it).
+    No batch order is suggested: deps already name the forced ones.
+    A TERMINAL member is not going to start, so it is listed by status
+    and left out of every other check.
+    """
+    by_id = {t["id"]: t for t in tasks}
+    missing = [i for i in ids if i not in by_id]
+    if missing:
+        return [watch_missing_tid(i, color=color) for i in missing]
+    live = [i for i in ids if by_id[i].get("status") not in TERMINAL]
+    group = set(live)
+    lines = ["outside group:"]
+    for i in ids:
+        if i in group:
+            line = _check_line(by_id[i], tasks, group=group, color=color)
+        else:
+            st = by_id[i]["status"]
+            line = (f"{_task_head(by_id[i], color=color)} — "
+                    f"{_status_ansi(st, st) if color else st}")
+        lines.append("  " + line)
+    ids = live
+    if len(ids) < 2:
+        return lines
+    reasons = [f"T{a['id']} and T{b['id']} share areas"
+               for a, b in set_area_overlaps(ids, tasks)]
+    needs = {i: [o["id"] for o in unfinished_deps(by_id[i], tasks)
+                 if o["id"] in group] for i in ids}
+    reasons += [f"T{i} needs T{d}" for i in ids for d in needs[i]]
+    done, left = set(), set(ids)
+    while left:
+        ready = {i for i in left if all(d in done for d in needs[i])}
+        if not ready:
+            break
+        done |= ready
+        left -= ready
+    ok = _ansi(_OK, "ok") if color else "ok"
+    no = _ansi(_ERR, "no") if color else "no"
+    lines.append("within group:")
+    lines.append(f"  parallel: {no} — {'; '.join(reasons)}" if reasons
+                 else f"  parallel: {ok}")
+    if left:
+        cycle = ", ".join(f"T{i}" for i in ids if i in left)
+        lines.append(f"  batch: {no} — dep cycle; cannot order {cycle}")
+    else:
+        lines.append(f"  batch: {ok}")
+    return lines
+
+
 def watch_task_view(tid, tasks):
     """Frontmatter + body for the live viewer, or None if missing."""
     task = next((t for t in tasks if t["id"] == tid), None)
     if task is None:
         return None
     return render_task(task).rstrip()
+
+
+def watch_search_view(query, tasks, expand=False, color=False):
+    """Watch-mode s: tasks ranked as `related` ranks them.
+
+    A full pane, not a footer — the board rarely leaves room for one.
+    Like the board, TERMINAL tasks are left out unless expanded (e); when
+    shown they are dimmed, not reordered — ties keep id order.
+    """
+    lines = [f"# Search: {query}", ""]
+    pool = [t for t in tasks if expand or t["status"] not in TERMINAL]
+    hits = related_hits(query, pool)
+    if not hits:
+        lines.append("(nothing related)" if expand else
+                     "(nothing related; e includes done/later/not-planned)")
+    for score, t in hits:
+        if color and t["status"] in TERMINAL:
+            lines.append(_ansi(_DIM, f"{score:.2f} {fmt_line(t, tasks)}"))
+        else:
+            lines.append(f"{score:.2f} {fmt_line(t, tasks, color=color)}")
+    return "\n".join(lines)
 
 
 def flows_pane_text(bw, scope, color=False):
@@ -1822,6 +1902,27 @@ def flows_pane_text(bw, scope, color=False):
                 tail = f"uses {', '.join(uses)}"
                 line += f"  \u00b7 {_ansi(_DIM, tail) if color else tail}"
             lines.append(line)
+    return "\n".join(lines)
+
+
+def watch_flow_search_view(query, flows, color=False):
+    """Flows-pane s: flows ranked as `related` ranks tasks.
+
+    Name, description and procedure all count. Retired flows are listed
+    (the index lists them too), tagged — dimming alone is lost without
+    color — and dimmed.
+    """
+    lines = [f"# Flow search: {query}", ""]
+    hits = related_hits(query, flows, fields=("name", "description", "body"))
+    if not hits:
+        lines.append("(nothing related)")
+    for score, f in hits:
+        tag = "" if flow_is_active(f) else " (retired)"
+        line = (f"{score:.2f} {f['id']:>3}  {f['name']}{tag}  "
+                f"{f.get('description', '')}").rstrip()
+        if color and not flow_is_active(f):
+            line = _ansi(_DIM, line)
+        lines.append(line)
     return "\n".join(lines)
 
 
@@ -1857,6 +1958,25 @@ def parse_watch_tid(buf):
     if not s.isdigit():
         return None
     return int(s)
+
+
+def parse_watch_ids(buf):
+    """Comma-separated ids for a check, in typed order. None if any is bad."""
+    ids = []
+    for part in buf.split(","):
+        tid = parse_watch_tid(part)
+        if tid is None:
+            return None
+        if tid not in ids:
+            ids.append(tid)
+    return ids
+
+
+def watch_check_result(ids, tasks, color=False):
+    """The c result: one line for one id, the group check for several."""
+    if len(ids) == 1:
+        return watch_check_line(ids[0], tasks, color=color)
+    return "\n".join(watch_group_check_lines(ids, tasks, color=color))
 
 
 def append_body(body, text):
@@ -5191,22 +5311,33 @@ def cmd_related(args):
     can spot duplicates and dependency neighbours before adding."""
     root, scope, branch, bw = ctx()
     tasks = all_tasks(bw, scope)
-    qt = terms(args.text)
-    hits = []
-    for t in tasks:
-        overlap = len(qt & terms(t["title"] + " " + t.get("body", ""))) / len(qt) if qt else 0
-        # Character similarity is noisy on short strings — only let it speak
-        # when the titles are near-identical; otherwise shared terms decide.
-        ratio = difflib.SequenceMatcher(None, args.text.lower(),
-                                        t["title"].lower()).ratio()
-        score = max(overlap, ratio if ratio >= 0.55 else 0)
-        if score >= 0.3:
-            hits.append((score, t))
+    hits = related_hits(args.text, tasks)
     if not hits:
         print("(nothing related)")
         return
-    for score, t in sorted(hits, key=lambda h: -h[0])[:8]:
+    for score, t in hits[:8]:
         print(f"{score:.2f} {fmt_line(t, tasks)}")
+
+
+def related_hits(text, items, fields=("title", "body")):
+    """(score, item) for every item related to `text`, best first.
+
+    Shared by `related` and both watch-mode searches, so all rank alike.
+    `fields[0]` is the title; every field feeds the shared terms.
+    """
+    qt = terms(text)
+    hits = []
+    for t in items:
+        words = " ".join(t.get(k, "") for k in fields)
+        overlap = len(qt & terms(words)) / len(qt) if qt else 0
+        # Character similarity is noisy on short strings — only let it speak
+        # when the titles are near-identical; otherwise shared terms decide.
+        ratio = difflib.SequenceMatcher(None, text.lower(),
+                                        t[fields[0]].lower()).ratio()
+        score = max(overlap, ratio if ratio >= 0.55 else 0)
+        if score >= 0.3:
+            hits.append((score, t))
+    return sorted(hits, key=lambda h: -h[0])
 
 
 def cmd_delete(args):
@@ -5838,6 +5969,9 @@ _KEY_SEQS = {
 def _read_key(cooked=True):
     """One key from a tty; first character of a line otherwise.
 
+    EOF and Ctrl-D both come back as "\x04" (quit), never "q": a prompt
+    that takes letters as text must still be able to tell them apart.
+
     Read the fd directly — sys.stdin's buffer can swallow the key after
     switching the tty out of canonical mode. Escape consumes a following
     CSI/SS3 so arrow keys do not leak as a/A/q (see `_read_tty_byte`).
@@ -5847,7 +5981,7 @@ def _read_key(cooked=True):
     """
     if not sys.stdin.isatty():
         line = sys.stdin.readline()
-        return line[:1] if line else "q"
+        return line[:1] if line else "\x04"
     fd = sys.stdin.fileno()
     if cooked:
         try:
@@ -5865,15 +5999,12 @@ def _read_key(cooked=True):
     else:
         ch = _read_tty_byte(fd)
     if not ch:
-        return "q"
+        return "\x04"
     if ch == b"\x1b":
         return "\x1b"
     if ch.startswith(b"\x1b"):
         return _KEY_SEQS.get(ch.decode("ascii", "replace"), "\x1b")
-    key = ch.decode("utf-8", "replace")
-    if key == "\x04":  # Ctrl-D
-        return "q"
-    return key
+    return ch.decode("utf-8", "replace")
 
 
 _tty_unread = None  # one leftover byte after a lone ESC (not a CSI)
@@ -5940,21 +6071,27 @@ def _rows_of(lines, cols):
 
 
 def _watch_help(by_area, expand, more_above=0, more_below=0, check=False,
-                showing=False, flows=False):
+                showing=False, flows=False, search=False):
+    if search:
+        # Every printable key is query text, so no letter shortcut is live.
+        return _watch_help_counts("type query↵  esc cancel  arrows",
+                                  more_above, more_below)
     if flows:
         query = "esc index" if showing else "type flow id↵"
         return _watch_help_counts(
-            f"r refresh  f board  q quit  · {query}  arrows  space/b page",
+            f"r refresh  s search  f board  q quit  · {query}  arrows"
+            f"  space/b page",
             more_above, more_below)
     other = "by status" if by_area else "by area"
     fold = "collapse" if expand else "expand"
     if showing:
         query = "esc board"
     elif check:
-        query = "check id↵"
+        query = "check id[,id…]↵"
     else:
         query = "type id↵"
-    help_line = (f"r refresh  a {other}  e {fold}  c check  f flows  q quit"
+    help_line = (f"r refresh  a {other}  e {fold}  c check  s search  f flows"
+                 f"  q quit"
                  f"  · {query}  arrows  space/b page")
     return _watch_help_counts(help_line, more_above, more_below)
 
@@ -5973,19 +6110,22 @@ def _watch_help_counts(help_line, more_above, more_below):
 
 def _watch_footer_lines(by_area, expand, buf, result,
                         more_above=0, more_below=0, check=False,
-                        showing=False, flows=False):
+                        showing=False, flows=False, search=False):
     help_line = _watch_help(by_area, expand, more_above, more_below,
-                           check=check, showing=showing, flows=flows)
+                           check=check, showing=showing, flows=flows,
+                           search=search)
     if _use_color():
         help_line = _ansi(_DIM, help_line)
     lines = ["", help_line]
-    if check or buf:
-        if check:
+    if check or search or buf:
+        if search:
+            lines.append(f"s> {buf}")
+        elif check:
             lines.append(f"c> {buf}".rstrip())
         else:
             lines.append(f"{'f> ' if flows else '> '}{buf}")
     if result:
-        lines.append(result)
+        lines.extend(result.split("\n"))
     return lines
 
 
@@ -6032,7 +6172,7 @@ def _watch_page_offsets(body, offset, body_rows, cols):
 
 
 def _paint_watch(out, by_area, expand, buf, result, offset, check=False,
-                 showing=False, flows=False):
+                 showing=False, flows=False, search=False):
     """Paint a terminal-height viewport.
 
     Returns (clamped offset, page-up offset, page-down offset).
@@ -6042,7 +6182,8 @@ def _paint_watch(out, by_area, expand, buf, result, offset, check=False,
     # First pass: footer without counts, so the body budget is stable.
     footer_rows = _rows_of(
         _watch_footer_lines(by_area, expand, buf, result,
-                            check=check, showing=showing, flows=flows), cols)
+                            check=check, showing=showing, flows=flows,
+                            search=search), cols)
     body_rows = max(1, rows - footer_rows)
     shown, offset, more_below = _window_lines(body, offset, body_rows, cols)
     more_above = offset
@@ -6051,7 +6192,7 @@ def _paint_watch(out, by_area, expand, buf, result, offset, check=False,
         footer_rows = _rows_of(
             _watch_footer_lines(by_area, expand, buf, result,
                                 more_above, more_below, check=check,
-                                showing=showing, flows=flows),
+                                showing=showing, flows=flows, search=search),
             cols)
         body_rows = max(1, rows - footer_rows)
         shown, offset, more_below = _window_lines(
@@ -6059,7 +6200,7 @@ def _paint_watch(out, by_area, expand, buf, result, offset, check=False,
         more_above = offset
     footer = _watch_footer_lines(by_area, expand, buf, result,
                                  more_above, more_below, check=check,
-                                 showing=showing, flows=flows)
+                                 showing=showing, flows=flows, search=search)
     _clear_screen()
     # No trailing newline: print() on the last row scrolls the first line off.
     frame = shown + footer
@@ -6116,9 +6257,11 @@ def cmd_board(args):
         buf = ""
         result = ""
         last_tid = None
-        last_kind = None  # "show" | "check" | None
+        last_kind = None  # "show" | "check" | "search" | None
         last_fid = None   # flows pane: the flow being shown
+        last_query = ""   # the search last_kind "search" shows
         check_mode = False
+        search_mode = False  # s> prompt open: printable keys are query
         flows_mode = False
         offset = 0
         try:
@@ -6129,6 +6272,10 @@ def cmd_board(args):
                 display = board
                 if flows_mode:
                     display = flows_pane_text(bw, scope, color=_use_color())
+                    if last_query:
+                        display = watch_flow_search_view(
+                            last_query, all_flows(bw, scope),
+                            color=_use_color())
                     if last_fid is not None:
                         view = watch_flow_view(bw, scope, last_fid)
                         if view is None:
@@ -6139,15 +6286,24 @@ def cmd_board(args):
                             display = view
                             result = ""
                 elif last_kind == "check" and last_tid is not None:
-                    result = watch_check_line(
+                    result = watch_check_result(
                         last_tid, tasks, color=_use_color())
+                elif last_kind == "search":
+                    display = watch_search_view(
+                        last_query, tasks, expand=expand,
+                        color=_use_color())
+                    result = ""
                 elif last_kind == "show" and last_tid is not None:
                     view = watch_task_view(last_tid, tasks)
                     if view is None:
                         result = watch_missing_tid(
                             last_tid, color=_use_color())
                         last_tid = None
-                        last_kind = None
+                        last_kind = "search" if last_query else None
+                        if last_query:
+                            display = watch_search_view(
+                                last_query, tasks, expand=expand,
+                                color=_use_color())
                     else:
                         display = view
                         result = ""
@@ -6155,9 +6311,40 @@ def cmd_board(args):
                     offset, page_up, page_down = _paint_watch(
                         display, by_area, expand, buf, result, offset,
                         check=check_mode, flows=flows_mode,
-                        showing=(last_fid is not None) if flows_mode
-                        else last_kind == "show")
+                        search=search_mode,
+                        showing=(last_fid is not None or bool(last_query))
+                        if flows_mode
+                        else last_kind in ("show", "search"))
                     key = _read_key(cooked=old_term is None)
+                    if key == "\x04":  # Ctrl-D / EOF, even mid-query
+                        print()
+                        return
+                    if search_mode:
+                        # Before the letter shortcuts: they would steal
+                        # from the query.
+                        if key == "\x1b":
+                            search_mode = False
+                            buf = ""
+                        elif key in ("\x7f", "\x08"):
+                            buf = buf[:-1]
+                        elif key in ("\n", "\r"):
+                            if buf.strip():
+                                last_query = buf.strip()
+                                last_kind = "search"
+                                last_tid = None
+                                last_fid = None
+                                search_mode = False
+                                buf = ""
+                                offset = 0
+                                break
+                        elif key == "down":
+                            offset += 1
+                        elif key == "up":
+                            offset = max(0, offset - 1)
+                        elif (len(key) == 1 and key.isprintable()
+                              and len(buf) < 64):
+                            buf += key
+                        continue
                     if key in ("q", "Q"):
                         print()
                         return
@@ -6172,6 +6359,7 @@ def cmd_board(args):
                         last_tid = None
                         last_kind = None
                         last_fid = None
+                        last_query = ""
                         check_mode = False
                         offset = 0
                         break
@@ -6197,20 +6385,52 @@ def cmd_board(args):
                     if key in ("b", "B"):
                         offset = page_up
                         continue
+                    if not buf and key in ("s", "S"):
+                        search_mode = True
+                        check_mode = False
+                        continue
                     if not buf and key in "cC" and not flows_mode:
                         check_mode = not check_mode
-                        if check_mode and last_kind == "show":
+                        if check_mode and last_kind in ("show", "search"):
                             last_tid = None
                             last_kind = None
+                            last_query = ""
                             result = ""
                             display = board
                             offset = 0
+                        continue
+                    if (key == "\x1b" and not flows_mode and last_query
+                            and (last_kind == "show"
+                                 or (last_kind == "search" and buf))):
+                        # A task opened from search, or an id typed over
+                        # the hits: back to the hits, not the board.
+                        buf = ""
+                        last_tid = None
+                        last_kind = "search"
+                        result = ""
+                        offset = 0
+                        display = watch_search_view(
+                            last_query, tasks, expand=expand,
+                            color=_use_color())
+                        continue
+                    if (key == "\x1b" and flows_mode and last_query
+                            and (last_fid is not None or buf)):
+                        # A flow opened from search, or an id typed over
+                        # the hits: back to the hits, not the index.
+                        buf = ""
+                        last_fid = None
+                        result = ""
+                        offset = 0
+                        display = watch_flow_search_view(
+                            last_query, all_flows(bw, scope),
+                            color=_use_color())
                         continue
                     if key == "\x1b":
                         buf = ""
                         result = ""
                         last_tid = None
                         last_kind = None
+                        last_query = ""
                         last_fid = None
                         check_mode = False
                         offset = 0
@@ -6231,7 +6451,10 @@ def cmd_board(args):
                             buf = ""
                             color = _use_color()
                             offset = 0
-                            index = flows_pane_text(bw, scope, color=color)
+                            index = (watch_flow_search_view(
+                                last_query, all_flows(bw, scope),
+                                color=color) if last_query else
+                                flows_pane_text(bw, scope, color=color))
                             view = (watch_flow_view(bw, scope, fid)
                                     if fid is not None else None)
                             if view is None:
@@ -6246,15 +6469,19 @@ def cmd_board(args):
                             result = ""
                             display = view
                             continue
-                        tid = parse_watch_tid(buf)
+                        # In check mode tid is a list of ids (a group).
+                        tid = (parse_watch_ids(buf) if check_mode
+                               else parse_watch_tid(buf))
                         buf = ""
                         color = _use_color()
                         if tid is None:
                             result = (_ansi(_ERR, "not a task id")
                                       if color else "not a task id")
                             last_tid = None
-                            last_kind = None
-                            display = board
+                            last_kind = "search" if last_query else None
+                            display = (watch_search_view(
+                                last_query, tasks, expand=expand,
+                                color=color) if last_query else board)
                             offset = 0
                             continue
                         _plain, board, tasks = _render_board(args)
@@ -6262,16 +6489,18 @@ def cmd_board(args):
                         offset = 0
                         if check_mode:
                             last_kind = "check"
-                            result = watch_check_line(
+                            result = watch_check_result(
                                 tid, tasks, color=color)
                             display = board
                             continue
                         view = watch_task_view(tid, tasks)
                         if view is None:
                             last_tid = None
-                            last_kind = None
+                            last_kind = "search" if last_query else None
                             result = watch_missing_tid(tid, color=color)
-                            display = board
+                            display = (watch_search_view(
+                                last_query, tasks, expand=expand,
+                                color=color) if last_query else board)
                             continue
                         last_kind = "show"
                         result = ""
@@ -6280,7 +6509,11 @@ def cmd_board(args):
                     if not buf and key in "tT" and not flows_mode:
                         buf = key
                         continue
-                    if key.isdigit() and len(buf) < 8:
+                    if (key == "," and check_mode and buf
+                            and buf[-1] != "," and len(buf) < 64):
+                        buf += key
+                        continue
+                    if key.isdigit() and len(buf) < (64 if check_mode else 8):
                         buf += key
                         continue
         except KeyboardInterrupt:
@@ -6903,7 +7136,8 @@ def main():
                         "listed under each area)")
     s.add_argument("--watch", action="store_true",
                    help="interactive: r refresh, a toggle by-area, "
-                        "e toggle expand, c check mode, q quit, "
+                        "e toggle expand, c check mode, s search, "
+                        "f flows pane, q quit, "
                         "arrows scroll, space/b page, type id+Enter to "
                         "show a task (used by ./board)")
     s.add_argument("--refresh-viewer", action="store_true",

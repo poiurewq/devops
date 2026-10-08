@@ -82,7 +82,7 @@ Caveats: `--append` adds to a body (no prior `show` needed, can't truncate); `--
 - `<scope>/.tasks/` — tracked, lives only on the board's integration branch: `NNN.md` (one file per task), `board.yml` (settings, iteration, who holds the board), `areas.md` (a dev concern — ops tasks carry no area), `log.md` (past-iteration index), `archive/<n>-<slug>/NNN.md` (every closed task, verbatim — the run records of past iterations live here and stay searchable; written by `/ops iteration close`).
 - `<scope>/.flows/` — tracked, same home as `.tasks/`, written only through `TASKS flow …`. One file per flow, `<name>.md`: frontmatter `id` (numeric, fixed at create), `name`, `description` (one line), `inputs`, `uses` (flows it follows), `status` (`active`/`retired`), `formerly` (past names, a matching hint), `created`; body = the procedure. Flows outlive iterations — nothing archives them.
 - `<scope>/.dev/` — local to this checkout, gitignored: `identity` and the hidden worktree the script commits board changes through. Shared with `/dev` if it is installed; one identity per project either way.
-- `<scope>/board` — local live viewer (`r` refresh, `f` flows pane, `q` quit, arrows scroll, type an id + Enter to show it). In the flows pane a typed number is the flow's id; in the tasks pane it is a task id.
+- `<scope>/board` — local live viewer (`r` refresh, `a` toggle by-area, `e` toggle expand, `c` check (an id, or `id,id…` for a group), `s` search (words + Enter ranks live tasks as `TASKS related` does, `e` widens it to done/later/not-planned (dimmed); Esc from a hit opened by id returns to the hits; while the `s>` prompt is open every letter is query text, Esc cancels, Ctrl-D still quits), `f` flows pane, `q` quit, arrows scroll, space/b page, type an id + Enter to show it). In the flows pane a typed number is the flow's id, and `s` searches flows by name, description and procedure (retired ones tagged and dimmed; Esc from a flow opened from the hits returns to them); in the tasks pane a number is a task id.
 
 An **ops task** carries `type: ops` in its frontmatter. It has no area (areas lock regions of a codebase; ops touches none), gets no branch and no PR, and closes with its run record rather than a merge. It may also be `kind: recurring` (perpetual work on a cadence) or `kind: umbrella` (a goal whose `deps` are its children). Tasks without `type: ops` on the same board are dev tasks — see The boundary.
 
@@ -112,7 +112,7 @@ Statuses for an ops task: `proposed` (filed for approval) → `backlog` → `pla
 | `/ops board` | `TASKS board`, then report. One board: dev tasks show alongside, marked. |
 | `/ops status` | Your plate — see "Status" below. |
 | `/ops show <id>` | `TASKS show <id>`. |
-| `/ops change <id> <what>` / `modify` | Map onto `TASKS update <id> --…`; show the result. |
+| `/ops change <id> <what>` / `modify` | Map onto `TASKS update <id> --…`; show the result. A new intent is `--append "Intent: …"`, never a `--desc` rewrite — the last `Intent:` line wins (flows/add.md *Intent*). |
 | `/ops drop <id>` / "we're not doing this" | Not planned, below — offer delete as the alternative and let the user pick. |
 | `/ops delete <id>` | Confirm, then `TASKS delete <id>`. |
 | `/ops iteration …` | Read `flows/iteration.md` (show, close, start the next). |
@@ -134,7 +134,7 @@ Run `SKILL_CMD check` once at the start of bare `/ops`, `/ops help`, `/ops init`
 A run is one execution against one task, and it ends inside the same session it started.
 
 - **Every flow declares its inputs, and a run must have all of them.** Missing ones are asked for before the first step, in the user's words, and recorded on the task (`TASKS update <id> --append`) so the run is reproducible and the record is honest.
-- **Checkpoints belong to the user.** Honour the flow's step marks, and gate every outward or hard-to-undo step on a `go` even when the flow forgot the `[confirm]` before it (*Step marks*, below). Whatever the flow says, a run always ends with one overall check: show what was done and ask whether the task's aim was met. Only then close.
+- **Checkpoints belong to the user.** Honour the flow's step marks, and gate every outward or hard-to-undo step on a `go` even when the flow forgot the `[confirm]` before it (*Step marks*, below). Whatever the flow says, a run always ends with one overall check: show what was done and ask whether it meets the task's last `Intent:` line — the user's aim in their words. Only then close.
 - **Note what the flow did not predict.** A step the user did themselves, a step inserted mid-run, a correction: each gets `TASKS note <id> --at "<step>" "<what>"` when it happens. Steps that went as written get nothing — a note is the exception, so task bodies stay light. Notes are what the closing record's deviations, the post-run flow tweak, and `flow create from <id>` read; one remembered after the close still goes on the task.
 - **Closing is `TASKS ran <id> --flow <names> --record "<inputs; deviations>"`** — one call that stamps which flows ran, appends `Ran (<date>): …` to the task body, and closes the task (a recurring one re-arms to `backlog` with its next due date instead).
 - **Then improve the flow.** After the task is closed, re-read each flow that ran against what actually happened and offer small fixes on the spot (`flows/run.md`). Runs are where a flow's rough edges show. Tweaks come after closing so they never hold up the user's task.
@@ -160,7 +160,7 @@ Flows are named, never numbered: `/ops run weekly-invoice`, not a number — a n
 
 ## Umbrella close (inline)
 
-A `kind: umbrella` task is a goal whose `deps` are its children. Children all being done says the work happened, not that the goal was met, so an umbrella is **never** closed by a status flip — `update --status done` on one is refused. Closing it is `TASKS verify <id> "<how the children met the goal>"`, and it is a human call: read the children's `Ran:` records against the stated aim, show the user the judgment, and wait. Gaps become new children (`TASKS update <umbrella> --deps <existing+new>`), not work done on the umbrella itself.
+A `kind: umbrella` task is a goal whose `deps` are its children. Children all being done says the work happened, not that the goal was met, so an umbrella is **never** closed by a status flip — `update --status done` on one is refused. Closing it is `TASKS verify <id> "<how the children met the goal>"`, and it is a human call: read the children's `Ran:` records against the umbrella's last `Intent:` line, show the user the judgment, and wait. Gaps become new children (`TASKS update <umbrella> --deps <existing+new>`), not work done on the umbrella itself.
 
 ## Recurring (inline)
 

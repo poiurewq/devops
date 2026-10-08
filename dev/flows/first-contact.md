@@ -17,8 +17,8 @@ From board state (and a light PR refresh on `draft` / `review` tasks if useful; 
 | When | Offer |
 |---|---|
 | Open forks (`needs: decision`), `proposed` tasks, or open PRs to review | `/dev review` |
-| Your `doing` / `planned` / `draft` / `review` work | `/dev status` · `/dev implement <id>` (a `draft` is yours to finish, review via `/dev review <id>`, and `ready`; `review` gets a resume note) |
-| Unassigned backlog and a quiet plate | 1–2 unblocked candidates via `/dev pick <id>` or `/dev implement <id>` |
+| Your `doing` / `planned` / `draft` / `review` work | `/dev status` · `/dev <id>` · `/dev implement <id>` (a `draft` is yours to finish, review via `/dev review <id>`, and `ready`; `review` gets a resume note) |
+| Unassigned backlog and a quiet plate | 1–2 unblocked candidates via `/dev pick <id>`, `/dev <id>`, or `/dev implement <id>` |
 | No open work on the board | `/dev add <task-or-goal>` |
 
 Prefer the highest-signal row(s); one or two lines is enough. Always end with the `/dev help` hint.
@@ -35,7 +35,7 @@ Every agent shows the same menu, so the user learns one map of the tool. Emit it
 |---|---|
 | **See** | `/dev board` — the whole board (status) · `/dev board --by-area` — cut by area · `/dev status` — your plate · `/dev show <id>` — one task |
 | **Add work** | `/dev add <task-or-goal>` — file a task, or work a goal or pile of threads onto the board · `/dev absorb <file>` — import an existing list · `/dev audit [area]` — scan the code and file what it finds |
-| **Do work** | `/dev pick <id>` — claim it · `/dev implement <id[, id…]|goal>` — build it (or a batch) and open PR(s); unknown goal is filed via add triage first · `/dev auto` — hand one to an agent |
+| **Do work** | `/dev pick <id>` — claim it · `/dev <id[, id…]>` — see a task through in one sitting: build, check against intent, review, with you deciding only the real calls · `/dev implement <id[, id…]|goal>` — build it (or a batch) and open PR(s); unknown goal is filed via add triage first · `/dev auto` — hand one to an agent |
 | **Decide** | `/dev review` — PRs, design questions, and proposals waiting on you · `/dev meta` — pressure the board · `/dev meta area` — area-validity only |
 | **Adjust** | `/dev change <id> <what>` · `/dev delete <id>` · `/dev area` · `/dev config` |
 | **Iterate** | `/dev iteration` — show, close, or start the next one |

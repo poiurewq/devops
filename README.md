@@ -33,7 +33,7 @@ In a repo (with at least one commit and a GitHub `origin`):
 /dev
 ```
 
-That walks you through identity + board setup. Then `/dev help` for the full command map. After init, `./board` (from the product directory) is a live view — `r` refresh, `a` toggle by-area, `e` toggle expand, `c` check, `f` flows pane, `q` quit, arrows scroll, space/b page, type a task id + Enter to read it.
+That walks you through identity + board setup. Then `/dev help` for the full command map. After init, `./board` (from the product directory) is a live view — `r` refresh, `a` toggle by-area, `e` toggle expand, `c` check (an id, or `id,id…` for a group), `s` search tasks by words (flows, in the flows pane), `f` flows pane, `q` quit, arrows scroll, space/b page, type a task id + Enter to read it.
 
 ## Updating (`/dev skill`, `/ops skill`)
 
