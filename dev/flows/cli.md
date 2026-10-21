@@ -113,6 +113,17 @@ TASKS pause <id> --at "<step>" --record "<what exists so far, where>"
                                         # doing with its assignee. Only a
                                         # doing ops task; resume is
                                         # /ops run <id>
+TASKS wait <id> --on "<who>" --by YYYY-MM-DD --at "<step>"
+                --record "<what was sent, where>"
+                [--flow <name[,name]>] [--date YYYY-MM-DD]
+                                        # work stopped at an [external]
+                                        # step: sets waiting: <who> by
+                                        # <date>, appends Waiting (<date>):
+                                        # …, stays doing. Any doing task,
+                                        # dev or ops; re-run moves the date.
+                                        # The marker clears when the task
+                                        # leaves doing
+TASKS wait <id> --clear                 # the reply is in; stays doing
 TASKS note <id> "<text>" [--at "<step>"] [--date YYYY-MM-DD]
                                         # ops only: appends Note (<date>):
                                         # [<flow> <step>] …; any status but

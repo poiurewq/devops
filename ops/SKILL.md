@@ -40,6 +40,10 @@ TASKS update <id> [--title] [--status] [--assignee <who>|""] [--deps]
 TASKS pause <id> --at "<step>" --record "<what exists so far>"
             [--flow <name[,name]>] [--date YYYY-MM-DD]
                                         # stop a run partway; stays doing
+TASKS wait <id> --on "<who>" --by YYYY-MM-DD --at "<step>"
+           --record "<what was sent, where>" [--flow <name[,name]>]
+           [--date YYYY-MM-DD]          # at an [external] step; stays doing
+TASKS wait <id> --clear                 # the reply is in; stays doing
 TASKS note <id> [--at "<step>"] "<what the flow did not predict>"
             [--date YYYY-MM-DD]         # Note (<date>): …; any status but
                                         # proposed/not-planned, done included
@@ -71,7 +75,7 @@ Caveats: `--append` adds to a body (no prior `show` needed, can't truncate); `--
 - **Never edit `.tasks/` or `.flows/` by hand.** All board and flow reads/writes go through `TASKS`, which serializes every mutation through the integration branch on the remote — that is what makes the board conflict-free across machines. Bypassing it breaks the model.
 - **Humans decide; agents draft.** A run ends when the user says the task's aim was met, not when the steps are exhausted. Flow creation, flow edits, and proposal approvals are theirs too. Surface the question and wait. A question they decline to answer now is recorded on the task (`TASKS update <id> --needs decision --append "Question: …"`), never left in the chat — that is what puts it in `/ops decide` (`flows/run.md`).
 - **Every run is recorded.** `TASKS ran <id> --record "…"` is what closes an ops task. The record says what the run was given and where it departed from the flow — it is the only durable trace of what happened, and it is what later makes a flow improvable.
-- **A flow is a procedure, not a policy.** Write the steps someone could follow, each marked `[agent]`, `[user]`, or `[confirm]` (*Step marks*, below). Do not write constraints, approvals, or non-goals the user did not state.
+- **A flow is a procedure, not a policy.** Write the steps someone could follow, each marked `[agent]`, `[user]`, `[confirm]`, or `[external]` (*Step marks*, below). Do not write constraints, approvals, or non-goals the user did not state.
 - **User specs are one guess.** What the user lays out — filing a task, describing a step, sketching a flow — is one guess and may not be the best. When part of it doesn't make sense or could be clearly improved, say so; when something is unclear, ask. The commitment is to the work coming out right, not to the user's words.
 - **Write short.** A task description is a few sentences: the aim. A flow is the shortest text that someone could actually follow. The same brevity applies to run records and to what you report back. Never produce long plans or status reports the user didn't ask for.
 - Natural-language intents map onto subcommands; fulfil them and mention the keyword once ("done — btw, `/ops run 12` does this directly"). Always show a suggested command's argument shape — `/ops add <task-or-goal>`, `/ops run <id|flow-name|description>`, `/ops flow create [<name>]` — never a bare `/ops add ...`, which leaves the user guessing what goes there.
@@ -86,7 +90,7 @@ Caveats: `--append` adds to a body (no prior `show` needed, can't truncate); `--
 
 An **ops task** carries `type: ops` in its frontmatter. It has no area (areas lock regions of a codebase; ops touches none), gets no branch and no PR, and closes with its run record rather than a merge. It may also be `kind: recurring` (perpetual work on a cadence) or `kind: umbrella` (a goal whose `deps` are its children). Tasks without `type: ops` on the same board are dev tasks — see The boundary.
 
-Statuses for an ops task: `proposed` (filed for approval) → `backlog` → `planned` → `doing` (a run is under way) → `done`. A run the user stops partway stays `doing` with its assignee — `TASKS pause` records where it got to so a later session resumes from there (`flows/run.md`), and only `TASKS ran` closes it. Off to the side: `later` (intended, not this iteration) and `not-planned` (decided against, with its reason). `draft` and `review` are PR states and never apply here. `needs: decision` marks an open question awaiting the user.
+Statuses for an ops task: `proposed` (filed for approval) → `backlog` → `planned` → `doing` (a run is under way) → `done`. A run the user stops partway stays `doing` with its assignee — `TASKS pause` records where it got to so a later session resumes from there (`flows/run.md`), and only `TASKS ran` closes it. A run stopped at an `[external]` step also stays `doing`, marked waiting by `TASKS wait`: the board flags it `⚑waiting <who> by <date>` (red once overdue), lists it on a `waiting` row under Doing, and sorts it after the runs you can act on. The mark clears when the task leaves `doing`. Off to the side: `later` (intended, not this iteration) and `not-planned` (decided against, with its reason). `draft` and `review` are PR states and never apply here. `needs: decision` marks an open question awaiting the user.
 
 ## Routing
 
@@ -154,6 +158,7 @@ Flows are named, never numbered: `/ops run weekly-invoice`, not a number — a n
 - `[agent]` — you do it and report what came of it. An unmarked step is the agent's.
 - `[user]` — theirs: ask, wait, never do it for them.
 - `[confirm]` — you do it, then stop: show what it produced and wait for the user's `go` before the run goes on. This is the load-bearing mark: it goes on the step right **before** anything outward or hard to undo — sending, paying, publishing, deleting, committing someone to something — the step that prepares it (the draft, the amount, the list of files), so the user signs off on exactly what will go out. When you then perform the irreversible act, show its result; when the user performs it (`[user]`), their doing it *is* the check, and no step follows it to re-verify.
+- `[external]` — a third party does it (an office answers, a vendor ships) while the run waits, often for days. Reaching one stops the run: `TASKS wait` records who it waits on and when the reply is due, and `/ops run <id>` resumes once it is in (`flows/run.md`). The step that sends them what they act on is outward, so it is gated as any other.
 
 **The floor:** an outward or hard-to-undo step with no `[confirm]` step right before it (and not itself `[user]`) is gated anyway — you stop before it and show what it will do — and noted (`TASKS note <id> --at "<step>" "no confirm before it, gated"`) so the post-run tweak and `/ops meta` propose the `[confirm]` step for real. Read-only and trivially reversible steps never stop for a checkpoint. The reply contract at a checkpoint is in `flows/run.md`.
 
@@ -177,7 +182,7 @@ A `kind: umbrella` task is a goal whose `deps` are its children. Children all be
 
 ## Status (`/ops status`)
 
-`TASKS list --assignee <me>`, then report in order: runs in flight (`doing` — each is yours to finish and close), what is due (`TASKS recur list --due`), and anything waiting on you (`TASKS list --needs decision`, `--status proposed`).
+`TASKS list --assignee <me>`, then report in order: runs in flight you can act on (`doing` with no `waiting:` marker — each is yours to finish and close), then runs waiting on a third party (who and by when, overdue ones called out — nothing to do until the reply is in), what is due (`TASKS recur list --due`), and anything waiting on you (`TASKS list --needs decision`, `--status proposed`).
 
 Anything waiting on a decision is resolved in `flows/decide.md` (`/ops decide`), not here — status only surfaces it.
 

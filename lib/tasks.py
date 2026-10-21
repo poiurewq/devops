@@ -103,12 +103,18 @@ OPS = "ops"
 # separated (`7 send-invoice, 3 prep-agenda`), the name as it was at the
 # time. A record, not a pointer: lookups match on the id, so a flow rename
 # never rewrites a task. Set by `ran` (or `update --flow` at run start).
+# waiting: optional, `<who> by <YYYY-MM-DD>` — work stopped at an
+# [external] step, awaiting a third party. Set by `wait`; only a doing task
+# (dev or ops) carries it, and render_task drops it the moment the task
+# leaves doing, so every path out of doing clears it without knowing it
+# exists.
 FIELDS = ["id", "title", "area", "status", "kind", "type", "assignee", "branch",
-          "deps", "pr", "needs", "flow", "created", "cadence", "last_run"]
+          "deps", "pr", "needs", "waiting", "flow", "created", "cadence",
+          "last_run"]
 # Written only when non-empty, so an ordinary task file is byte-identical to
 # what a pre-schema-4 script produced. Older readers ignore them either way.
 # `type` is not among them: render always writes it (schema 8).
-OPTIONAL_FIELDS = ("flow", "cadence", "last_run")
+OPTIONAL_FIELDS = ("waiting", "flow", "cadence", "last_run")
 # Board push races on a shared integration branch: rebase onto origin and
 # retry this many times before queueing locally.
 PUSH_RETRIES = 5
@@ -1369,6 +1375,8 @@ def render_task(meta):
         elif k == "type":
             v = task_type(meta)
         elif k in OPTIONAL_FIELDS and not v:
+            continue
+        elif k == "waiting" and not waiting_allowed(meta):
             continue
         lines.append(f"{k}: {v}")
     lines.append("---")
@@ -3918,6 +3926,54 @@ def format_note(text, refs, at, date=None):
     return f"Note ({date}): [{tag}] {text}" if tag else f"Note ({date}): {text}"
 
 
+# ---------- waiting record (work awaiting a third party) ----------
+
+# A run (or a dev task following a flow) that reaches an [external] step —
+# the next move belongs to someone outside, days out — records who it waits
+# on and when the reply is due:
+#   Waiting (2026-10-21): [7 file-permit step 5] on county clerk by
+#   2026-11-04 — application submitted via the portal…
+# and sets the task's `waiting: <who> by <date>` marker, which is what the
+# board reads. Like a pause the task stays doing and nothing collects the
+# record into log.md; unlike a pause the marker is board-visible state.
+WAITING_RE = re.compile(r"^(.*\S)\s+by\s+(\d{4}-\d{2}-\d{2})$")
+
+
+def waiting_allowed(t):
+    return t.get("status") == "doing"
+
+
+def task_waiting(t):
+    """(who, expected-by date) for a run awaiting a third party, else None.
+
+    None too for a marker on a task that may not carry one, or one that does
+    not parse — the board must never crash on a hand-edited file.
+    """
+    m = WAITING_RE.match((t.get("waiting") or "").strip())
+    if not m or not waiting_allowed(t):
+        return None
+    try:
+        return m.group(1), datetime.date.fromisoformat(m.group(2))
+    except ValueError:
+        return None
+
+
+def waiting_sort_rank(t):
+    """Tiebreak within one status: actionable first, then waiting runs,
+    soonest expected-by first."""
+    w = task_waiting(t)
+    return (0, datetime.date.min) if w is None else (1, w[1])
+
+
+def format_waiting(text, refs, at, who, by, date=None):
+    """One waiting record, collapsed to a single paragraph."""
+    text = " ".join((text or "").split())
+    at = " ".join((at or "").split())
+    date = date or datetime.date.today().isoformat()
+    tag = ", ".join(refs) if refs else "no flow"
+    return f"Waiting ({date}): [{tag} {at}] on {who} by {by} — {text}"
+
+
 def ensure_shipped_in_text(text, records):
     """Replace the shipped records in text with `records`, appended at the end.
 
@@ -5540,6 +5596,69 @@ def cmd_pause(args):
     print(f"  resume with: /ops run {tid}")
 
 
+def cmd_wait(args):
+    """Mark doing work as waiting on a third party, or clear the mark.
+
+    The work reached an [external] step: the task stays `doing` with its
+    assignee (a dev task keeps its branch and its area locks), the
+    `waiting` marker says who and by when (the board's flag and its
+    waiting row), and a `Waiting (<date>): …` record keeps the
+    trace after the marker is gone. Re-running it moves the date. `--clear`
+    is for the reply arriving mid-run; leaving doing clears it anyway.
+    """
+    root, scope, branch, bw = ctx()
+    meta = find_task(bw, scope, args.id)
+    tid = meta["id"]
+    if meta["status"] != "doing":
+        sys.exit(f"error: T{tid} is {meta['status']}; only work under way "
+                 f"(doing) can wait")
+    if args.clear:
+        if args.on or args.by or args.at or args.record or args.flow:
+            sys.exit("error: --clear takes no other flags")
+        if not (meta.get("waiting") or "").strip():
+            sys.exit(f"error: T{tid} is not waiting on anyone")
+        meta["waiting"] = ""
+        with open(meta["path"], "w") as f:
+            f.write(render_task(meta))
+        board_commit(root, branch, bw, scope, f"dev: T{tid} waiting cleared")
+        print(f"T{tid} no longer waiting (still doing)")
+        return
+    who = " ".join((args.on or "").split())
+    if not who:
+        sys.exit(f"error: wait needs --on \"<who>\": the third party the run "
+                 f"now waits on")
+    if not args.by:
+        sys.exit("error: wait needs --by YYYY-MM-DD: when their reply is "
+                 "expected")
+    by = iso_date(args.by, "--by").isoformat()
+    at = " ".join((args.at or "").split())
+    if not at:
+        sys.exit("error: wait needs --at \"<step>\": the [external] step the "
+                 "run is waiting at")
+    text = " ".join((args.record or "").split())
+    if not text:
+        sys.exit(f"error: wait needs --record \"<what was sent, and where>\": "
+                 f"what the third party has, so the resume can pick up their "
+                 f"reply")
+    refs = resolve_flow_refs(bw, scope, args.flow) if args.flow else []
+    if not refs and meta.get("flow"):
+        refs = [f"{i} {n}" for i, n in parse_flow_refs(meta["flow"])]
+    if refs:
+        meta["flow"] = ", ".join(refs)
+    record = format_waiting(text, refs, at, who, by,
+                            iso_date(args.date, "date").isoformat()
+                            if args.date else None)
+    meta["waiting"] = f"{who} by {by}"
+    meta["body"] = append_body(meta["body"], record)
+    with open(meta["path"], "w") as f:
+        f.write(render_task(meta))
+    board_commit(root, branch, bw, scope, f"dev: T{tid} waiting")
+    print(f"T{tid} waiting on {who} by {by} (still doing)")
+    print(f"  {record}")
+    resume = f"/ops run {tid}" if is_ops(meta) else f"/dev {tid}"
+    print(f"  when the reply is in: {resume}")
+
+
 def cmd_note(args):
     """Append a note to an ops task's run history.
 
@@ -5689,6 +5808,11 @@ def fmt_line(t, tasks, color=False):
     if t.get("needs"):
         flag = f"⚑needs-{t['needs']}"
         parts.append(_ansi(_NEEDS, flag) if color else flag)
+    w = task_waiting(t)
+    if w:
+        flag = f"⚑waiting {w[0]} by {w[1].isoformat()}"
+        sgr = _ERR if w[1] < datetime.date.today() else _NEEDS
+        parts.append(_ansi(sgr, flag) if color else flag)
     if is_recurring(t):
         mark, sgr = recur_marker(t)
         parts.append(_ansi(sgr, mark) if color else mark)
@@ -5730,6 +5854,7 @@ def _sort_by_status(col, status_order=None):
     order = status_order or WATCH_STATUSES
     rank = {s: i for i, s in enumerate(order)}
     return sorted(col, key=lambda t: (rank.get(t["status"], 99),
+                                      waiting_sort_rank(t),
                                       recur_sort_rank(t), t["id"]))
 
 
@@ -5752,6 +5877,25 @@ def _recur_index_row(tasks, color=False):
     ids = " ".join(_ansi(_ERR if task_is_due(t) else _DIM, f"T{t['id']}")
                    for t in col)
     return [("Recurring", ids, _DIM)]
+
+
+def _waiting_index_row(tasks, label, color=False):
+    """Index row of runs awaiting a third party, soonest expected-by first,
+    overdue ids in red. [] when none.
+
+    Like the Recurring row it repeats ids already on their status row: a
+    waiting run is still doing. It is what tells "can act on" from "can't".
+    """
+    col = sorted([t for t in tasks if task_waiting(t)],
+                 key=lambda t: (waiting_sort_rank(t), t["id"]))
+    if not col:
+        return []
+    if not color:
+        return [(label, " ".join(f"T{t['id']}" for t in col))]
+    today = datetime.date.today()
+    ids = " ".join(_ansi(_ERR if task_waiting(t)[1] < today else _DIM,
+                         f"T{t['id']}") for t in col)
+    return [(label, ids, _DIM)]
 
 
 def _index_block(rows):
@@ -5820,6 +5964,7 @@ def _list_block(tasks, expand=False, color=False, status_order=None):
         # Recurrence stays a within-rank tiebreak (T3) so this rank can
         # move independently.
         return sorted(col, key=lambda t: (hottest_rank(t),
+                                          waiting_sort_rank(t),
                                           recur_sort_rank(t), t["id"]))
 
     lines = []
@@ -5845,6 +5990,8 @@ def _board_by_status(tasks, expand=False, color=False, status_order=None):
         rhs = _fmt_count(col) if fold else _fmt_ids(col, color=color)
         sgr = _STATUS_COLOR.get(status) if color else None
         rows.append((_status_label(status), rhs, sgr))
+        if status == "doing":
+            rows.extend(_waiting_index_row(tasks, "  waiting", color=color))
     rows.extend(_recur_index_row(tasks, color=color))
     lines = _index_block(rows)
     listed = _list_block(tasks, expand=expand, color=color,
@@ -5903,6 +6050,7 @@ def _board_by_area(bw, scope, tasks, expand=False, color=False,
                 sgr = _STATUS_COLOR.get(status) if color else None
                 rows.append((_status_label(status), _fmt_count(col), sgr))
     rows.extend(_recur_index_row(tasks, color=color))
+    rows.extend(_waiting_index_row(tasks, "Waiting", color=color))
     lines = _index_block(rows)
     listed = _list_block(tasks, expand=expand, color=color,
                          status_order=status_order)
@@ -7181,6 +7329,23 @@ def main():
                                   "field")
     s.add_argument("--date", help="YYYY-MM-DD of the pause (default today)")
     s.set_defaults(fn=cmd_pause)
+
+    s = sub.add_parser("wait",
+                       help="mark doing work as waiting on a third party; "
+                            "it stays doing")
+    s.add_argument("id", type=int)
+    s.add_argument("--on", help="who the run waits on")
+    s.add_argument("--by", help="YYYY-MM-DD their reply is expected")
+    s.add_argument("--at", help="the [external] step the run waits at")
+    s.add_argument("--record", help="what was sent to them and where it "
+                                    "lives — recorded as Waiting (<date>): …")
+    s.add_argument("--flow", help="flow name(s) being followed, comma-"
+                                  "separated; omit to keep the task's flow "
+                                  "field")
+    s.add_argument("--date", help="YYYY-MM-DD of the record (default today)")
+    s.add_argument("--clear", action="store_true",
+                   help="the reply is in: drop the waiting marker, stay doing")
+    s.set_defaults(fn=cmd_wait)
 
     s = sub.add_parser("note",
                        help="note on an ops task what its flow did not "
