@@ -21,6 +21,14 @@ Run from inside a package tree (a manual clone, or a copied tree passed via
 --source), that tree is used as-is and nothing is cloned — otherwise a
 second copy would appear behind the user's back.
 
+--copy-to DIR is the second install shape: self-contained skill copies in
+DIR/<skill>/, with no symlinks and no files outside each skill dir, for
+anywhere a link into one clone will not do (an uploaded folder, say). It
+builds from the package in hand, else from a temporary clone it deletes
+afterwards, so it never touches the linked install. Each copy carries a
+BUILD record, which is how a rebuild knows it may replace that dir and how
+the default install knows to leave it alone.
+
 CANONICAL_REPO is duplicated in lib/skill.py, which owns the update path.
 This file must stay standalone: it runs before any clone exists, so it
 cannot import from lib/.
@@ -33,6 +41,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 CANONICAL_REPO = "https://github.com/poiurewq/devops"
@@ -44,6 +53,8 @@ LEGACY_SLUG = "poiurewq/dev"
 # (~/.claude-work, …); each keeps its skills in <home>/skills.
 AGENT_HOME_GLOBS = (".claude*", ".grok*")
 SKILLS_SUBDIR = "skills"
+# Build record in each --copy-to copy; lib/skill.py reads the same name.
+BUILD_RECORD = "BUILD"
 
 
 def die(msg: str) -> "NoReturn":  # type: ignore[valid-type]
@@ -244,8 +255,10 @@ def describe_root(root: Path, skills: list[str], pkg: Path) -> str:
 def classify(target: Path, pkg: Path) -> tuple[str, str, str]:
     """(kind, human description, blocking reason) for one <root>/<skill>.
 
-    kind is one of: free, linked, link-other, clone-legacy, clone-canonical,
-    clone-other, copy, file.
+    kind is one of: free, linked, link-other, built-copy, clone-legacy,
+    clone-canonical, clone-other, copy, file. A built copy is always
+    blocked: someone chose that shape for that path, so no answer and no
+    --yes turns it into a symlink.
     """
     if target.is_symlink():
         try:
@@ -258,6 +271,9 @@ def classify(target: Path, pkg: Path) -> tuple[str, str, str]:
     if not target.exists():
         return "free", "", ""
     if target.is_dir():
+        if (target / BUILD_RECORD).is_file():
+            return ("built-copy", "self-contained copy",
+                    "self-contained copy (--copy-to); left in place")
         slug = clone_slug(target)
         if slug:
             unsaved = clone_has_unsaved_work(target)
@@ -281,7 +297,8 @@ def path_key(path: Path) -> str:
         return str(path)
 
 
-def reject_root_inside_package(root: Path, pkg: Path) -> None:
+def reject_root_inside_package(root: Path, pkg: Path,
+                               what: str = "a skills root") -> None:
     """A root at or under the package would link a skill dir to itself.
 
     The installer replaces whatever occupies <root>/<skill>, so a root of
@@ -290,8 +307,8 @@ def reject_root_inside_package(root: Path, pkg: Path) -> None:
     """
     root_key, pkg_key = path_key(root), path_key(pkg)
     if root_key == pkg_key or root_key.startswith(pkg_key + os.sep):
-        die(f"{tilde(root)} is inside the package at {tilde(pkg)}; a skills "
-            "root must be somewhere else, or the skill would be linked to "
+        die(f"{tilde(root)} is inside the package at {tilde(pkg)}; {what} "
+            "must be somewhere else, or the skill would be written over "
             "itself")
 
 
@@ -511,6 +528,139 @@ def apply(action: dict, pkg: Path, dry_run: bool) -> bool:
     return True
 
 
+# --- copies ----------------------------------------------------------------
+
+def temp_clone(tmp: Path) -> Path:
+    """Shallow clone into tmp: copy mode must not create the linked install."""
+    if shutil.which("git") is None:
+        die("git not found; install git and re-run")
+    dest = tmp / "devops"
+    print(f"fetching {CANONICAL_REPO} (temporary clone)")
+    r = run(["git", "clone", "--depth", "1", f"{CANONICAL_REPO}.git", str(dest)])
+    if r.returncode != 0:
+        die(f"git clone failed: {(r.stderr or r.stdout).strip()}")
+    if not is_package(dest):
+        die(f"cloned {CANONICAL_SLUG} but it has no lib/ or VERSION")
+    return dest
+
+
+def copy_plan(target: Path) -> tuple[str, str]:
+    """(verb, reason) for one <out>/<skill>: build, rebuild, or skip.
+
+    Only a previous copy is replaced; anything else at that path is someone
+    else's and is reported, never deleted.
+    """
+    if target.is_symlink():
+        return "skip", "a symlink (a linked install?); move it aside"
+    if not target.exists():
+        return "build", ""
+    if target.is_dir() and (target / BUILD_RECORD).is_file():
+        return "rebuild", ""
+    return "skip", "not a previous self-contained copy; move it aside"
+
+
+def tracked_copy_files(pkg: Path, name: str) -> list[tuple[Path, str]] | None:
+    """(source, path in the copy) for every file git tracks in skill name.
+
+    ls-files lists <name>/lib and <name>/VERSION as the links they are, so
+    each one that is tracked is expanded from the package's own lib/ and
+    VERSION. Paths are relative to pkg, which may be nested in another repo.
+    A tracked file missing from the work tree is skipped. None when git
+    tracks nothing here (not a work tree, or an untracked tree): the caller
+    copies the tree.
+    """
+    r = run(["git", "-C", str(pkg), "ls-files", "-z", "--",
+             name, "lib", "VERSION"])
+    paths = [p for p in (r.stdout or "").split("\0") if p] \
+        if r.returncode == 0 else []
+    if not paths:
+        return None
+    links = (f"{name}/lib", f"{name}/VERSION")
+    files = []
+    for rel in paths:
+        if rel in links or not (pkg / rel).is_file():
+            continue
+        if rel.startswith(f"{name}/"):
+            dest = rel[len(name) + 1:]
+        elif f"{name}/{rel.split('/')[0]}" in paths:
+            # Package lib/ and VERSION only where the skill links them: an
+            # older skill without the links must fail the predates check,
+            # not get a copy whose shims still reach outside it.
+            dest = rel
+        else:
+            continue
+        files.append((pkg / rel, dest))
+    return files
+
+
+def build_copy(pkg: Path, name: str, out: Path, skills: list[str]) -> None:
+    """Write out/<name> as real files, replacing a previous copy last.
+
+    The skill's lib/ and VERSION links are followed, which is what makes it
+    self-contained; from a git work tree only tracked files are copied, so
+    the build matches one from a clean clone. The new tree is built beside
+    the target and swapped in by rename, so a failed build never leaves the
+    old copy half-replaced.
+    """
+    target = out / name
+    staging = out / f"{name}.devops-new"
+    if staging.exists():
+        shutil.rmtree(staging)
+    files = tracked_copy_files(pkg, name)
+    if files is None:
+        shutil.copytree(pkg / name, staging, symlinks=False,
+                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    else:
+        for src, rel in files:
+            (staging / rel).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, staging / rel)
+    if not ((staging / "lib" / "tasks.py").is_file()
+            and (staging / "VERSION").is_file()):
+        shutil.rmtree(staging)
+        die(f"{tilde(pkg / name)} has no lib/ or VERSION of its own; this "
+            "package predates self-contained copies")
+    (staging / BUILD_RECORD).write_text(
+        f"version: {package_version(pkg)}\n"
+        f"output: {out}\n"
+        f"skills: {','.join(skills)}\n", encoding="utf-8")
+    old = out / f"{name}.devops-old"
+    if target.exists():
+        if old.exists():
+            shutil.rmtree(old)
+        os.rename(target, old)
+    os.rename(staging, target)
+    if old.exists():
+        shutil.rmtree(old, ignore_errors=True)
+
+
+def install_copies(pkg: Path, skills: list[str], out: Path,
+                   dry_run: bool) -> int:
+    reject_root_inside_package(out, pkg, "the --copy-to dir")
+    plans = [(name, *copy_plan(out / name)) for name in skills]
+    print(f"\ncopies into {tilde(out)}:")
+    for name, verb, reason in plans:
+        detail = f"  ({reason})" if reason else ""
+        print(f"  {verb:<8} {tilde(out / name)}{detail}")
+    if dry_run:
+        print("\n(dry run: nothing changed)")
+        return 0
+    out.mkdir(parents=True, exist_ok=True)
+    built = [n for n, verb, _ in plans if verb != "skip"]
+    for name in built:
+        build_copy(pkg, name, out, skills)
+    print(f"\nbuilt {len(built)} self-contained skill copy(ies) in "
+          f"{tilde(out)} (v{package_version(pkg)})")
+    sys.stdout.flush()
+    skipped = [(n, r) for n, verb, r in plans if verb == "skip"]
+    for name, reason in skipped:
+        print(f"skipped {tilde(out / name)}: {reason}", file=sys.stderr)
+    if built:
+        print("each skill folder stands on its own. A copy does not update "
+              "itself: re-run this command to rebuild, then put the new copy "
+              "wherever the old one went.")
+    return 1 if skipped else 0
+
+
 # --- main ------------------------------------------------------------------
 
 def cancel_note() -> str:
@@ -535,6 +685,34 @@ def main(argv: list[str] | None = None) -> int:
         return 130
 
 
+def select_skills(args: argparse.Namespace, pkg: Path) -> list[str]:
+    """The skills to install: --skills, else ask, else all."""
+    available = discover_skills(pkg)
+    if not available:
+        die(f"{pkg} has no installable skill (a subdir with a SKILL.md)")
+
+    print(f"\npackage: {tilde(pkg)}  (v{package_version(pkg)})")
+    print(f"skills:  {', '.join(available)}")
+
+    if args.skills:
+        if args.skills.strip().lower() == "all":
+            return list(available)
+        skills = []
+        for token in (t.strip() for t in args.skills.split(",")):
+            if not token:
+                continue
+            if token not in available:
+                die(f"unknown skill {token!r}; available: "
+                    f"{', '.join(available)}")
+            if token not in skills:
+                skills.append(token)
+        return skills
+    # A terminal, not stdin: the documented install pipes the script in.
+    if tty_stream() is not None and not args.yes:
+        return choose_skills(available)
+    return list(available)
+
+
 def install(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         prog="install.py",
@@ -553,7 +731,21 @@ def install(argv: list[str] | None = None) -> int:
                    help="no prompts: every skill, every root already in use")
     p.add_argument("--dry-run", action="store_true",
                    help="print the plan and change nothing")
+    p.add_argument("--copy-to", metavar="DIR",
+                   help="instead of linking, build self-contained skill "
+                        "copies in DIR/<skill>/")
     args = p.parse_args(argv)
+    if args.copy_to is not None:
+        if not args.copy_to.strip():
+            die("--copy-to was given an empty path")
+        # Copies never land in a skills root of their own accord, and are
+        # built from a package in hand or a throwaway clone, never --home.
+        if args.root:
+            die("--root applies only to linking; --copy-to says where "
+                "copies go")
+        if args.home:
+            die("--home applies only to the linked install; --copy-to "
+                "builds from a temporary clone")
 
     # 1. the package: --source, else the tree this file lives in, else clone.
     local_pkg = None
@@ -564,6 +756,12 @@ def install(argv: list[str] | None = None) -> int:
                 "(no lib/tasks.py)")
     elif here_package() is not None:
         local_pkg = here_package()
+    if args.copy_to is not None:
+        out = Path(args.copy_to).expanduser().resolve()
+        with tempfile.TemporaryDirectory(prefix="devops-copy-") as tmp:
+            pkg = local_pkg or temp_clone(Path(tmp))
+            skills = select_skills(args, pkg)
+            return install_copies(pkg, skills, out, args.dry_run)
     if local_pkg is not None:
         # --home only says where a clone would go; with a package in hand
         # nothing is cloned, so honouring it would be a silent no-op.
@@ -579,34 +777,9 @@ def install(argv: list[str] | None = None) -> int:
             print("\n(dry run stops here: the plan needs the cloned package)")
             return 0
 
-    available = discover_skills(pkg)
-    if not available:
-        die(f"{pkg} has no installable skill (a subdir with a SKILL.md)")
-
-    print(f"\npackage: {tilde(pkg)}  (v{package_version(pkg)})")
-    print(f"skills:  {', '.join(available)}")
-
-    # A terminal, not stdin: the documented install pipes the script in.
-    interactive = tty_stream() is not None and not args.yes
-
     # 2. skills
-    if args.skills:
-        if args.skills.strip().lower() == "all":
-            skills = list(available)
-        else:
-            skills = []
-            for token in (t.strip() for t in args.skills.split(",")):
-                if not token:
-                    continue
-                if token not in available:
-                    die(f"unknown skill {token!r}; available: "
-                        f"{', '.join(available)}")
-                if token not in skills:
-                    skills.append(token)
-    elif interactive:
-        skills = choose_skills(available)
-    else:
-        skills = list(available)
+    skills = select_skills(args, pkg)
+    interactive = tty_stream() is not None and not args.yes
 
     # 3. roots
     if args.root:

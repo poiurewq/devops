@@ -39,9 +39,10 @@ import time
 STATUSES = ["proposed", "backlog", "planned", "doing", "draft", "review",
             "done", "later", "not-planned"]
 # Hottest-first list/index. Watch and static `TASKS board` / TASKS.md share
-# this; STATUSES stays the pipeline (validation, rollup counts).
+# this; STATUSES stays the pipeline (validation, rollup counts). later sits
+# ahead of done: parked-but-intended work reads before finished work.
 _WATCH_HEAD = ("review", "draft", "doing", "planned", "proposed",
-               "backlog")
+               "backlog", "later")
 WATCH_STATUSES = [s for s in _WATCH_HEAD if s in STATUSES] + [
     s for s in STATUSES if s not in _WATCH_HEAD]
 # Don't block an iteration close. later is parked (reseeds on iteration-new),
@@ -323,8 +324,11 @@ def skill_path_is_ephemeral(path):
 
 def viewer_script():
     """Current ./board contents for this install."""
+    # Resolved, unlike invoking_skill: /dev and /ops reach lib/ through
+    # different skill-dir links, and baking either would flip the wrapper
+    # back and forth between them.
     return BOARD_VIEWER_SCRIPT.replace(
-        "__TASKS_PY__", repr(os.path.abspath(__file__)))
+        "__TASKS_PY__", repr(os.path.realpath(__file__)))
 
 
 def viewer_is_stock(text):
@@ -601,13 +605,12 @@ def ctx():
 
 
 def invoking_skill():
-    """The skill whose shim ran this script ('dev', 'ops'), from DEVOPS_SKILL.
-    Validated against the package so a stray value never names a skill that
-    is not there; defaults to 'dev'."""
-    name = (os.environ.get("DEVOPS_SKILL") or "").strip()
-    pkg = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-    if name and os.path.isfile(os.path.join(pkg, name, "SKILL.md")):
-        return name
+    """The skill this script runs as ('dev', 'ops'): the skill dir it was
+    reached through (<skill>/lib/tasks.py, never resolved). Run from the
+    package's own lib/ there is no SKILL.md beside it; defaults to 'dev'."""
+    skill_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if os.path.isfile(os.path.join(skill_dir, "SKILL.md")):
+        return os.path.basename(skill_dir)
     return "dev"
 
 
@@ -3514,7 +3517,7 @@ def cmd_claim(args):
         sys.exit(f"error: T{tid} has needs: decision; resolve before claim")
     if is_umbrella(meta):
         sys.exit(f"error: T{tid} is an umbrella: a goal, not a unit of code. "
-                 f"It gets no branch and no PR — run /dev implement {tid} for "
+                 f"It gets no branch and no PR — run /dev {tid} for "
                  f"the verification pass, and file any real code as a child.")
     if is_ops(meta):
         sys.exit(f"error: T{tid} is an ops task: no branch, no PR — run it "
@@ -5026,7 +5029,7 @@ def cmd_init(args):
     if os.path.isdir(dest):
         print(f"viewer: skipped ({VIEWER_NAME} is a directory)")
     else:
-        print(f"viewer: ./{VIEWER_NAME}  (r refresh, a by area, e expand, c check, f flows, q quit, arrows scroll, space/b page, type id↵)")
+        print(f"viewer: ./{VIEWER_NAME}  (r refresh, a by area, e expand, l latest, c check, f flows, q quit, arrows scroll, space/b page, type id↵)")
     print(f"identity: {args.name}")
     if scope != ".":
         print(f"note: commands target this board from inside '{scope}/' "
@@ -5279,7 +5282,7 @@ def cmd_update(args):
         sys.exit(f"error: T{meta['id']} is an umbrella and never closes on a "
                  f"status flip; record the verification instead: TASKS verify "
                  f"{meta['id']} \"<how the children met the goal>\" "
-                 f"(or /dev implement {meta['id']} to do that pass)")
+                 f"(or /dev {meta['id']} to do that pass)")
     if args.status in OPEN_PR and (meta.get("pr") or "").strip():
         sys.exit(f"error: T{meta['id']} has a PR; draft and review are not "
                  f"set by hand — they move with the PR: TASKS ready "
@@ -5928,6 +5931,65 @@ def _board_text(cfg, scope, bw, tasks, expand=False, by_area=False, color=False,
     return "\n".join(lines)
 
 
+# The latest list is for recent activity: read only this many board commits
+# so the repaint cost stays flat as history grows.
+LATEST_COMMITS = 200
+
+
+def task_touch_times(bw, scope):
+    """{task id: unix time of the last board commit touching its file}.
+
+    One `git log` over the board dir, newest first, so the first sighting of
+    a file is its latest touch. Only `NNN.md` at the board root counts —
+    archived tasks of earlier iterations are not on the live board. Capped
+    at LATEST_COMMITS: a task untouched in that window has no entry.
+    """
+    d = tdir(scope)
+    r = git("log", f"-n{LATEST_COMMITS}", "--format=%x01%ct", "--name-only",
+            "--", d, cwd=bw, check=False)
+    times, ts = {}, None
+    for line in (r.stdout or "").splitlines() if r.returncode == 0 else []:
+        if line.startswith("\x01"):
+            ts = int(line[1:])
+            continue
+        m = re.fullmatch(r"(\d{3})\.md", os.path.basename(line))
+        if (m and ts is not None
+                and os.path.normpath(os.path.dirname(line)) == d):
+            times.setdefault(int(m.group(1)), ts)
+    return times
+
+
+def _board_latest_text(cfg, scope, bw, tasks, color=False):
+    """Every live task, done included, newest board commit first.
+
+    Tasks older than the LATEST_COMMITS window follow undated, by id.
+    """
+    title = f"# Board — iteration {iteration_label(cfg)}"
+    if scope != ".":
+        title += f" ({scope})"
+    lines = [title + " · latest", ""]
+    times = task_touch_times(bw, scope)
+    for t in sorted(tasks, key=lambda t: (-times.get(t["id"], 0), -t["id"])):
+        ts = times.get(t["id"])
+        when = (datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+                if ts is not None else " " * 16)
+        when = _ansi(_DIM, when) if color else when
+        lines.append(f"{when}  {fmt_line(t, tasks, color=color)}")
+    return "\n".join(lines)
+
+
+def _watch_board(args, latest, bw, scope):
+    """(display, tasks) for the watch loop: the board, or the latest list.
+
+    bw/scope come from cmd_board's one ctx(): _render_board already syncs.
+    """
+    _plain, board, tasks = _render_board(args)
+    if latest:
+        board = _board_latest_text(read_board_cfg(bw, scope), scope, bw,
+                                   tasks, color=_use_color()).rstrip()
+    return board, tasks
+
+
 def _render_board(args):
     """Fetch, write plain TASKS.md, return (plain, display, tasks).
 
@@ -6071,7 +6133,7 @@ def _rows_of(lines, cols):
 
 
 def _watch_help(by_area, expand, more_above=0, more_below=0, check=False,
-                showing=False, flows=False, search=False):
+                showing=False, flows=False, search=False, latest=False):
     if search:
         # Every printable key is query text, so no letter shortcut is live.
         return _watch_help_counts("type query↵  esc cancel  arrows",
@@ -6090,7 +6152,9 @@ def _watch_help(by_area, expand, more_above=0, more_below=0, check=False,
         query = "check id[,id…]↵"
     else:
         query = "type id↵"
-    help_line = (f"r refresh  a {other}  e {fold}  c check  s search  f flows"
+    # While the latest list is up it owns the screen: a/e do not apply.
+    views = "l board" if latest else f"a {other}  e {fold}  l latest"
+    help_line = (f"r refresh  {views}  c check  s search  f flows"
                  f"  q quit"
                  f"  · {query}  arrows  space/b page")
     return _watch_help_counts(help_line, more_above, more_below)
@@ -6110,10 +6174,11 @@ def _watch_help_counts(help_line, more_above, more_below):
 
 def _watch_footer_lines(by_area, expand, buf, result,
                         more_above=0, more_below=0, check=False,
-                        showing=False, flows=False, search=False):
+                        showing=False, flows=False, search=False,
+                        latest=False):
     help_line = _watch_help(by_area, expand, more_above, more_below,
                            check=check, showing=showing, flows=flows,
-                           search=search)
+                           search=search, latest=latest)
     if _use_color():
         help_line = _ansi(_DIM, help_line)
     lines = ["", help_line]
@@ -6172,7 +6237,7 @@ def _watch_page_offsets(body, offset, body_rows, cols):
 
 
 def _paint_watch(out, by_area, expand, buf, result, offset, check=False,
-                 showing=False, flows=False, search=False):
+                 showing=False, flows=False, search=False, latest=False):
     """Paint a terminal-height viewport.
 
     Returns (clamped offset, page-up offset, page-down offset).
@@ -6183,7 +6248,7 @@ def _paint_watch(out, by_area, expand, buf, result, offset, check=False,
     footer_rows = _rows_of(
         _watch_footer_lines(by_area, expand, buf, result,
                             check=check, showing=showing, flows=flows,
-                            search=search), cols)
+                            search=search, latest=latest), cols)
     body_rows = max(1, rows - footer_rows)
     shown, offset, more_below = _window_lines(body, offset, body_rows, cols)
     more_above = offset
@@ -6192,7 +6257,8 @@ def _paint_watch(out, by_area, expand, buf, result, offset, check=False,
         footer_rows = _rows_of(
             _watch_footer_lines(by_area, expand, buf, result,
                                 more_above, more_below, check=check,
-                                showing=showing, flows=flows, search=search),
+                                showing=showing, flows=flows, search=search,
+                                latest=latest),
             cols)
         body_rows = max(1, rows - footer_rows)
         shown, offset, more_below = _window_lines(
@@ -6200,7 +6266,8 @@ def _paint_watch(out, by_area, expand, buf, result, offset, check=False,
         more_above = offset
     footer = _watch_footer_lines(by_area, expand, buf, result,
                                  more_above, more_below, check=check,
-                                 showing=showing, flows=flows, search=search)
+                                 showing=showing, flows=flows, search=search,
+                                 latest=latest)
     _clear_screen()
     # No trailing newline: print() on the last row scrolls the first line off.
     frame = shown + footer
@@ -6230,7 +6297,7 @@ def cmd_board_refresh_viewer(root, scope):
     if not wrote:
         print(f"viewer: ./{VIEWER_NAME} already current")
     elif edited:
-        print(f"viewer: rewrote edited ./{VIEWER_NAME} from {os.path.abspath(__file__)}")
+        print(f"viewer: rewrote edited ./{VIEWER_NAME} from {os.path.realpath(__file__)}")
     else:
         print(f"viewer: refreshed ./{VIEWER_NAME}")
 
@@ -6263,12 +6330,13 @@ def cmd_board(args):
         check_mode = False
         search_mode = False  # s> prompt open: printable keys are query
         flows_mode = False
+        latest_mode = False  # l: flat latest-first list replaces the board
         offset = 0
         try:
             while True:
                 by_area = bool(getattr(args, "by_area", False))
                 expand = bool(getattr(args, "expand", False))
-                _plain, board, tasks = _render_board(args)
+                board, tasks = _watch_board(args, latest_mode, bw, scope)
                 display = board
                 if flows_mode:
                     display = flows_pane_text(bw, scope, color=_use_color())
@@ -6311,7 +6379,7 @@ def cmd_board(args):
                     offset, page_up, page_down = _paint_watch(
                         display, by_area, expand, buf, result, offset,
                         check=check_mode, flows=flows_mode,
-                        search=search_mode,
+                        search=search_mode, latest=latest_mode,
                         showing=(last_fid is not None or bool(last_query))
                         if flows_mode
                         else last_kind in ("show", "search"))
@@ -6363,12 +6431,24 @@ def cmd_board(args):
                         check_mode = False
                         offset = 0
                         break
-                    if key in ("a", "A") and not flows_mode:
+                    if not buf and key in "lL" and not flows_mode:
+                        latest_mode = not latest_mode
+                        buf = ""
+                        result = ""
+                        last_tid = None
+                        last_kind = None
+                        last_query = ""
+                        offset = 0
+                        break
+                    if (key in ("a", "A") and not flows_mode
+                            and not latest_mode):
                         buf = ""
                         offset = 0
                         args.by_area = not by_area
                         break
-                    if key in ("e", "E") and not flows_mode:
+                    # e still widens a search shown over the latest list.
+                    if (key in ("e", "E") and not flows_mode
+                            and (not latest_mode or last_kind == "search")):
                         buf = ""
                         offset = 0
                         args.expand = not expand
@@ -6484,7 +6564,8 @@ def cmd_board(args):
                                 color=color) if last_query else board)
                             offset = 0
                             continue
-                        _plain, board, tasks = _render_board(args)
+                        board, tasks = _watch_board(
+                            args, latest_mode, bw, scope)
                         last_tid = tid
                         offset = 0
                         if check_mode:
@@ -7136,7 +7217,8 @@ def main():
                         "listed under each area)")
     s.add_argument("--watch", action="store_true",
                    help="interactive: r refresh, a toggle by-area, "
-                        "e toggle expand, c check mode, s search, "
+                        "e toggle expand, l latest-first list, c check mode, "
+                        "s search, "
                         "f flows pane, q quit, "
                         "arrows scroll, space/b page, type id+Enter to "
                         "show a task (used by ./board)")

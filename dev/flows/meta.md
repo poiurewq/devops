@@ -16,7 +16,7 @@ Follow attention. Do not open with a tour of axes. Open with whatever looks unst
 
 Topics the sitting may notice (not a checklist, not sibling verbs): assumptions, deps, umbrellas, stale areas.
 
-**Never propose closing an umbrella** (SKILL.md *Umbrella close*). All children `done` is not the goal met — that judgment is a separate pass, and collapsing it into a board edit is what the umbrella exists to prevent. When one reads complete, say the goal check is **due** and worth prioritizing over new work, and point at `/dev implement <id>`; the pass runs in-session with no branch, PR, or review. If the sitting already sees a gap between the children and the goal, name it — that is what the pass will have to resolve, not a reason to skip it.
+**Never propose closing an umbrella** (SKILL.md *Umbrella close*). All children `done` is not the goal met — that judgment is a separate pass, and collapsing it into a board edit is what the umbrella exists to prevent. When one reads complete, say the goal check is **due** and worth prioritizing over new work, and point at `/dev <id>`; the pass runs in-session with no branch, PR, or review. If the sitting already sees a gap between the children and the goal, name it — that is what the pass will have to resolve, not a reason to skip it.
 
 Speak in their frame. Same posture as review: propose concrete board edits (retitle, split, merge, add a dep, `needs: decision`, not-planned, area rename). They say apply, or keep talking. Mutations only on explicit go-ahead, via `TASKS`. Auto never runs this.
 

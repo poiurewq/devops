@@ -25,6 +25,16 @@ Useful flags: `--dry-run` prints the plan and changes nothing; `--home DIR` puts
 
 Requires `git`, `python3`, and for board workflows `gh` (GitHub CLI) authenticated against the target repo.
 
+### Self-contained copies
+
+Instead of links, the installer can build self-contained copies: each skill becomes a real directory that carries everything it needs, with no symlinks and nothing outside it. Use them wherever a link into one clone will not do, such as a skills directory that must stand on its own, or an agent that loads skills only from an uploaded folder (cloud agents, for example):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/poiurewq/devops/main/install.py | python3 - --copy-to ~/devops-skills
+```
+
+Each skill becomes `~/devops-skills/<skill>/` with its own `lib/` and `VERSION`, so you can move, copy or upload that folder as-is. The copies come from a temporary clone, so your linked install is not touched. A copy cannot update itself: `/dev skill update` on one prints the exact command that rebuilds it, then you put the new copy wherever the old one went. A rebuild replaces only a previous copy (recognised by the `BUILD` file each one carries), and the normal install never replaces a copy either, even with `--yes`. `--skills` and `--dry-run` work as above.
+
 ## Getting started
 
 In a repo with at least one commit, start with the skill that fits the work:
@@ -34,7 +44,7 @@ In a repo with at least one commit, start with the skill that fits the work:
 /ops     # procedures that are not code: flows and their recorded runs
 ```
 
-Either one walks you through identity + board setup; both share one board and one identity, so setting up the second is only a join. Then `/dev tour` or `/ops tour` walks the key concepts on your own board, a card at a time, and `/dev help` or `/ops help` is the full command map. After init, `./board` (from the product directory) is a live view — `r` refresh, `a` toggle by-area, `e` toggle expand, `c` check (an id, or `id,id…` for a group), `s` search tasks by words (flows, in the flows pane), `f` flows pane, `q` quit, arrows scroll, space/b page, type a task id + Enter to read it.
+Either one walks you through identity + board setup; both share one board and one identity, so setting up the second is only a join. Then `/dev tour` or `/ops tour` walks the key concepts on your own board, a card at a time, and `/dev help` or `/ops help` is the full command map. After init, run `./board` from the product directory in your own terminal, not in the agent session: it is a live view driven by keys — `r` refresh, `a` toggle by-area, `e` toggle expand, `l` toggle a list of this iteration's tasks, most recently changed first, `c` check (an id, or `id,id…` for a group), `s` search tasks by words (flows, in the flows pane), `f` flows pane, `q` quit, arrows scroll, space/b page, type a task id + Enter to read it.
 
 ## Updating (`/dev skill`, `/ops skill`)
 
@@ -63,8 +73,9 @@ lib/tasks.py       # board state API (shared)
 lib/skill.py       # status / update / feedback (shared)
 dev/SKILL.md       # /dev agent-facing router
 dev/flows/         # /dev multi-step procedures
-dev/scripts/       # shims that exec lib/ (resolve symlinks first)
+dev/scripts/       # shims that exec dev/lib/ (resolve symlinks first)
+dev/lib, dev/VERSION  # links to ../lib and ../VERSION; real files in a copy
 ops/               # /ops, same shape
 ```
 
-Each skill directory (`dev/`, `ops/`) is what gets linked into an agent's skills root; `lib/` is reached through the shims, never linked directly.
+Each skill directory (`dev/`, `ops/`) is what gets linked into an agent's skills root, or copied by `--copy-to`. Its shims only ever reach code inside the skill directory (`<skill>/lib/`, `<skill>/VERSION`), which is what lets a copy stand alone.

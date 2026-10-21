@@ -9,6 +9,8 @@ names the package, not a single skill.
 Install (public consumers): one clone, symlinked into each agent skills
 directory by the installer —
   curl -fsSL https://raw.githubusercontent.com/poiurewq/devops/main/install.py | python3 -
+or, with --copy-to DIR, self-contained skill copies. A copy never updates
+itself: update prints the command that rebuilds it.
 
 User prefs live outside the skill tree so they survive updates:
   ~/.config/devops-skill/config.yml   (~/.config/dev-skill/ is read as a
@@ -38,6 +40,7 @@ import argparse
 import os
 import platform
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -73,28 +76,27 @@ CONFIG_KEYS = (
     "last_check_at",
 )
 
-# Package root (devops/): lib/skill.py -> lib -> devops. VERSION lives here,
-# and a public install is a clone whose toplevel is this directory; the
-# skill dirs (dev/, ops/) are symlinked into agent skill roots.
-PKG_DIR = Path(__file__).resolve().parent.parent
+# The skill dir this file was reached through (<skill>/lib/skill.py, never
+# resolved): VERSION and SKILL.md live beside lib/ there. In the clone
+# <skill>/lib and <skill>/VERSION are links into the shared package; in a
+# self-contained copy they are real files.
+SKILL_DIR = Path(os.path.abspath(__file__)).parent.parent
+# What a linked install updates: the clone holding the real skill dir.
+CLONE_DIR = SKILL_DIR.resolve().parent
+# Written by `install.py --copy-to` into each copy (version, output, skills).
+BUILD_RECORD = "BUILD"
 
-# Which skill's shim exec'd us, so printed guidance names a command the user
-# actually has: an ops-only install has no /dev. Set by <skill>/scripts/
-# skill.py; running this file directly, or through a pre-2.1 shim, has no
-# answer and keeps the historical "dev".
-SKILL_ENV = "DEVOPS_SKILL"
+# Run from the package's own lib/ there is no SKILL.md beside it, so printed
+# guidance keeps the historical "dev".
 DEFAULT_SKILL = "dev"
 
 
 def invoking_skill() -> str:
-    """Skill namespace to name in output ('dev', 'ops', …).
-
-    Validated against the package so a stray environment value can never put
-    a command the user does not have into a help line.
-    """
-    name = (os.environ.get(SKILL_ENV) or "").strip()
-    if name and (PKG_DIR / name / "SKILL.md").is_file():
-        return name
+    """Skill namespace to name in output ('dev', 'ops', …), so printed
+    guidance names a command the user actually has: an ops-only install has
+    no /dev."""
+    if (SKILL_DIR / "SKILL.md").is_file():
+        return SKILL_DIR.name
     return DEFAULT_SKILL
 
 
@@ -192,7 +194,7 @@ def parse_semver(s: str) -> tuple[int, int, int] | None:
 
 
 def local_version() -> str:
-    path = PKG_DIR / "VERSION"
+    path = SKILL_DIR / "VERSION"
     if not path.is_file():
         return "0.0.0"
     ver = path.read_text(encoding="utf-8").strip()
@@ -279,7 +281,7 @@ def is_skill_git_root(path: Path) -> bool:
     """True only when path itself is a git worktree root (not a subdir of another repo).
 
     Copied installs have no .git. Public installs are a clone whose
-    toplevel *is* PKG_DIR (the devops package root, not a skill dir). A package tree nested inside another repo must
+    toplevel *is* CLONE_DIR (the devops package root, not a skill dir). A package tree nested inside another repo must
     never be treated as an updatable install (pull would hit that repo's remote).
     """
     try:
@@ -339,8 +341,33 @@ def origin_url(path: Path) -> str:
     return (r.stdout or "").strip() if r.returncode == 0 else ""
 
 
+def build_record() -> dict[str, str] | None:
+    """This copy's build record, or None for a linked install."""
+    path = SKILL_DIR / BUILD_RECORD
+    if not path.is_file():
+        return None
+    return parse_kv(path.read_text(encoding="utf-8"))
+
+
+def rebuild_message(rec: dict[str, str]) -> str:
+    """Why a copy cannot update, and the exact command that rebuilds it."""
+    out = rec.get("output", "")
+    cmd = f"curl -fsSL {RAW_INSTALLER_URL} | python3 - --copy-to {shlex.quote(out)}"
+    if rec.get("skills"):
+        cmd += f" --skills {rec['skills']}"
+    return (
+        f"this is a self-contained copy (devops {rec.get('version') or local_version()}) "
+        "and cannot update itself; on the machine that built it, run:\n"
+        f"  {cmd}\n"
+        f"then put the new copies from {out} wherever the old ones went"
+    )
+
+
 def git_pull_ff(path: Path) -> tuple[bool, str]:
     """Fast-forward pull origin main. Returns (ok, message)."""
+    rec = build_record()
+    if rec is not None:
+        return False, rebuild_message(rec)
     if not is_skill_git_root(path):
         return (
             False,
@@ -390,9 +417,13 @@ def cmd_check(*, force: bool = False) -> int:
     if cmp_semver(local, public) >= 0:
         return 0  # local == or ahead: silent
 
-    # Behind.
+    # Behind. A copy can neither pull nor auto-update: say how to rebuild.
+    rec = build_record()
+    if rec is not None:
+        print(f"devops {public} available (you have {local}); {rebuild_message(rec)}")
+        return 0
     if parse_bool(cfg.get("auto_update", "false")):
-        ok, msg = git_pull_ff(PKG_DIR)
+        ok, msg = git_pull_ff(CLONE_DIR)
         if ok:
             new_local = local_version()
             print(f"devops updated: {local} → {new_local}")
@@ -414,7 +445,7 @@ def cmd_check(*, force: bool = False) -> int:
 
 def cmd_update() -> int:
     local = local_version()
-    ok, msg = git_pull_ff(PKG_DIR)
+    ok, msg = git_pull_ff(CLONE_DIR)
     if not ok:
         print(f"error: {msg}", file=sys.stderr)
         return 1
@@ -466,9 +497,11 @@ def install_kind() -> str:
     Only the canonical clone is updatable, so distinguish it from a git root
     pointing elsewhere (fork, or the skill developed inside another repo).
     """
-    if not is_skill_git_root(PKG_DIR):
+    if build_record() is not None:
+        return "self-contained copy"
+    if not is_skill_git_root(CLONE_DIR):
         return "copied (no git)"
-    if origin_looks_canonical(origin_url(PKG_DIR)):
+    if origin_looks_canonical(origin_url(CLONE_DIR)):
         return "git clone"
     return "git clone (other origin)"
 

@@ -10,6 +10,6 @@ Entry: **only** when `/dev add` triage picks the plan path (`flows/add.md`); `/d
 
 4. **Propose, don't commit**: show the full breakdown in-conversation; the user edits/approves. Only then add: subtasks first (`TASKS add ...`, ids come back sequentially), umbrella last with `--kind umbrella --deps <subtask-ids>`.
 
-5. Show the resulting board section (`TASKS board`).
+5. Show the resulting board section (`TASKS board`), and point at `/dev <id[, id…]>` for the leaves to build first.
 
 The umbrella is what makes coverage checkable: iteration close blocks on it like any unfinished task, so "the board eventually covers the goal" is enforced by the normal mechanics, not by a document audit.
