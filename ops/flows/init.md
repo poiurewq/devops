@@ -28,7 +28,7 @@ Prerequisites: a git repository with at least one commit, and a remote named `or
 
 3. **Board already exists** (`.tasks/board.yml` present for that scope — including one `/dev` created): just run `TASKS init --name <handle>`. It joins and registers the contributor. Say that the board is shared: their ops tasks and any dev tasks live side by side, marked. Offer the tour (step 7). Done.
 
-4. **No board yet**: propose the current branch as the board's home (`--integration <branch>`; `main` is the usual answer, and a board that lives on `main` never has to be closed or landed). Then `TASKS init --name <handle> [--scope s] [--integration b]`. This also writes a gitignored `./board` viewer at the project root (`r` refresh, `f` flows pane, `q` quit, arrows scroll, type an id + Enter).
+4. **No board yet**: propose the current branch as the board's home (`--integration <branch>`; `main` is the usual answer, and a board that lives on `main` never has to be closed or landed). Then `TASKS init --name <handle> [--scope s] [--integration b]`. This also writes a gitignored `./board` viewer at the project root (`r` refresh, `f` flows pane, `q` back one level (quits from the plain board), arrows scroll, type an id + Enter).
 
    **No areas.** Areas are a `/dev` concept for locking regions of a codebase; ops tasks carry none, and the script refuses one on an ops task. Don't propose them.
 

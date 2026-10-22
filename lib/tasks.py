@@ -3346,6 +3346,48 @@ def _switch_primary_off_task_branch(root, scope, branch, actions):
         actions.append(f"could not switch primary off '{branch}': {err}")
 
 
+def husk_is_all_ignored(root, husk):
+    """True when every file in `husk` would be gitignored at the same path
+    in the repo (a task worktree is a checkout of the repo root)."""
+    rels = []
+    for dirpath, dirnames, filenames in os.walk(husk):
+        for name in filenames + [d for d in dirnames
+                                 if os.path.islink(os.path.join(dirpath, d))]:
+            rels.append(os.path.relpath(os.path.join(dirpath, name), husk))
+    if not rels:
+        return True
+    r = subprocess.run(["git", "check-ignore", "-z", "--stdin"], cwd=root,
+                       input="\0".join(rels) + "\0", text=True,
+                       capture_output=True)
+    if r.returncode not in (0, 1):
+        return False
+    return set(rels) <= set(p for p in r.stdout.split("\0") if p)
+
+
+def sweep_worktree_husks(root, scope, cwd, actions):
+    """Remove every no-.git dir under .dev/worktrees/ (any task id) whose
+    files are all gitignored — what a tool such as Xcode writes back after
+    the worktree was removed. Anything else is left and reported."""
+    wt_dir = os.path.join(product_root(root, scope), ".dev", "worktrees")
+    if not os.path.isdir(wt_dir):
+        return
+    for name in sorted(os.listdir(wt_dir)):
+        path = os.path.join(wt_dir, name)
+        if (os.path.islink(path) or not os.path.isdir(path)
+                or os.path.exists(os.path.join(path, ".git"))
+                or path_is_inside(cwd, path)):
+            continue
+        if not husk_is_all_ignored(root, path):
+            actions.append(f"left orphan dir {path} (no .git, holds "
+                           f"files that are not gitignored; remove by hand)")
+            continue
+        try:
+            shutil.rmtree(path)
+            actions.append(f"removed gitignored leftovers {path}")
+        except OSError as e:
+            actions.append(f"could not remove leftovers {path}: {e}")
+
+
 def cleanup_task_artifacts(root, scope, meta, branch=None, *, verbose=True):
     """Idempotent cleanup: clean worktrees; branches only after PR merge proof.
 
@@ -3371,9 +3413,8 @@ def cleanup_task_artifacts(root, scope, meta, branch=None, *, verbose=True):
             continue
         if not os.path.exists(path):
             continue
-        # Orphan dir left after a prior prune — no .git link, nothing to lose.
+        # No .git link: not a worktree any more — the husk sweep below owns it.
         if os.path.isdir(path) and not os.path.exists(os.path.join(path, ".git")):
-            actions.append(f"left orphan dir {path} (no .git; remove by hand)")
             continue
         if worktree_is_dirty(path):
             actions.append(f"skipped dirty worktree {path} "
@@ -3391,6 +3432,7 @@ def cleanup_task_artifacts(root, scope, meta, branch=None, *, verbose=True):
             actions.append(f"worktree remove failed for {path}: {err}")
 
     git("worktree", "prune", cwd=root, check=False)
+    sweep_worktree_husks(root, scope, cwd, actions)
 
     drop_ok, drop_reason = task_branch_safe_to_drop(root, meta, branch)
     if branch and not drop_ok:
@@ -5284,7 +5326,7 @@ def cmd_init(args):
     if os.path.isdir(dest):
         print(f"viewer: skipped ({VIEWER_NAME} is a directory)")
     else:
-        print(f"viewer: ./{VIEWER_NAME}  (r refresh, a by area, e expand, l latest, c check, f flows, q quit, arrows scroll, space/b page, type id↵)")
+        print(f"viewer: ./{VIEWER_NAME}  (r refresh, a by area, e expand, l latest, c check, f flows, q back/quit, arrows scroll, space/b page, type id↵)")
     print(f"identity: {args.name}")
     if scope != ".":
         print(f"note: commands target this board from inside '{scope}/' "
@@ -6480,29 +6522,27 @@ def _rows_of(lines, cols):
 
 
 def _watch_help(by_area, expand, more_above=0, more_below=0, check=False,
-                showing=False, flows=False, search=False, latest=False):
+                showing=False, flows=False, search=False, latest=False,
+                back=False):
+    """`showing`: output r re-runs is up. `back`: q steps back, not quits."""
+    r_key = "r re-run" if showing else "r refresh"
+    q_key = "q back" if back else "q quit"
     if search:
         # Every printable key is query text, so no letter shortcut is live.
         return _watch_help_counts("type query↵  esc cancel  arrows",
                                   more_above, more_below)
     if flows:
-        query = "esc index" if showing else "type flow id↵"
         return _watch_help_counts(
-            f"r refresh  s search  f board  q quit  · {query}  arrows"
+            f"{r_key}  s search  f board  {q_key}  · type flow id↵  arrows"
             f"  space/b page",
             more_above, more_below)
     other = "by status" if by_area else "by area"
     fold = "collapse" if expand else "expand"
-    if showing:
-        query = "esc board"
-    elif check:
-        query = "check id[,id…]↵"
-    else:
-        query = "type id↵"
+    query = "check id[,id…]↵" if check else "type id↵"
     # While the latest list is up it owns the screen: a/e do not apply.
     views = "l board" if latest else f"a {other}  e {fold}  l latest"
-    help_line = (f"r refresh  {views}  c check  s search  f flows"
-                 f"  q quit"
+    help_line = (f"{r_key}  {views}  c check  s search  f flows"
+                 f"  {q_key}"
                  f"  · {query}  arrows  space/b page")
     return _watch_help_counts(help_line, more_above, more_below)
 
@@ -6522,10 +6562,10 @@ def _watch_help_counts(help_line, more_above, more_below):
 def _watch_footer_lines(by_area, expand, buf, result,
                         more_above=0, more_below=0, check=False,
                         showing=False, flows=False, search=False,
-                        latest=False):
+                        latest=False, back=False):
     help_line = _watch_help(by_area, expand, more_above, more_below,
                            check=check, showing=showing, flows=flows,
-                           search=search, latest=latest)
+                           search=search, latest=latest, back=back)
     if _use_color():
         help_line = _ansi(_DIM, help_line)
     lines = ["", help_line]
@@ -6584,7 +6624,8 @@ def _watch_page_offsets(body, offset, body_rows, cols):
 
 
 def _paint_watch(out, by_area, expand, buf, result, offset, check=False,
-                 showing=False, flows=False, search=False, latest=False):
+                 showing=False, flows=False, search=False, latest=False,
+                 back=False):
     """Paint a terminal-height viewport.
 
     Returns (clamped offset, page-up offset, page-down offset).
@@ -6595,7 +6636,7 @@ def _paint_watch(out, by_area, expand, buf, result, offset, check=False,
     footer_rows = _rows_of(
         _watch_footer_lines(by_area, expand, buf, result,
                             check=check, showing=showing, flows=flows,
-                            search=search, latest=latest), cols)
+                            search=search, latest=latest, back=back), cols)
     body_rows = max(1, rows - footer_rows)
     shown, offset, more_below = _window_lines(body, offset, body_rows, cols)
     more_above = offset
@@ -6605,7 +6646,7 @@ def _paint_watch(out, by_area, expand, buf, result, offset, check=False,
             _watch_footer_lines(by_area, expand, buf, result,
                                 more_above, more_below, check=check,
                                 showing=showing, flows=flows, search=search,
-                                latest=latest),
+                                latest=latest, back=back),
             cols)
         body_rows = max(1, rows - footer_rows)
         shown, offset, more_below = _window_lines(
@@ -6614,7 +6655,7 @@ def _paint_watch(out, by_area, expand, buf, result, offset, check=False,
     footer = _watch_footer_lines(by_area, expand, buf, result,
                                  more_above, more_below, check=check,
                                  showing=showing, flows=flows, search=search,
-                                 latest=latest)
+                                 latest=latest, back=back)
     _clear_screen()
     # No trailing newline: print() on the last row scrolls the first line off.
     frame = shown + footer
@@ -6728,8 +6769,10 @@ def cmd_board(args):
                         check=check_mode, flows=flows_mode,
                         search=search_mode, latest=latest_mode,
                         showing=(last_fid is not None or bool(last_query))
-                        if flows_mode
-                        else last_kind in ("show", "search"))
+                        if flows_mode else last_kind is not None,
+                        back=bool(flows_mode or latest_mode or check_mode
+                                  or buf or result
+                                  or last_kind is not None))
                     key = _read_key(cooked=old_term is None)
                     if key == "\x04":  # Ctrl-D / EOF, even mid-query
                         print()
@@ -6760,9 +6803,44 @@ def cmd_board(args):
                               and len(buf) < 64):
                             buf += key
                         continue
-                    if key in ("q", "Q"):
-                        print()
-                        return
+                    if key in ("q", "Q", "\x1b"):
+                        # One level back: typed input or a stray message,
+                        # then the output, then the pane (flows, latest).
+                        # Only q quits, from the plain board; Esc never
+                        # does, since an unknown CSI reads as Esc too.
+                        if buf or (result and last_kind != "check"):
+                            buf = ""
+                            result = ""
+                            continue
+                        offset = 0
+                        if flows_mode:
+                            if last_fid is not None:
+                                last_fid = None
+                            elif last_query:
+                                last_query = ""
+                                last_kind = None  # s> set it in this pane
+                            else:
+                                flows_mode = False
+                        elif last_kind == "show" and last_query:
+                            # A task opened from the hits: back to them.
+                            last_kind = "search"
+                            last_tid = None
+                        elif last_kind is not None:
+                            # A check result clears to its c> prompt.
+                            last_kind = None
+                            last_tid = None
+                            last_query = ""
+                            result = ""
+                        elif check_mode:
+                            check_mode = False
+                        elif latest_mode:
+                            latest_mode = False
+                        elif key == "\x1b":
+                            continue
+                        else:
+                            print()
+                            return
+                        break
                     if key in ("r", "R"):
                         buf = ""
                         offset = 0
@@ -6825,47 +6903,6 @@ def cmd_board(args):
                             result = ""
                             display = board
                             offset = 0
-                        continue
-                    if (key == "\x1b" and not flows_mode and last_query
-                            and (last_kind == "show"
-                                 or (last_kind == "search" and buf))):
-                        # A task opened from search, or an id typed over
-                        # the hits: back to the hits, not the board.
-                        buf = ""
-                        last_tid = None
-                        last_kind = "search"
-                        result = ""
-                        offset = 0
-                        display = watch_search_view(
-                            last_query, tasks, expand=expand,
-                            color=_use_color())
-                        continue
-                    if (key == "\x1b" and flows_mode and last_query
-                            and (last_fid is not None or buf)):
-                        # A flow opened from search, or an id typed over
-                        # the hits: back to the hits, not the index.
-                        buf = ""
-                        last_fid = None
-                        result = ""
-                        offset = 0
-                        display = watch_flow_search_view(
-                            last_query, all_flows(bw, scope),
-                            color=_use_color())
-                        continue
-                    if key == "\x1b":
-                        buf = ""
-                        result = ""
-                        last_tid = None
-                        last_kind = None
-                        last_query = ""
-                        last_fid = None
-                        check_mode = False
-                        offset = 0
-                        if flows_mode:
-                            display = flows_pane_text(
-                                bw, scope, color=_use_color())
-                        else:
-                            display = board
                         continue
                     if key in ("\x7f", "\x08"):
                         buf = buf[:-1]
@@ -7733,7 +7770,8 @@ def main():
                    help="interactive: r refresh, a toggle by-area, "
                         "e toggle expand, l latest-first list, c check mode, "
                         "s search, "
-                        "f flows pane, q quit, "
+                        "f flows pane, q (or Esc) back one level, q quits "
+                        "from the plain board, "
                         "arrows scroll, space/b page, type id+Enter to "
                         "show a task (used by ./board)")
     s.add_argument("--refresh-viewer", action="store_true",
