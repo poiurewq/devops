@@ -31,6 +31,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -117,7 +118,16 @@ FIELDS = ["id", "title", "area", "status", "kind", "type", "assignee", "branch",
 OPTIONAL_FIELDS = ("waiting", "flow", "cadence", "last_run")
 # Board push races on a shared integration branch: rebase onto origin and
 # retry this many times before queueing locally.
-PUSH_RETRIES = 5
+PUSH_RETRIES = 3
+# Wall-clock caps on one network git call (fetch/push/ls-remote/pull). A
+# dropped SSH connection otherwise hangs the command indefinitely; a timeout
+# returns as an ordinary failure, so fetches degrade and pushes retry/queue.
+# Board-branch calls (tiny payloads) pass GIT_NETWORK_TIMEOUT_S; every other
+# network call defaults to the code cap, which leaves room for a large push.
+GIT_NETWORK_TIMEOUT_S = 60
+GIT_CODE_NETWORK_TIMEOUT_S = 600
+GIT_NETWORK_COMMANDS = ("fetch", "push", "ls-remote", "pull")
+GIT_TIMEOUT_RC = 124  # run_with_deadline's exit code for a timed-out call
 # Land: merge retries when GitHub reports not-mergeable / recomputing.
 # Land never rewrites the task branch; a conflict is merged forward.
 LAND_RETRIES = 5
@@ -127,16 +137,56 @@ LAND_MERGEABLE_TIMEOUT_S = 30
 LAND_MERGEABLE_POLL_S = 1.0
 
 
-def sh(args, cwd=None, check=True):
-    r = subprocess.run(args, cwd=cwd, text=True, capture_output=True)
+def sh(args, cwd=None, check=True, timeout=None):
+    if timeout is None:
+        r = subprocess.run(args, cwd=cwd, text=True, capture_output=True)
+    else:
+        r = run_with_deadline(args, cwd, timeout)
     if check and r.returncode != 0:
         err = (r.stderr or r.stdout or "").strip()
         sys.exit(f"error running {' '.join(args)}:\n{err}")
     return r
 
 
-def git(*args, cwd=None, check=True):
-    return sh(["git", *args], cwd=cwd, check=check)
+def run_with_deadline(args, cwd, timeout):
+    """subprocess.run with a timeout that also kills git's ssh child.
+
+    run(timeout=) kills only git and leaves the stalled ssh running. So git
+    gets its own session and the whole process group is killed. A timeout
+    comes back as a failed CompletedProcess (GIT_TIMEOUT_RC), never an
+    exception."""
+    p = subprocess.Popen(args, cwd=cwd, text=True, stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE, start_new_session=True)
+    try:
+        out, err = p.communicate(timeout=timeout)
+        return subprocess.CompletedProcess(args, p.returncode, out, err)
+    except subprocess.TimeoutExpired:
+        _kill_group(p)
+        return subprocess.CompletedProcess(
+            args, GIT_TIMEOUT_RC, "",
+            f"{' '.join(args)} timed out after {timeout}s")
+    except BaseException:
+        # Ctrl-C: the terminal's SIGINT never reaches git's own session, so
+        # without this git and ssh outlive the interrupted command.
+        _kill_group(p)
+        raise
+
+
+def _kill_group(p):
+    try:
+        os.killpg(p.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+    try:
+        p.communicate(timeout=5)
+    except subprocess.TimeoutExpired:
+        pass  # a grandchild escaped the group; stop waiting on its pipes
+
+
+def git(*args, cwd=None, check=True, timeout=None):
+    if timeout is None and args and args[0] in GIT_NETWORK_COMMANDS:
+        timeout = GIT_CODE_NETWORK_TIMEOUT_S
+    return sh(["git", *args], cwd=cwd, check=check, timeout=timeout)
 
 
 def gh(*args, cwd=None, check=True):
@@ -525,7 +575,8 @@ def ensure_worktree(root, scope, branch):
         return bw
     git("worktree", "prune", cwd=root, check=False)
     os.makedirs(os.path.dirname(bw), exist_ok=True)
-    git("fetch", "origin", branch, cwd=root, check=False)
+    git("fetch", "origin", branch, cwd=root, check=False,
+        timeout=GIT_NETWORK_TIMEOUT_S)
     start = f"origin/{branch}" if ref_exists(root, f"origin/{branch}") else branch
     if not ref_exists(root, start):
         sys.exit(f"error: integration branch '{branch}' not found locally or on origin")
@@ -534,15 +585,32 @@ def ensure_worktree(root, scope, branch):
     return bw
 
 
-def sync_board(root, scope, branch):
-    """Bring the product board worktree up to date with the freshest board state."""
+def unpushed_board_commits(bw):
+    """Board commits a failed push left queued: on the board worktree's HEAD
+    but on no origin branch and no other local branch. Being ahead of the
+    branch being synced is not enough — after a pointer hop HEAD holds
+    another branch's pushed history, which is not a queue."""
+    return git("rev-list", "--count", "HEAD", "--not", "--exclude=_dev-board*",
+               "--branches", "--remotes=origin", cwd=bw).stdout.strip() != "0"
+
+
+def sync_board(root, scope, branch, owner=None):
+    """Bring the product board worktree up to date with the freshest board state.
+
+    Queued commits belong to `owner` (the branch the board last resolved
+    to; default `branch`) and are replayed and flushed only when syncing
+    that branch. Syncing any other branch while they wait leaves the
+    worktree alone, so a pointer hop never carries one board's commits
+    onto another; resolve_board decides what to do with them."""
     bw = ensure_worktree(root, scope, branch)
-    git("fetch", "origin", branch, cwd=bw, check=False)
+    git("fetch", "origin", branch, cwd=bw, check=False,
+        timeout=GIT_NETWORK_TIMEOUT_S)
     upstream = f"origin/{branch}" if ref_exists(root, f"origin/{branch}") else branch
     if not ref_exists(root, upstream):
         sys.exit(f"error: integration branch '{branch}' not found locally or on origin")
-    ahead = git("rev-list", "--count", f"{upstream}..HEAD", cwd=bw).stdout.strip()
-    if ahead != "0":
+    if not unpushed_board_commits(bw):
+        git("reset", "--hard", upstream, cwd=bw)
+    elif (owner or branch) == branch:
         # queued offline commits: replay them on top of the fresh upstream
         r = git("rebase", upstream, cwd=bw, check=False)
         if r.returncode != 0:
@@ -550,8 +618,6 @@ def sync_board(root, scope, branch):
             sys.exit(f"error: queued board commits conflict with {upstream}; "
                      f"resolve manually in {board_worktree_rel(scope)}")
         flush_queued_board_commits(root, scope, branch, bw)
-    else:
-        git("reset", "--hard", upstream, cwd=bw)
     return bw
 
 
@@ -569,7 +635,8 @@ def flush_queued_board_commits(root, scope, branch, bw):
     """
     if not has_remote(root):
         return
-    r = git("push", "origin", f"HEAD:refs/heads/{branch}", cwd=bw, check=False)
+    r = git("push", "origin", f"HEAD:refs/heads/{branch}", cwd=bw, check=False,
+            timeout=GIT_NETWORK_TIMEOUT_S)
     if r.returncode != 0:
         print(f"warning: board commits are still queued locally on "
               f"{board_branch_name(scope)}; push failed:\n{git_err(r)}",
@@ -584,20 +651,129 @@ def resolve_board(root, scope):
     """Sync the board worktree, following integration_branch pointers: a
     branch whose board.yml names another branch (e.g. the parent after an
     iteration switch) redirects there. Returns (branch, bw); caches the
-    resolved branch."""
+    resolved branch.
+
+    Pointers are read from each branch's upstream, not the worktree, which
+    sync_board leaves untouched while another branch's commits are queued.
+    Queued commits that cannot reach their own branch before the board
+    moves on are refused rather than replayed onto the next one."""
     branch = integration_branch(root, scope)
-    bw = sync_board(root, scope, branch)
+    owner = read_cache(root, scope).get(scope) or branch
+    bw = sync_board(root, scope, branch, owner)
     for _ in range(3):
-        if not os.path.exists(board_yml_path(bw, scope)):
+        upstream = (f"origin/{branch}" if ref_exists(root, f"origin/{branch}")
+                    else branch)
+        r = git("show", f"{upstream}:{tdir(scope)}/board.yml", cwd=root,
+                check=False)
+        if r.returncode != 0:
             break
-        target = read_board_cfg(bw, scope).get("integration_branch") or branch
+        target = parse_kv(r.stdout).get("integration_branch") or branch
         if target == branch:
             break
         branch = target
-        bw = sync_board(root, scope, branch)
+        bw = sync_board(root, scope, branch, owner)
+    if branch != owner and unpushed_board_commits(bw):
+        sys.exit(f"error: board commits queued on {board_branch_name(scope)} "
+                 f"for '{owner}' were not pushed, and the board has moved to "
+                 f"'{branch}'. They are kept: re-run once pushing to "
+                 f"'{owner}' works, or discard them with: git -C "
+                 f"{board_worktree_rel(scope)} reset --hard origin/{owner}")
     if read_cache(root, scope).get(scope) != branch:
         write_cache(root, scope, branch)
+    warn_stale_checkout(root, scope, branch, bw)
     return branch, bw
+
+
+def checkout_board_branch(root, scope):
+    """integration_branch named by the checkout's own board.yml, or ''."""
+    p = os.path.join(root, tdir(scope), "board.yml")
+    if not os.path.exists(p):
+        return ""
+    with open(p) as f:
+        return (parse_kv(f.read()).get("integration_branch") or "").strip()
+
+
+def closed_iteration_branches(bw, scope):
+    """Integration branches of closed iterations (log.md `branch:` lines)."""
+    log = os.path.join(bw, tdir(scope), "log.md")
+    if not os.path.exists(log):
+        return set()
+    with open(log) as f:
+        return set(re.findall(r"(?m)^branch: (\S+)", f.read()))
+
+
+def warn_stale_checkout(root, scope, branch, bw):
+    """Warn when the checkout is not on the board's integration branch.
+
+    Three ways to get here after a branched iteration roll. Redirected
+    before a pull: the checkout's board.yml names an old branch whose
+    board.yml points on. Redirected after a pull: the pointer is in the
+    checkout's board.yml too, so only the checkout's git branch is stale —
+    recognised as one log.md says a closed iteration lived on, so a
+    feature branch on the hub is not mistaken for one. Not redirected: the
+    old branch's pointer push was refused (or it predates old-branch
+    pointers), so the board is the closed iteration itself and only the
+    parent says where work moved.
+    Warn only — the redirect, where there is one, is resolve_board's.
+    """
+    named = checkout_board_branch(root, scope)
+    current = current_branch_name(root)
+    stale = ""
+    if named and named != branch:
+        stale = named
+    elif (current and current != branch
+          and current in closed_iteration_branches(bw, scope)):
+        stale = current
+    if stale and current not in ("", "HEAD", stale):
+        # A feature branch cut from the old iteration: name the branch it
+        # is on, and do not tell it to check out away from its own work.
+        print(f"warning: your checkout is on '{current}', which carries the "
+              f"board of '{stale}', but the board is on '{branch}'. Move "
+              f"that work onto '{branch}'.", file=sys.stderr)
+        return
+    if stale:
+        print(f"warning: your checkout is on '{stale}', but the board is on "
+              f"'{branch}'. Switch your checkout: git checkout {branch}",
+              file=sys.stderr)
+        return
+    warn_closed_iteration(root, scope, branch, bw)
+
+
+def warn_closed_iteration(root, scope, branch, bw):
+    """Warn when this board is a closed iteration whose parent already
+    points at the next one.
+
+    A branched iteration-new also points the old branch at the new one;
+    this covers an old branch whose pointer push was refused, where only
+    the parent's board.yml says where work moved. The log.md
+    close heading is the cheap gate; the parent is fetched and read only
+    once the iteration is closed.
+    """
+    yml = board_yml_path(bw, scope)
+    log = os.path.join(bw, tdir(scope), "log.md")
+    if not (os.path.exists(yml) and os.path.exists(log)):
+        return
+    with open(yml) as f:
+        cfg = parse_kv(f.read())
+    parent = (cfg.get("parent_branch") or "").strip()
+    idx = (cfg.get("iteration") or "").strip()
+    # An unreadable index is not this check's to fail on.
+    if not parent or not idx.isdigit():
+        return
+    with open(log) as f:
+        if not log_has_close_section(f.read(), idx):
+            return
+    git("fetch", "origin", parent, cwd=bw, check=False,
+        timeout=GIT_NETWORK_TIMEOUT_S)
+    ref = f"origin/{parent}" if ref_exists(root, f"origin/{parent}") else parent
+    r = git("show", f"{ref}:{tdir(scope)}/board.yml", cwd=root, check=False)
+    if r.returncode != 0:
+        return
+    target = (parse_kv(r.stdout).get("integration_branch") or "").strip()
+    if target and target != branch:
+        print(f"warning: iteration {idx} on '{branch}' is "
+              f"closed and the board has moved to '{target}'. Switch your "
+              f"checkout: git checkout {target}", file=sys.stderr)
 
 
 def ctx():
@@ -630,13 +806,15 @@ def scoped_message(scope, message):
     return f"{prefix}: {message[len('dev: '):]}"
 
 
-def board_commit(root, branch, bw, scope, message):
+def board_commit(root, branch, bw, scope, message, queue=True):
     """Commit this board's changes, push to its integration branch (rebase/
     retry when the tip moved — shared-main policy A), fast-forward local
     checkouts best-effort. A failed push queues the commit on the private
     branch and leaves local integration where it is; the next board
-    operation flushes it (flush_queued_board_commits). Returns whether the
-    commit reached origin (True when there is no remote)."""
+    operation flushes it (flush_queued_board_commits). With queue=False the
+    caller discards a failed commit itself, so nothing promises a flush.
+    Returns whether the commit reached origin (True when there is no
+    remote)."""
     paths = [tdir(scope)]
     if os.path.isdir(os.path.join(bw, fdir(scope))):
         paths.append(fdir(scope))
@@ -654,13 +832,17 @@ def board_commit(root, branch, bw, scope, message):
         last_err = ""
         for attempt in range(1, PUSH_RETRIES + 1):
             r = git("push", "origin", f"HEAD:refs/heads/{branch}", cwd=bw,
-                    check=False)
+                    check=False, timeout=GIT_NETWORK_TIMEOUT_S)
             if r.returncode == 0:
                 pushed = True
                 break
             last_err = git_err(r)
+            if r.returncode == GIT_TIMEOUT_RC:
+                # A stalled network will stall the retries too: queue now.
+                break
             # Non-ff or race: fetch, rebase onto origin, retry (policy A).
-            git("fetch", "origin", branch, cwd=bw, check=False)
+            git("fetch", "origin", branch, cwd=bw, check=False,
+                timeout=GIT_NETWORK_TIMEOUT_S)
             upstream = f"origin/{branch}"
             if not ref_exists(root, upstream):
                 break
@@ -676,6 +858,10 @@ def board_commit(root, branch, bw, scope, message):
                 print(f"  board push attempt {attempt} failed; retry…",
                       file=sys.stderr)
                 time.sleep(min(2 * attempt, 8))
+        if not pushed and not queue:
+            print(f"warning: push to '{branch}' failed:\n{last_err}",
+                  file=sys.stderr)
+            return False
         if not pushed:
             # Do NOT fast-forward local integration: the commit lives on the
             # private branch, and moving integration would make the next
@@ -2368,9 +2554,22 @@ def find_task_worktree_paths(root, scope, tid, branch):
                 if not os.path.isdir(path):
                     continue
                 rp = os.path.realpath(path)
-                if rp not in seen:
-                    seen.add(rp)
-                    found.append(path)
+                if rp in seen:
+                    continue
+                # Ids restart each iteration and carried tasks are
+                # renumbered, so <id>- can be another task's worktree: one
+                # on a different named branch is never this task's to
+                # reuse or remove. Mid-rebase the worktree is detached, so
+                # its branch is read from the rebase state; a plain detached
+                # HEAD names no branch and still matches.
+                if branch and os.path.exists(os.path.join(path, ".git")):
+                    held = current_branch_name(path)
+                    if held == "HEAD":
+                        held = rebase_head_branch(path) or "HEAD"
+                    if held not in (branch, "HEAD"):
+                        continue
+                seen.add(rp)
+                found.append(path)
     return found
 
 
@@ -6868,28 +7067,95 @@ def carries_to_next_iteration(t):
     return t.get("status") == "later" or is_recurring(t)
 
 
+CARRIED_TAG_RE = r"\[carried: [a-z-]+\](?: \S+)?$"
+
+
+def carried_ids(bw, scope, index):
+    """Ids `iteration-close --carry` tagged `[carried: <status>]` in this
+    iteration's log.md section. The tag is the only record of the choice:
+    the archived file is verbatim, and a --force close archives the same
+    unfinished statuses without carrying them."""
+    log = os.path.join(bw, tdir(scope), "log.md")
+    if not os.path.exists(log):
+        return set()
+    with open(log) as f:
+        text = f.read()
+    m = re.search(rf"(?m)^## {int(index)}(?: — .*)?$", text)
+    if not m:
+        return set()
+    rest = text[m.end():]
+    nxt = re.search(r"(?m)^## ", rest)
+    section = rest[:nxt.start()] if nxt else rest
+    return {int(x) for x in re.findall(
+        rf"(?m)^- {int(index)}/T(\d+) .*{CARRIED_TAG_RE}", section)}
+
+
+def remap_dev_batch(body, mapping):
+    """Renumber a carried task's Dev-batch line. batch-gate, collisions on
+    resume and the one-bump rule all read it, so stale ids would name other
+    tasks. Members that did not come back are dropped; a batch of one is no
+    batch, so the line goes."""
+    m = DEV_BATCH_RE.search(body)
+    if not m:
+        return body
+    ids = [mapping[i] for i in parse_id_list(m.group(1)) if i in mapping]
+    # Edit only the stamp's own line: the regex's \s* edges reach into the
+    # blank lines around it, and a body paragraph must not be merged.
+    start = body.rfind("\n", 0, m.start(1)) + 1
+    end = body.find("\n", m.end(1))
+    end = len(body) if end < 0 else end + 1
+    if len(ids) < 2:
+        return body[:start] + body[end:].lstrip("\n")
+    return body[:start] + format_dev_batch(ids) + "\n" + body[end:]
+
+
 def reseed_later_tasks(bw, scope, old_index):
-    """Copy archived later and recurring tasks onto the live board, fresh ids.
+    """Copy carried, later and recurring tasks onto the live board.
 
     Only the outgoing iteration's archive (the one just closed). Scanning
     every archive would duplicate a task that stayed later across closes.
-    Carried→carried deps are remapped; deps on anything else are dropped.
+    Everything reseeded is numbered compactly, 1..N in old-id order.
+    Carried tasks (`iteration-close --carry`) otherwise come back as they
+    were — status, assignee, branch, pr and body — and find their worktrees
+    by branch, not by id. Deps among everything reseeded are remapped; deps
+    on anything else (done, not-planned) are dropped, since a missing id
+    reads as an unfinished dep forever.
     A recurring task keeps its cadence and last_run, so its derived due date
     survives the iteration boundary untouched.
-    Returns [(new_meta, old_id), ...] in new-id order.
+    Returns (carried, reseeded): each [(new_meta, old_id), ...] in old-id
+    order.
     """
     if old_index is None:
-        return []
+        return [], []
     old_index = int(old_index)
-    laters = [t for t in archived_tasks(bw, scope, old_index)
-              if carries_to_next_iteration(t)]
-    if not laters:
-        return []
+    archived = archived_tasks(bw, scope, old_index)
+    keep = carried_ids(bw, scope, old_index)
+    carried = sorted((t for t in archived if t["id"] in keep),
+                     key=lambda x: x["id"])
+    laters = [t for t in archived
+              if t["id"] not in keep and carries_to_next_iteration(t)]
+    if not carried and not laters:
+        return [], []
     nid = max((t["id"] for t in all_tasks(bw, scope)), default=0) + 1
     mapping = {}
-    for t in sorted(laters, key=lambda x: x["id"]):
+    for t in sorted(carried + laters, key=lambda x: x["id"]):
         mapping[t["id"]] = nid
         nid += 1
+    kept = []
+    for t in carried:
+        meta = {k: v for k, v in t.items() if k != "path"}
+        meta["id"] = mapping[t["id"]]
+        meta["deps"] = [mapping[d] for d in t.get("deps", []) if d in mapping]
+        meta["body"] = remap_dev_batch(t.get("body") or "", mapping)
+        # The marker is what keeps flow run history from doubling: this
+        # body's Ran records also live in the archived copy.
+        meta["body"] = append_body(meta["body"],
+                                   f"carried from {old_index}/T{t['id']}")
+        path = os.path.join(bw, tdir(scope), f"{meta['id']:03d}.md")
+        with open(path, "w") as f:
+            f.write(render_task(meta))
+        meta["path"] = path
+        kept.append((meta, t["id"]))
     written = []
     today = datetime.date.today().isoformat()
     for t in sorted(laters, key=lambda x: x["id"]):
@@ -6931,7 +7197,7 @@ def reseed_later_tasks(bw, scope, old_index):
             f.write(render_task(meta))
         meta["path"] = path
         written.append((meta, t["id"]))
-    return written
+    return kept, written
 
 
 def cmd_iteration_close(args):
@@ -6952,14 +7218,18 @@ def cmd_iteration_close(args):
     # keeps their names — but they are ORPHANED: the reseeded copy is a
     # fresh id with branch/pr cleared, land only reads the live board, and
     # the PR is left based on an integration branch that has already
-    # landed. Recovering one is a manual merge.
+    # landed. Recovering one is a manual merge. --carry is the way to keep
+    # them: tagged [carried: <status>] in log.md, they come back at
+    # iteration-new with a fresh id and status, branch and PR intact.
     unfinished = [t for t in tasks
                   if t["status"] not in TERMINAL and not recur_at_rest(t)]
-    if unfinished and not args.force:
+    if unfinished and not (args.force or args.carry):
         ids = ", ".join(f"T{t['id']}" for t in unfinished)
         sys.exit(f"error: unfinished tasks: {ids}. Finish them, mark later, "
-                 "delete them, or re-run with --force to close anyway (they "
-                 "will be logged as unfinished and removed).")
+                 "delete them, re-run with --carry to carry them into the "
+                 "next iteration as they are, or with --force to close anyway "
+                 "(they will be logged as unfinished and removed).")
+    carry = {t["id"] for t in unfinished} if args.carry else set()
     idx = iteration_index(cfg)
     name = iteration_name(cfg)
     started = iteration_started(cfg)
@@ -6986,6 +7256,7 @@ def cmd_iteration_close(args):
     entry.append(f"branch: {branch}{extra}")
     entry.append(f"archive: {arel}/")
     for t in tasks:
+        left = "carried" if t["id"] in carry else "unfinished"
         line = f"- {idx}/T{t['id']} {t['title']}"
         if t.get("assignee"):
             line += f" — {t['assignee']}"
@@ -6998,9 +7269,9 @@ def cmd_iteration_close(args):
         elif is_recurring(t):
             line += f" [recurring {t.get('cadence')}]"
             if not recur_at_rest(t):
-                line += f" [unfinished: {t['status']}]"
+                line += f" [{left}: {t['status']}]"
         elif t["status"] != "done":
-            line += f" [unfinished: {t['status']}]"
+            line += f" [{left}: {t['status']}]"
         if t.get("pr"):
             line += f" {t['pr']}"
         entry.append(line)
@@ -7025,6 +7296,10 @@ def cmd_iteration_close(args):
     board_commit(root, branch, bw, scope, f"dev: close iteration {idx}")
     print(f"iteration {idx} closed: {len(tasks)} tasks archived to "
           f"{arel}/ and indexed in {tdir(scope)}/log.md")
+    if carry:
+        ids = ", ".join(f"T{i}" for i in sorted(carry))
+        print(f"carried to the next iteration: {ids} (iteration-new reseeds "
+              "them with fresh ids, status, branch and PR intact)")
     if parent:
         print(f"next: TASKS iteration-land  # merge-commit PR into '{parent}'")
         print(f"      then after merge: TASKS iteration-new <branch>")
@@ -7059,6 +7334,61 @@ def stamp_next_iteration(bw, scope, cfg, old_idx, args):
     return new_idx
 
 
+def report_reseeded(carried, reseeded, old_idx):
+    if carried:
+        bits = ", ".join(f"T{m['id']} ← {old_idx}/T{oid}"
+                         for m, oid in carried)
+        print(f"carried {len(carried)} unfinished task(s): {bits}")
+    if reseeded:
+        bits = ", ".join(f"T{m['id']} ← {old_idx}/T{oid}"
+                         for m, oid in reseeded)
+        print(f"reseeded {len(reseeded)} later/recurring task(s): {bits}")
+
+
+def retarget_carried_prs(root, carried, old_branch, new_branch):
+    """Point carried tasks' open PRs at the new integration branch.
+
+    Best-effort: the board is already committed, so a failure warns with
+    the command to finish by hand. Only PRs based on the old integration
+    branch move — a PR stacked on another task branch keeps its base.
+    """
+    prs = [m["pr"] for m, _ in carried if m.get("pr")]
+    if not prs:
+        return
+    if not shutil.which("gh"):
+        print(f"warning: gh not found; retarget these PRs from "
+              f"'{old_branch}' to '{new_branch}' by hand: {' '.join(prs)}",
+              file=sys.stderr)
+        return
+    for url in prs:
+        info = pr_view(root, url, soft=True)
+        if not info:
+            print(f"warning: could not read {url}; if it is based on "
+                  f"'{old_branch}', run: gh pr edit {url} --base {new_branch}",
+                  file=sys.stderr)
+            continue
+        state = (info.get("state") or "").upper()
+        if state == "CLOSED":
+            # Deleting a base branch closes the PRs on it, so a repo that
+            # deletes merged branches closed these when the iteration landed.
+            print(f"warning: {url} is closed — probably when '{old_branch}' "
+                  f"was deleted after the iteration landed. Restore that "
+                  f"branch, reopen the PR, then run: "
+                  f"gh pr edit {url} --base {new_branch}", file=sys.stderr)
+            continue
+        if state != "OPEN":
+            continue
+        if info.get("baseRefName") != old_branch:
+            continue
+        r = gh("pr", "edit", url, "--base", new_branch, cwd=root, check=False)
+        if r.returncode != 0:
+            print(f"warning: could not retarget {url} to '{new_branch}'; "
+                  f"run: gh pr edit {url} --base {new_branch}\n"
+                  f"{(r.stderr or r.stdout or '').strip()}", file=sys.stderr)
+            continue
+        print(f"retarget {url}: {old_branch} → {new_branch}")
+
+
 def cmd_iteration_new(args):
     root, scope, old_branch, bw = ctx()
     cfg = read_board_cfg(bw, scope)
@@ -7080,16 +7410,13 @@ def cmd_iteration_new(args):
             sys.exit(f"error: {not_ready}")
         new_idx = stamp_next_iteration(bw, scope, cfg, old_idx, args)
         write_board_cfg(bw, scope, cfg)
-        reseeded = reseed_later_tasks(bw, scope, old_idx)
+        carried, reseeded = reseed_later_tasks(bw, scope, old_idx)
         board_commit(root, old_branch, bw, scope,
                      f"dev: start iteration {new_idx}")
         label = (f" — {cfg['iteration_name']}"
                  if cfg.get("iteration_name") else "")
         print(f"iteration {new_idx}{label} started in place on '{old_branch}'")
-        if reseeded:
-            bits = ", ".join(f"T{m['id']} ← {old_idx}/T{oid}"
-                             for m, oid in reseeded)
-            print(f"reseeded {len(reseeded)} carried task(s): {bits}")
+        report_reseeded(carried, reseeded, old_idx)
         return
     if not new_branch:
         sys.exit("error: iteration-new on a parented board needs a new "
@@ -7118,6 +7445,11 @@ def cmd_iteration_new(args):
         sys.exit(f"error: '{old_branch}' is not yet contained in '{parent}'; "
                  "its archive and log.md close section would be missing from "
                  "the new board. Close and land first: TASKS iteration-land")
+    if unpushed_board_commits(bw):
+        sys.exit(f"error: board commits are queued on "
+                 f"{board_branch_name(scope)} and not yet pushed to "
+                 f"'{old_branch}'; starting the new iteration would drop them. "
+                 "Re-run once the push goes through.")
     git("reset", "--hard", start, cwd=bw)
     # defensively clear any task files inherited from the parent
     for p in task_glob(bw, scope):
@@ -7127,23 +7459,40 @@ def cmd_iteration_new(args):
     cfg["parent_branch"] = parent
     new_idx = stamp_next_iteration(bw, scope, cfg, old_idx, args)
     write_board_cfg(bw, scope, cfg)
+    carried, reseeded = reseed_later_tasks(bw, scope, old_idx)
+    if not board_commit(root, new_branch, bw, scope,
+                        f"dev: start iteration {new_idx}", queue=False):
+        git("reset", "--hard", old_ref, cwd=bw)
+        sys.exit(f"error: the new board did not reach '{new_branch}'; nothing "
+                 "was started. Re-run once the push can go through.")
     write_cache(root, scope, new_branch)
-    reseeded = reseed_later_tasks(bw, scope, old_idx)
-    board_commit(root, new_branch, bw, scope,
-                 f"dev: start iteration {new_idx}")
-    # leave a pointer on the parent so other contributors' stale checkouts
-    # resolve to the new iteration (resolve_board follows it)
-    git("reset", "--hard", start, cwd=bw)
-    os.makedirs(os.path.join(bw, tdir(scope)), exist_ok=True)
-    write_board_cfg(bw, scope, cfg)
-    board_commit(root, parent, bw, scope,
-                 f"dev: point board at iteration {new_idx}")
+    new_tip = git("rev-parse", "HEAD", cwd=bw).stdout.strip()
+    # Point the parent and the old branch at the new one, so a checkout on
+    # either resolves to the live board (resolve_board follows it). The
+    # parent gets the new board.yml; the old branch keeps its own record and
+    # changes only integration_branch.
+    for target, ref in ((parent, start), (old_branch, old_ref)):
+        git("reset", "--hard", ref, cwd=bw)
+        os.makedirs(os.path.join(bw, tdir(scope)), exist_ok=True)
+        if target == parent:
+            write_board_cfg(bw, scope, cfg)
+        else:
+            old_cfg = read_board_cfg(bw, scope)
+            old_cfg["integration_branch"] = new_branch
+            write_board_cfg(bw, scope, old_cfg)
+        if not board_commit(root, target, bw, scope,
+                            f"dev: point board at iteration {new_idx}",
+                            queue=False):
+            print(f"warning: '{target}' does not point at '{new_branch}'; "
+                  f"a checkout on it needs a one-time: TASKS init "
+                  f"--integration {new_branch}", file=sys.stderr)
+    # Leave the worktree on the new board, so the next board command has
+    # nothing to push.
+    git("reset", "--hard", new_tip, cwd=bw)
     print(f"iteration {new_idx} started on new branch "
           f"'{new_branch}' (parent: {parent})")
-    if reseeded:
-        bits = ", ".join(f"T{m['id']} ← {old_idx}/T{oid}"
-                         for m, oid in reseeded)
-        print(f"reseeded {len(reseeded)} carried task(s): {bits}")
+    report_reseeded(carried, reseeded, old_idx)
+    retarget_carried_prs(root, carried, old_branch, new_branch)
     print(f"note: switch your checkout when ready: git checkout {new_branch}")
 
 
@@ -7396,8 +7745,13 @@ def main():
     s.set_defaults(fn=cmd_iteration)
 
     s = sub.add_parser("iteration-close", help="log + remove all tasks on the board")
-    s.add_argument("--force", action="store_true",
+    g = s.add_mutually_exclusive_group()
+    g.add_argument("--force", action="store_true",
                    help="close even with unfinished tasks")
+    g.add_argument("--carry", action="store_true",
+                   help="carry unfinished tasks into the next iteration "
+                        "with status, branch and PR intact (iteration-new "
+                        "reseeds them)")
     s.set_defaults(fn=cmd_iteration_close)
 
     s = sub.add_parser("iteration-new",

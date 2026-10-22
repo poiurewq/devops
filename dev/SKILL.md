@@ -55,7 +55,7 @@ TASKS list [--assignee <who>] [--status <s>] [--needs decision]
 TASKS recur list [--due] | recur ran <id> [--date YYYY-MM-DD]
 TASKS board [--expand] [--by-area] [--watch]
 TASKS iteration
-TASKS iteration-close [--force]
+TASKS iteration-close [--carry | --force]
 TASKS iteration-new [<branch>] [--parent <branch>] [--name <name>]
                     [--iteration N] [--iteration-started YYYY-MM-DD]
                     # omit branch to roll in place when there is no parent

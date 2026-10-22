@@ -165,7 +165,10 @@ TASKS board [--expand] [--by-area] [--watch]
                                         # collisions + unfinished deps)
                                         # (./board)
 TASKS iteration
-TASKS iteration-close [--force]
+TASKS iteration-close [--carry | --force]
+                                        # --carry: unfinished tasks come back
+                                        # at iteration-new with a fresh id,
+                                        # status, branch and PR intact
 TASKS iteration-new [<branch>] [--parent <branch>] [--name <name>]
                     [--iteration N] [--iteration-started YYYY-MM-DD]
                                         # omit branch: roll in place on a

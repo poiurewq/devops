@@ -58,7 +58,7 @@ TASKS show <id>
 TASKS delete <id>
 TASKS board [--expand] [--watch]
 TASKS iteration
-TASKS iteration-close [--force]
+TASKS iteration-close [--carry | --force]
 TASKS iteration-new [<branch>] [--name <name>] [--iteration N]
                     [--iteration-started YYYY-MM-DD]
                     # omit the branch to roll in place (no parent)

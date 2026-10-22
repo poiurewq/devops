@@ -12,16 +12,16 @@ An iteration is one stretch of work on the board plus the archive it leaves behi
 
 ## `/ops iteration close`
 
-1. **Confirm intent, and deal with what is unfinished.** Ask per task: run it now, park it (`--status later` — intended, not this stretch), carry it over (note it and re-file next iteration), or drop it (`--status not-planned --reason "<why>"`, or delete — the user picks). Recurring tasks sitting at rest do not block and are carried automatically, cadence and last-run date intact. A run actually in flight does block: finish it, or the record of what was done is the thing you lose.
+1. **Confirm intent, and deal with what is unfinished.** Ask per task: run it now, park it (`--status later` — intended, not this stretch), carry it over (it moves into the next iteration with its status and record intact, run in flight included; only its id changes), or drop it (`--status not-planned --reason "<why>"`, or delete — the user picks). Recurring tasks sitting at rest do not block and are carried automatically, cadence and last-run date intact. A run actually in flight blocks the close unless it is carried: finish it or carry it, since leaving it behind with `--force` loses the record of what was done.
 2. **An unfinished umbrella deserves a pause.** It means the goal it names was not met. If its children are all done, it needs its verification pass first (SKILL.md *Umbrella close*), which is a judgment, not a status flip.
-3. `TASKS iteration-close`. Add `--force` only after the user has accepted the list of what will be logged as unfinished — genuinely abandoned work should be `not-planned` first, and parked work `later`, so `--force` covers only the remainder. This copies every task into the archive and indexes them in `.tasks/log.md`, one line each with its `Ran:` records underneath, then clears the live board.
+3. `TASKS iteration-close`. When the user chose to carry the unfinished tasks over, add `--carry`: it takes every unfinished task, so run, park, or drop the ones that should not come along first. `--force` instead logs them as unfinished and leaves them behind — only after the user has accepted that list; genuinely abandoned work should be `not-planned` first, and parked work `later`. This copies every task into the archive and indexes them in `.tasks/log.md`, one line each with its `Ran:` records underneath, then clears the live board.
 4. Start the next one straight away (below), unless the user wants to leave the board empty for a while.
 
 ## `/ops iteration new`
 
 `TASKS iteration-new [--name <name>] [--iteration N] [--iteration-started <date>]`. Ask for a display name first; unnamed is allowed, but a name is what makes the archive readable later. The script refuses until the close has run.
 
-The new board starts empty except for what carries over on its own: tasks parked as `later`, and recurring tasks, both with fresh ids and a `carried from <n>/T<id>` note. Do not re-add those by hand. Anything the user chose to carry over in step 1 is re-filed now through `flows/add.md`, reading it from `.tasks/archive/<n>-<slug>/`.
+The new board starts empty except for what carries over on its own: tasks closed with `--carry` (status, assignee and record intact), tasks parked as `later`, and recurring tasks. All are renumbered 1..N in their old order, and each gets a `carried from <n>/T<id>` note; links to tasks that did not come back are dropped. Do not re-add those by hand. Anything left behind by `--force` is re-filed through `flows/add.md`, reading it from `.tasks/archive/<n>-<slug>/`.
 
 ## A board with a parent branch
 
