@@ -38,7 +38,7 @@ import tempfile
 import time
 
 STATUSES = ["proposed", "backlog", "planned", "doing", "draft", "review",
-            "done", "later", "not-planned"]
+            "done", "later", "shelved", "not-planned"]
 # Hottest-first list/index. Watch and static `TASKS board` / TASKS.md share
 # this; STATUSES stays the pipeline (validation, rollup counts). later sits
 # ahead of done: parked-but-intended work reads before finished work.
@@ -47,11 +47,16 @@ _WATCH_HEAD = ("review", "draft", "doing", "planned", "proposed",
 WATCH_STATUSES = [s for s in _WATCH_HEAD if s in STATUSES] + [
     s for s in STATUSES if s not in _WATCH_HEAD]
 # Don't block an iteration close. later is parked (reseeds on iteration-new),
-# not finished — but close treats it like not-planned.
-TERMINAL = ("done", "later", "not-planned")
+# not finished — but close treats it like not-planned. shelved = not needed
+# for now: kept with its reason, holds no area, and carries over as shelved
+# (not as intended work) until someone revives it.
+TERMINAL = ("done", "later", "shelved", "not-planned")
 # Out of umbrella progress (not done, not this iteration).
-OUT_OF_PLAY = ("later", "not-planned")
-STATUS_LABEL = {"not-planned": "Not planned", "later": "Later"}
+OUT_OF_PLAY = ("later", "shelved", "not-planned")
+STATUS_LABEL = {"not-planned": "Not planned", "later": "Later",
+                "shelved": "Shelved"}
+# --status values that need --reason, and the body line each one writes.
+REASON_STATUSES = {"not-planned": "Not planned", "shelved": "Shelved"}
 TASKS_DIR = ".tasks"
 # Flow store: one procedure per file, <scope>/.flows/<name>.md. Same home
 # and rules as .tasks/ (integration branch only, written through the board
@@ -82,7 +87,10 @@ VIEWER_NAME = "board"
 # 8: `type: dev` is written explicitly on every dev task this script renders
 #    (absent still reads as dev, so old files stay valid unmigrated). A
 #    schema-7 script refuses `type: dev` on any add/update that validates it.
-SCHEMA_VERSION = 8
+# 9: shelved status (not needed for now; revivable, carried over as shelved).
+#    No new fields, but an older script refuses the value on update, drops
+#    those tasks from the board render, and reads one as unfinished at close.
+SCHEMA_VERSION = 9
 CONFIG_KEYS = ["schema_version", "integration_branch", "parent_branch",
                "iteration", "iteration_name", "iteration_started",
                "integrator", "contributors"]
@@ -1583,6 +1591,34 @@ def is_ops(t):
     return task_type(t) == OPS
 
 
+def off_board_guard(old, new, status):
+    """Guard for `update --status` later|shelved|not-planned (OUT_OF_PLAY).
+
+    Returns (error, cleared). A task moved off the board must not keep a
+    live branch or PR: shelved and not-planned drop its area lock, and the
+    next iteration's reseed clears both fields, orphaning the PR. `error`
+    is set while `new` still carries either — the same call must clear
+    them. `cleared` names what that call dropped (old values) so the body
+    can record it and the work stays findable. Nothing is ever deleted.
+    """
+    if status not in OUT_OF_PLAY:
+        return None, []
+    live = [f"{k} {new[k].strip()}" for k in ("branch", "pr")
+            if (new.get(k) or "").strip()]
+    if live:
+        reason = ' --reason "<why>"' if status in REASON_STATUSES else ""
+        return (f"error: T{new['id']} still has {' and '.join(live)}; "
+                f"moving it to {status} would strand them. Decide the PR's "
+                f"fate first (land it, close it, or keep it open), run TASKS "
+                f"cleanup {new['id']} to drop its worktree (the branch and PR "
+                f"are kept), then clear both in the same call: TASKS update "
+                f"{new['id']} --status "
+                f"{status}{reason} --branch \"\" --pr \"\" (the old values are "
+                f"recorded in the body; nothing is deleted)"), []
+    return None, [f"{k} {old[k].strip()}" for k in ("branch", "pr")
+                  if (old.get(k) or "").strip()]
+
+
 def validate_type(meta, set_type=False, set_area=False, new=False):
     """type is dev, ops, or empty (= dev); an ops task carries no area.
     Exits on error.
@@ -1630,6 +1666,16 @@ def is_recurring(t):
     return (t.get("kind") or "").strip() == RECURRING
 
 
+# Statuses that stop a recurring task's clock: shelved pauses it, not-planned
+# retires it. Neither is ever due, and `recur ran` refuses both until revived.
+RECUR_STOPPED = ("shelved", "not-planned")
+
+
+def on_the_clock(t):
+    """A recurring task whose cadence is live (not shelved or retired)."""
+    return is_recurring(t) and t.get("status") not in RECUR_STOPPED
+
+
 def parse_cadence(value, what="cadence"):
     m = CADENCE_RE.match((value or "").strip())
     if not m:
@@ -1674,7 +1720,7 @@ def task_due_date(t):
 
 
 def task_is_due(t, today=None):
-    if not is_recurring(t):
+    if not on_the_clock(t):
         return False
     due = task_due_date(t)
     return due is None or due <= (today or datetime.date.today())
@@ -1769,21 +1815,18 @@ def membership_leaves(umbrella, by_id, _seen=None):
 def umbrella_rollup(umbrella, tasks):
     """Short status rollup over membership leaves (not ordering-only deps).
 
-    later and not-planned leaves are out of scope: excluded from both the
-    done numerator and the denominator, and omitted from open status counts.
+    later, shelved and not-planned leaves are out of scope: excluded from
+    both the done numerator and the denominator, and omitted from open
+    status counts.
     """
     by_id = {t["id"]: t for t in tasks}
     leaves = membership_leaves(umbrella, by_id)
-    # Progress is over work still in play — drop later / not-planned.
+    # Progress is over work still in play — drop later / shelved / not-planned.
     active = [t for t in leaves if t["status"] not in OUT_OF_PLAY]
     if not active:
         if leaves:
             parked = {t["status"] for t in leaves if t["status"] in OUT_OF_PLAY}
-            if parked == {"later"}:
-                return "☂ all later"
-            if parked == {"not-planned"}:
-                return "☂ all not-planned"
-            return "☂ all later/not-planned"
+            return "☂ all " + "/".join(s for s in OUT_OF_PLAY if s in parked)
         return "☂ no children"
     n = len(active)
     done = sum(1 for t in active if t["status"] == "done")
@@ -1830,8 +1873,8 @@ def split_areas(s):
 
 
 def occupies_area(t):
-    # later still occupies (intended work); not-planned is historical only.
-    return t["status"] not in ("done", "not-planned")
+    # later still occupies (intended work); shelved and not-planned do not.
+    return t["status"] not in ("done", "shelved", "not-planned")
 
 
 # Shipped, not yet landed: there is an open PR either way. `draft` adds
@@ -2062,7 +2105,8 @@ def watch_search_view(query, tasks, expand=False, color=False):
     hits = related_hits(query, pool)
     if not hits:
         lines.append("(nothing related)" if expand else
-                     "(nothing related; e includes done/later/not-planned)")
+                     "(nothing related; e includes "
+                     "done/later/shelved/not-planned)")
     for score, t in hits:
         if color and t["status"] in TERMINAL:
             lines.append(_ansi(_DIM, f"{score:.2f} {fmt_line(t, tasks)}"))
@@ -3536,7 +3580,7 @@ def cmd_land(args):
     tid = meta["id"]
     pr = (meta.get("pr") or "").strip()
 
-    if meta["status"] in ("not-planned", "later"):
+    if meta["status"] in OUT_OF_PLAY:
         sys.exit(f"error: T{tid} is {meta['status']}; revive before landing")
     if meta["status"] == "done":
         print(f"T{tid}: already done — running cleanup only")
@@ -3755,7 +3799,7 @@ def cmd_claim(args):
     tid = meta["id"]
     status = meta["status"]
 
-    if status in ("done", "later", "not-planned"):
+    if status in TERMINAL:
         sys.exit(f"error: T{tid} is {status}; cannot claim")
     if status == "proposed":
         sys.exit(f"error: T{tid} is proposed; approve via review before claim")
@@ -4032,7 +4076,7 @@ def commits_ahead(root, branch, base_ref):
 # ---------- Dev-batch stamp + restack / batch-gate ----------
 
 DEV_BATCH_RE = re.compile(
-    r"(?im)^\s*Dev-batch:\s*([0-9]+(?:\s*,\s*[0-9]+)*)\s*$")
+    r"(?im)^[ \t]*Dev-batch:[ \t]*([0-9]+(?:[ \t]*,[ \t]*[0-9]+)*)[ \t]*(?=\r?$)")
 
 
 def parse_id_list(s):
@@ -4271,6 +4315,42 @@ def review_stack_infos(root, bw, scope):
     return infos
 
 
+def batch_gate_missing_parents(selected, infos, parent_map):
+    """(child, parent) pairs where an open stack ancestor of a selected task
+    is not selected — the hard refuse in batch-gate."""
+    selected_set = set(selected)
+    missing = []
+    for tid in selected:
+        cur, seen = tid, {tid}
+        while cur in parent_map:
+            parent = parent_map[cur]
+            if parent in seen:
+                break
+            seen.add(parent)
+            if parent not in selected_set and infos.get(parent, {}).get("open"):
+                missing.append((cur, parent))
+            cur = parent
+    return missing
+
+
+def batch_gate_missing_members(selected, infos):
+    """Open Dev-batch co-members of a selected task left out of the
+    selection — the batch-gate advisory. `infos` must hold every selected
+    id."""
+    selected_set = set(selected)
+    missing = set()
+    for tid in selected:
+        info = infos[tid]
+        stamped = parse_dev_batch(info["body"]) or parse_dev_batch(
+            info["task_body"])
+        for other in stamped:
+            if other in selected_set:
+                continue
+            if infos.get(other, {}).get("open"):
+                missing.add(other)
+    return missing
+
+
 def cmd_batch_gate(args):
     """Gate a review selection: refuse a missing stack parent, warn on a
     partial Dev-batch.
@@ -4295,19 +4375,7 @@ def cmd_batch_gate(args):
     infos = review_stack_infos(root, bw, scope)
     parent_map = build_stack_parent_map(infos, integration)
     selected_set = set(selected)
-
-    # Hard gate: every open stack ancestor of a selected task must be selected.
-    missing_parents = []
-    for tid in selected:
-        cur, seen = tid, {tid}
-        while cur in parent_map:
-            parent = parent_map[cur]
-            if parent in seen:
-                break
-            seen.add(parent)
-            if parent not in selected_set and infos.get(parent, {}).get("open"):
-                missing_parents.append((cur, parent))
-            cur = parent
+    missing_parents = batch_gate_missing_parents(selected, infos, parent_map)
     if missing_parents:
         print("batch-gate: stack parent missing — a child cannot land "
               "before its parent:")
@@ -4319,17 +4387,12 @@ def cmd_batch_gate(args):
               f"{','.join(str(i) for i in required)}")
         sys.exit(2)
 
-    # Advisory: co-members of a Dev-batch left out of the selection.
-    batch_missing = set()
+    # Deferred past the refuse so that path makes no gh calls; a selected
+    # task with no open PR still needs its Dev-batch stamp for the advisory.
     for tid in selected:
-        info = infos.get(tid) or load_task_pr_stack_info(root, bw, scope, tid)
-        stamped = parse_dev_batch(info["body"]) or parse_dev_batch(
-            info["task_body"])
-        for other in stamped:
-            if other in selected_set:
-                continue
-            if infos.get(other, {}).get("open"):
-                batch_missing.add(other)
+        if tid not in infos:
+            infos[tid] = load_task_pr_stack_info(root, bw, scope, tid)
+    batch_missing = batch_gate_missing_members(selected, infos)
     if batch_missing:
         print("batch-gate: partial batch — these shipped together and share "
               "one version bump:")
@@ -4663,7 +4726,7 @@ def cmd_ship(args):
         sys.exit(f"error: T{tid} has no branch; run claim first")
     # Only a re-ship of already-promoted work stays in review.
     target = "review" if meta["status"] == "review" else "draft"
-    if meta["status"] in ("done", "later", "not-planned", "proposed"):
+    if meta["status"] in TERMINAL + ("proposed",):
         sys.exit(f"error: T{tid} is {meta['status']}; cannot ship")
     if is_ops(meta):
         sys.exit(f"error: T{tid} is an ops task; nothing ships — it closes "
@@ -5533,6 +5596,7 @@ def cmd_add(args):
 def cmd_update(args):
     root, scope, branch, bw = ctx()
     meta = find_task(bw, scope, args.id)
+    old = dict(meta)
     changes = []
     for field in ("title", "area", "status", "kind", "type", "assignee",
                   "branch", "pr", "needs", "desc", "cadence", "last_run"):
@@ -5551,18 +5615,27 @@ def cmd_update(args):
     if args.deps is not None:
         meta["deps"] = [int(x) for x in re.findall(r"\d+", args.deps)]
         changes.append(f"deps={meta['deps']}")
-    if args.reason is not None and args.status != "not-planned":
-        sys.exit("error: --reason only applies with --status not-planned")
-    if args.status == "not-planned" and not (args.reason or "").strip():
-        sys.exit("error: --status not-planned requires --reason \"<why this "
-                 "is not being pursued>\" (recorded in the task body)")
+    if args.reason is not None and args.status not in REASON_STATUSES:
+        sys.exit("error: --reason only applies with --status "
+                 + " or ".join(REASON_STATUSES))
+    if args.status in REASON_STATUSES and not (args.reason or "").strip():
+        sys.exit(f"error: --status {args.status} requires --reason \"<why>\" "
+                 "(recorded in the task body)")
+    strand_err, cleared = off_board_guard(old, meta, args.status)
+    if strand_err:
+        sys.exit(strand_err)
+    today = datetime.date.today().isoformat()
     if args.append is not None:
         meta["body"] = append_body(meta["body"], args.append)
         changes.append("append")
     if args.reason is not None:
-        today = datetime.date.today().isoformat()
-        meta["body"] = append_body(meta["body"],
-                                   f"Not planned ({today}): {args.reason}")
+        meta["body"] = append_body(
+            meta["body"],
+            f"{REASON_STATUSES[args.status]} ({today}): {args.reason}")
+    if cleared:
+        meta["body"] = append_body(
+            meta["body"], f"Cleared on moving to {args.status} ({today}): "
+            f"{', '.join(cleared)}.")
     if not changes:
         sys.exit("error: nothing to update")
     if meta["status"] not in STATUSES:
@@ -5692,6 +5765,10 @@ def cmd_recur(args):
         if not is_recurring(meta):
             sys.exit(f"error: T{meta['id']} is not a recurring task "
                      f"(kind: {meta.get('kind') or 'normal'})")
+        if not on_the_clock(meta):
+            sys.exit(f"error: T{meta['id']} is {meta['status']}; its clock is "
+                     f"stopped — revive it (--status backlog) before "
+                     f"recording a run")
         # `recur ran` is the no-PR path. Re-arming clears pr and branch, so
         # running it on an in-flight task would orphan the PR and worktree —
         # land (or cleanup) owns that run instead.
@@ -5708,7 +5785,7 @@ def cmd_recur(args):
               f"next due {due.isoformat()}")
         return
     today = datetime.date.today()
-    sel = [t for t in tasks if is_recurring(t)]
+    sel = [t for t in tasks if on_the_clock(t)]
     if args.due:
         sel = [t for t in sel if task_is_due(t, today)]
     if not sel:
@@ -5760,7 +5837,7 @@ def cmd_ran(args):
     if not is_ops(meta):
         sys.exit(f"error: T{tid} is a dev task; it closes when its PR lands "
                  f"(TASKS land {tid}). Only ops tasks close with a run record")
-    if meta["status"] in ("done", "later", "not-planned", "proposed"):
+    if meta["status"] in TERMINAL + ("proposed",):
         sys.exit(f"error: T{tid} is {meta['status']}; nothing to record")
     if (meta.get("pr") or "").strip() or (meta.get("branch") or "").strip():
         sys.exit(f"error: T{tid} has a branch/PR set; an ops task never "
@@ -5994,6 +6071,7 @@ _STATUS_COLOR = {
     "review": "35",       # magenta
     "done": "32",         # green
     "later": "2",
+    "shelved": "2",
     "not-planned": "2",
 }
 _ASSIGNEE_COLORS = (
@@ -6054,7 +6132,7 @@ def fmt_line(t, tasks, color=False):
         flag = f"⚑waiting {w[0]} by {w[1].isoformat()}"
         sgr = _ERR if w[1] < datetime.date.today() else _NEEDS
         parts.append(_ansi(sgr, flag) if color else flag)
-    if is_recurring(t):
+    if on_the_clock(t):
         mark, sgr = recur_marker(t)
         parts.append(_ansi(sgr, mark) if color else mark)
     if is_umbrella(t):
@@ -6108,9 +6186,10 @@ def _recur_index_row(tasks, color=False):
 
     Additional to the status/area rows, not a replacement — a recurring task
     genuinely sits in backlog (or doing, or review) and stays on that row.
-    The duplication is what makes "what is on the clock" one line to read.
+    The duplication is what makes "what is on the clock" one line to read,
+    so a shelved or not-planned one (clock stopped) is left off.
     """
-    col = sorted([t for t in tasks if is_recurring(t)], key=recur_due_sort)
+    col = sorted([t for t in tasks if on_the_clock(t)], key=recur_due_sort)
     if not col:
         return []
     if not color:
@@ -6160,7 +6239,7 @@ def _index_block(rows):
 def _list_block(tasks, expand=False, color=False, status_order=None):
     """In-play tasks one per line, umbrella children indented under the parent.
 
-    --expand also lists done/later/not-planned. A child whose umbrella is
+    --expand also lists done/later/shelved/not-planned. A child whose umbrella is
     itself unlisted renders at top level, so nothing drops off the board.
     Umbrellas rank by the hottest of their own status and their listed
     descendants'.
@@ -6250,7 +6329,7 @@ def _board_by_area(bw, scope, tasks, expand=False, color=False,
     Index order: areas.md order, then other named areas (sorted), then
     reserved `all`, then untagged. Empty named areas from areas.md are kept
     so the cut shows the full map; empty ad-hoc / all / untagged are omitted.
-    Default keeps done/later/not-planned off area lines (own count rows)
+    Default keeps done/later/shelved/not-planned off area lines (own count rows)
     so open work stays scannable; --expand puts those ids on area lines too.
     Ids on each area line use the same hottest-first status order as the
     default view, so in-flight work sits left of the backlog.
@@ -6997,8 +7076,8 @@ def cmd_iteration(args):
     root, scope, branch, bw = ctx()
     cfg = read_board_cfg(bw, scope)
     tasks = all_tasks(bw, scope)
-    # later is parked: omit it from the X/Y done denominator.
-    in_play = [t for t in tasks if t["status"] != "later"]
+    # later and shelved are parked: omit them from the X/Y done denominator.
+    in_play = [t for t in tasks if t["status"] not in ("later", "shelved")]
     done = sum(1 for t in in_play if t["status"] == "done")
     print(f"scope: {scope}")
     print(f"iteration: {iteration_index(cfg)}")
@@ -7094,14 +7173,15 @@ def archived_tasks(bw, scope, index):
 
 
 def carries_to_next_iteration(t):
-    """later = intended but not this iteration; recurring = perpetual.
+    """later = intended but not this iteration; shelved = not needed for
+    now, kept until revived; recurring = perpetual.
 
     not-planned wins over recurrence: retiring a recurring task is how you
     stop it, so it must not be reseeded back onto the next board.
     """
     if t.get("status") == "not-planned":
         return False
-    return t.get("status") == "later" or is_recurring(t)
+    return t.get("status") in ("later", "shelved") or is_recurring(t)
 
 
 CARRIED_TAG_RE = r"\[carried: [a-z-]+\](?: \S+)?$"
@@ -7136,8 +7216,7 @@ def remap_dev_batch(body, mapping):
     if not m:
         return body
     ids = [mapping[i] for i in parse_id_list(m.group(1)) if i in mapping]
-    # Edit only the stamp's own line: the regex's \s* edges reach into the
-    # blank lines around it, and a body paragraph must not be merged.
+    # Edit only the stamp's own line, so a body paragraph is never merged.
     start = body.rfind("\n", 0, m.start(1)) + 1
     end = body.find("\n", m.end(1))
     end = len(body) if end < 0 else end + 1
@@ -7147,7 +7226,7 @@ def remap_dev_batch(body, mapping):
 
 
 def reseed_later_tasks(bw, scope, old_index):
-    """Copy carried, later and recurring tasks onto the live board.
+    """Copy carried, later, shelved and recurring tasks onto the live board.
 
     Only the outgoing iteration's archive (the one just closed). Scanning
     every archive would duplicate a task that stayed later across closes.
@@ -7204,14 +7283,16 @@ def reseed_later_tasks(bw, scope, old_index):
             "id": new_id,
             "title": t.get("title") or "",
             "area": t.get("area") or "",
-            # Only later and recurring tasks are carried. later stays
-            # later, and a proposed recurring task stays proposed — a
-            # forced close must not promote an unapproved proposal to
-            # approved work. Anything else is a recurring task that
+            # Only later, shelved and recurring tasks are carried. later
+            # stays later, shelved stays shelved (a shelved recurring task
+            # too: shelving pauses it), and a proposed recurring task stays
+            # proposed — a forced close must not promote an unapproved
+            # proposal to approved work. Anything else is a recurring task that
             # starts the new board armed and unclaimed (assignee/branch/pr
             # are cleared below, so an in-flight status would name a
             # branch that is not carried).
-            "status": (t["status"] if t.get("status") in ("later", "proposed")
+            "status": (t["status"]
+                       if t.get("status") in ("later", "shelved", "proposed")
                        else "backlog"),
             "kind": t.get("kind") or "",
             # Carry the type: a recurring ops task that came back as a dev
@@ -7263,8 +7344,9 @@ def cmd_iteration_close(args):
     if unfinished and not (args.force or args.carry):
         ids = ", ".join(f"T{t['id']}" for t in unfinished)
         sys.exit(f"error: unfinished tasks: {ids}. Finish them, mark later, "
-                 "delete them, re-run with --carry to carry them into the "
-                 "next iteration as they are, or with --force to close anyway "
+                 "shelve them, drop them (not-planned), delete them, re-run "
+                 "with --carry to carry them into the next iteration as they "
+                 "are, or with --force to close anyway "
                  "(they will be logged as unfinished and removed).")
     carry = {t["id"] for t in unfinished} if args.carry else set()
     idx = iteration_index(cfg)
@@ -7303,6 +7385,8 @@ def cmd_iteration_close(args):
             line += " [not planned]"
         elif t["status"] == "later":
             line += " [later]"
+        elif t["status"] == "shelved":
+            line += " [shelved]"
         elif is_recurring(t):
             line += f" [recurring {t.get('cadence')}]"
             if not recur_at_rest(t):
@@ -7379,7 +7463,8 @@ def report_reseeded(carried, reseeded, old_idx):
     if reseeded:
         bits = ", ".join(f"T{m['id']} ← {old_idx}/T{oid}"
                          for m, oid in reseeded)
-        print(f"reseeded {len(reseeded)} later/recurring task(s): {bits}")
+        print(f"reseeded {len(reseeded)} later/shelved/recurring task(s): "
+              f"{bits}")
 
 
 def retarget_carried_prs(root, carried, old_branch, new_branch):
@@ -7656,8 +7741,9 @@ def main():
                                   "(empty string clears)")
     s.add_argument("--append", help="append a paragraph to the body "
                                     "(leaves existing text untouched)")
-    s.add_argument("--reason", help="why this task is not being pursued; "
-                                    "required with --status not-planned")
+    s.add_argument("--reason", help="why this task is not being pursued "
+                                    "(or not needed for now); required with "
+                                    "--status not-planned or shelved")
     s.set_defaults(fn=cmd_update)
 
     s = sub.add_parser("related", help="existing tasks similar to some text")
@@ -7761,8 +7847,8 @@ def main():
 
     s = sub.add_parser("board", help="print board view; regenerate TASKS.md")
     s.add_argument("--expand", action="store_true",
-                   help="also list done/later/not-planned (default folds "
-                        "them to counts)")
+                   help="also list done/later/shelved/not-planned (default "
+                        "folds them to counts)")
     s.add_argument("--by-area", action="store_true",
                    help="index by area instead of status (multi-area tasks "
                         "listed under each area)")

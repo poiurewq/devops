@@ -91,6 +91,8 @@ TASKS update <id> [--title "<t>"] [--area <m>] [--status <s>]
                                                 # is derived, never stored
           [--status later]                      # park for a later iteration
           [--status not-planned --reason "<why>"]   # reason is required
+          [--status shelved --reason "<why>"]       # not needed for now;
+                                                # reason required, revivable
                                                 # --status draft|review on a
                                                 # task with a PR is refused;
                                                 # use ready / unready
@@ -146,20 +148,23 @@ TASKS list [--assignee <who>] [--status <s>] [--needs decision]
                                         # tasks
 TASKS recur list [--due]                # recurring tasks + derived due dates
                                         # (overdue and never-run first);
-                                        # --due limits to due/overdue now
+                                        # --due limits to due/overdue now;
+                                        # shelved/not-planned (clock
+                                        # stopped) are left out
 TASKS recur ran <id> [--date YYYY-MM-DD]
                                         # record a run with no PR: stamp
                                         # last_run (default today), re-arm to
                                         # backlog. Refused if branch or pr is
-                                        # set — land owns that run.
+                                        # set — land owns that run — or
+                                        # if shelved/not-planned.
 TASKS board [--expand] [--by-area] [--watch]
                                         # index: one line per status (or
                                         # area) of task ids; then in-play
                                         # tasks one per line, umbrella
                                         # children indented under the
-                                        # parent; done/later/not-planned
-                                        # fold to a count, --expand lists
-                                        # those three; --watch: r/a/e/c/q, arrows
+                                        # parent; done/later/shelved/
+                                        # not-planned fold to a count,
+                                        # --expand lists those; --watch: r/a/e/c/q, arrows
                                         # scroll, space/b page, type id↵ to show
                                         # a task, c then id↵ for check (area
                                         # collisions + unfinished deps)

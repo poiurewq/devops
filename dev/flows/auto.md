@@ -4,7 +4,7 @@ For cron/scheduled or parallel agent sessions with no human present. One cycle =
 
 **Identity**: the assignee is the model, prefixed: `auto/<model-id>` (e.g. `auto/claude-sonnet-5`). Pass it explicitly via `--assignee`; don't overwrite a human's product-local `<scope>/.dev/identity`. If this product has no identity file, write the auto identity there so script defaults stay sane. Run from the product directory or pass `--scope`.
 
-**Hard limits**: never merge or approve a PR, mark a draft PR ready for review (or un-ready one), resolve a `needs: decision` fork, flip `proposed` to `backlog` (an audit's own findings included), mark a task `not-planned` or `later`, delete one, file a recurring task or offer to schedule one, or otherwise decide for the human — a pointless-looking task gets `needs: decision` with your reasoning instead. Auto files work and questions; humans dispose of them via flows/review.md. Never park, discard, or reset the local integration branch — that is human-only (flows/implement.md preflight).
+**Hard limits**: never merge or approve a PR, mark a draft PR ready for review (or un-ready one), resolve a `needs: decision` fork, flip `proposed` to `backlog` (an audit's own findings included), mark a task `not-planned`, `later` or `shelved`, delete one, file a recurring task or offer to schedule one, or otherwise decide for the human — a pointless-looking task gets `needs: decision` with your reasoning instead. Auto files work and questions; humans dispose of them via flows/review.md. Never park, discard, or reset the local integration branch — that is human-only (flows/implement.md preflight).
 
 ## Cycle
 

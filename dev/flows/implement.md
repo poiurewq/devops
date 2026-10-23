@@ -23,6 +23,7 @@
    - `done` → say so and stop.
    - `not-planned` → show the recorded reason and stop; proceed only if the user revives it (`--status backlog`).
    - `later` → parked for a future iteration; stop. Proceed only if the user revives it (`--status backlog` or `/dev pick <id>`).
+   - `shelved` → not needed for now; show the recorded reason and stop. Proceed only if the user revives it (`--status backlog` or `/dev pick <id>`).
 
    If the task now looks pointless (already solved, superseded, false premise), say so before writing code — the user chooses whether to drop it.
 

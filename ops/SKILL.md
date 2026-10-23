@@ -36,7 +36,7 @@ TASKS update <id> [--title] [--status] [--assignee <who>|""] [--deps]
           [--needs decision|""] [--flow <name[,name]>|""] [--append "<paragraph>"]
           [--desc "<new body>"] [--kind umbrella|recurring|""]
           [--cadence <N><unit>] [--status later]
-          [--status not-planned --reason "<why>"]
+          [--status not-planned|shelved --reason "<why>"]
 TASKS pause <id> --at "<step>" --record "<what exists so far>"
             [--flow <name[,name]>] [--date YYYY-MM-DD]
                                         # stop a run partway; stays doing
@@ -86,11 +86,11 @@ Caveats: `--append` adds to a body (no prior `show` needed, can't truncate); `--
 - `<scope>/.tasks/` — tracked, lives only on the board's integration branch: `NNN.md` (one file per task), `board.yml` (settings, iteration, who holds the board), `areas.md` (a dev concern — ops tasks carry no area), `log.md` (past-iteration index), `archive/<n>-<slug>/NNN.md` (every closed task, verbatim — the run records of past iterations live here and stay searchable; written by `/ops iteration close`).
 - `<scope>/.flows/` — tracked, same home as `.tasks/`, written only through `TASKS flow …`. One file per flow, `<name>.md`: frontmatter `id` (numeric, fixed at create), `name`, `description` (one line), `inputs`, `uses` (flows it follows), `status` (`active`/`retired`), `formerly` (past names, a matching hint), `created`; body = the procedure. Flows outlive iterations — nothing archives them.
 - `<scope>/.dev/` — local to this checkout, gitignored: `identity` and the hidden worktree the script commits board changes through. Shared with `/dev` if it is installed; one identity per project either way.
-- `<scope>/board` — local live viewer (`r` refresh, `a` toggle by-area, `e` toggle expand, `l` toggle a flat list of every task in this iteration, done included, latest board commit first (`a`/`e` do not apply while it is up), `c` check (an id, or `id,id…` for a group), `s` search (words + Enter ranks live tasks as `TASKS related` does, `e` widens it to done/later/not-planned (dimmed); while the `s>` prompt is open every letter is query text, Esc cancels, Ctrl-D still quits), `f` flows pane, `q` (or Esc) back one level — a typed id, then a task or flow opened from search hits back to the hits, then the shown output, then an open `c>` prompt, then the flows pane or latest list back to the board — and `q` quits from the plain board (Esc never quits; Ctrl-D quits from anywhere); the help line says `r re-run` / `q back` while output is showing, `r refresh` / `q quit` on a clean board, arrows scroll, space/b page, type an id + Enter to show it). In the flows pane a typed number is the flow's id, and `s` searches flows by name, description and procedure (retired ones tagged and dimmed); in the tasks pane a number is a task id.
+- `<scope>/board` — local live viewer (`r` refresh, `a` toggle by-area, `e` toggle expand, `l` toggle a flat list of every task in this iteration, done included, latest board commit first (`a`/`e` do not apply while it is up), `c` check (an id, or `id,id…` for a group), `s` search (words + Enter ranks live tasks as `TASKS related` does, `e` widens it to done/later/shelved/not-planned (dimmed); while the `s>` prompt is open every letter is query text, Esc cancels, Ctrl-D still quits), `f` flows pane, `q` (or Esc) back one level — a typed id, then a task or flow opened from search hits back to the hits, then the shown output, then an open `c>` prompt, then the flows pane or latest list back to the board — and `q` quits from the plain board (Esc never quits; Ctrl-D quits from anywhere); the help line says `r re-run` / `q back` while output is showing, `r refresh` / `q quit` on a clean board, arrows scroll, space/b page, type an id + Enter to show it). In the flows pane a typed number is the flow's id, and `s` searches flows by name, description and procedure (retired ones tagged and dimmed); in the tasks pane a number is a task id.
 
 An **ops task** carries `type: ops` in its frontmatter. It has no area (areas lock regions of a codebase; ops touches none), gets no branch and no PR, and closes with its run record rather than a merge. It may also be `kind: recurring` (perpetual work on a cadence) or `kind: umbrella` (a goal whose `deps` are its children). Tasks without `type: ops` on the same board are dev tasks — see The boundary.
 
-Statuses for an ops task: `proposed` (filed for approval) → `backlog` → `planned` → `doing` (a run is under way) → `done`. A run the user stops partway stays `doing` with its assignee — `TASKS pause` records where it got to so a later session resumes from there (`flows/run.md`), and only `TASKS ran` closes it. A run stopped at an `[external]` step also stays `doing`, marked waiting by `TASKS wait`: the board flags it `⚑waiting <who> by <date>` (red once overdue), lists it on a `waiting` row under Doing, and sorts it after the runs you can act on. The mark clears when the task leaves `doing`. Off to the side: `later` (intended, not this iteration) and `not-planned` (decided against, with its reason). `draft` and `review` are PR states and never apply here. `needs: decision` marks an open question awaiting the user.
+Statuses for an ops task: `proposed` (filed for approval) → `backlog` → `planned` → `doing` (a run is under way) → `done`. A run the user stops partway stays `doing` with its assignee — `TASKS pause` records where it got to so a later session resumes from there (`flows/run.md`), and only `TASKS ran` closes it. A run stopped at an `[external]` step also stays `doing`, marked waiting by `TASKS wait`: the board flags it `⚑waiting <who> by <date>` (red once overdue), lists it on a `waiting` row under Doing, and sorts it after the runs you can act on. The mark clears when the task leaves `doing`. Off to the side: `later` (intended, not this iteration), `shelved` (not needed for now, with its reason) and `not-planned` (decided against, with its reason). `draft` and `review` are PR states and never apply here. `needs: decision` marks an open question awaiting the user.
 
 ## Routing
 
@@ -118,7 +118,7 @@ Statuses for an ops task: `proposed` (filed for approval) → `backlog` → `pla
 | `/ops status` | Your plate — see "Status" below. |
 | `/ops show <id>` | `TASKS show <id>`. |
 | `/ops change <id> <what>` / `modify` | Map onto `TASKS update <id> --…`; show the result. A new intent is `--append "Intent: …"`, never a `--desc` rewrite — the last `Intent:` line wins (flows/add.md *Intent*). |
-| `/ops drop <id>` / "we're not doing this" | Not planned, below — offer delete as the alternative and let the user pick. |
+| `/ops drop <id>` / "we're not doing this" | Not planned, below — offer delete as the alternative and let the user pick. "Not needed for now" is shelved instead. |
 | `/ops delete <id>` | Confirm, then `TASKS delete <id>`. |
 | `/ops iteration …` | Read `flows/iteration.md` (show, close, start the next). |
 | `/ops config [key] [value]` | `TASKS config …` (settable: iteration, iteration_name, iteration_started, parent_branch). |
@@ -170,15 +170,19 @@ A `kind: umbrella` task is a goal whose `deps` are its children. Children all be
 
 ## Recurring (inline)
 
-`kind: recurring` + `cadence: <N><unit>` (`d`/`w`/`m`, e.g. `2w`, `1m`) is perpetual work on a clock — the monthly close, the weekly review — not a task that finishes. `ran` stamps `last_run` and re-arms it to `backlog` rather than closing it; the next due date is derived (`last_run + cadence`), so changing the cadence re-dates it at once. `TASKS recur list --due` is the due view, and `board` marks due tasks.
+`kind: recurring` + `cadence: <N><unit>` (`d`/`w`/`m`, e.g. `2w`, `1m`) is perpetual work on a clock — the monthly close, the weekly review — not a task that finishes. `ran` stamps `last_run` and re-arms it to `backlog` rather than closing it; the next due date is derived (`last_run + cadence`), so changing the cadence re-dates it at once. `TASKS recur list --due` is the due view, and `board` marks due tasks. A shelved one is paused and a not-planned one retired: neither is ever due, and recording a run on one is refused until it is revived.
 
 **Never invent a recurring task.** Whether work recurs, and how often, is the user's call: offer and wait.
 
-## Not planned, and later (inline)
+## Not planned, later, and shelved (inline)
 
 `not-planned` = decided against, kept with its reason so the idea is not re-litigated: `TASKS update <id> --status not-planned --reason "<why>"`. Ask the user for the reason in their own words. `delete` erases instead — for something filed in error. When the user wants a task gone, ask which they mean.
 
 `later` = intended, not this iteration: `TASKS update <id> --status later`. Running one is refused until it is revived (`--status backlog`).
+
+`shelved` = not needed for now, but may matter again — neither intended (later) nor decided against (not-planned): `TASKS update <id> --status shelved --reason "<why>"`, the reason required and recorded as `Shelved (<date>):`; ask for it in the user's own words. It folds to its own count on the board, does not block an iteration close, and carries onto the next board still shelved (a recurring one too — shelving pauses it, not-planned retires it). Running one is refused until it is revived (`--status backlog`).
+
+A task with a live branch or PR cannot move to `later`, `shelved` or `not-planned`: `update` refuses, because the branch would outlive the move and the next iteration would orphan the PR. Decide the PR's fate with the user first (land it, close it, or keep it open), run `TASKS cleanup <id>` to drop its worktree (it keeps the branch and PR), then clear both in the same call (`--branch "" --pr ""`); the old values are recorded in the body as `Cleared on moving to <status> (<date>): …` and nothing is deleted.
 
 ## Status (`/ops status`)
 
