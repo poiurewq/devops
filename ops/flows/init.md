@@ -36,4 +36,4 @@ Prerequisites: a git repository with at least one commit, and a remote named `or
 
 6. Report what was set up: project, board branch, identity, whether a remote is syncing it, and the `./board` viewer.
 
-7. **Offer the tour**, once, as the last line: `/ops tour` walks the key concepts on this board, a card at a time. Offer only — never start it unasked.
+7. **Offer the tour**, once, as the last line: `/ops tour` walks through how ops works, a card at a time. Offer only — never start it unasked.

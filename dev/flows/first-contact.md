@@ -33,7 +33,7 @@ Every agent shows the same menu, so the user learns one map of the tool. Emit it
 
 | | |
 |---|---|
-| **Learn** | `/dev tour` — the key concepts, one at a time, on your own board |
+| **Learn** | `/dev tour` — how dev works, one card at a time |
 | **See** | `/dev board` — the whole board (status) · `/dev board --by-area` — cut by area · `/dev status` — your plate · `/dev show <id>` — one task |
 | **Add work** | `/dev add <task-or-goal>` — file a task, or work a goal or pile of threads onto the board · `/dev absorb <file>` — import an existing list · `/dev audit [area]` — scan the code and file what it finds |
 | **Do work** | `/dev pick <id>` — claim it · `/dev <id[, id…]>` — see a task through in one sitting: build, check against intent, review, with you deciding only the real calls · `/dev implement <id[, id…]|goal>` — only build it (or a batch) and open PR(s), no review; unknown goal is filed via add triage first · `/dev auto` — hand one to an agent |

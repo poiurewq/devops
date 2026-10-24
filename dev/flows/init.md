@@ -49,4 +49,4 @@ Prerequisites: at least one commit (the script pins its board worktree to the in
 
 7. Report what was set up: scope, integration branch, integrator, areas, gh status, and the `./board` viewer (`r` refresh, `a` toggle by-area, `e` toggle expand, `l` toggle a list of this iteration's tasks, most recently changed first, `c` check (an id, or `id,id…` for a group), `s` search tasks by words (flows, in the flows pane), `f` flows pane, `q` back one level (quits from the plain board), arrows scroll, space/b page, type id↵ to show a task).
 
-8. **Offer the tour**, once, as the last line: `/dev tour` walks the key concepts on this board, a card at a time. Offer only — never start it unasked.
+8. **Offer the tour**, once, as the last line: `/dev tour` walks through how dev works, a card at a time. Offer only — never start it unasked.
