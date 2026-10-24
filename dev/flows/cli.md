@@ -68,6 +68,8 @@ TASKS add --title "<title>" [--area <m>] [--deps <id,id>]
           [--desc "<1–3 sentences>"] [--assignee <who>]
           [--kind umbrella|recurring]           # empty = normal
           [--cadence <N><unit>]                 # recurring only, unit d/w/m
+          [--next-due YYYY-MM-DD]               # recurring only: first run
+                                                # date (default: due now)
           [--type ops|dev]                      # default dev; ops = run
                                                 # through /ops flows, and
                                                 # refuses --area
@@ -88,7 +90,10 @@ TASKS update <id> [--title "<t>"] [--area <m>] [--status <s>]
           [--desc "<new body>"]                 # REPLACE whole body
           [--cadence <N><unit>] [--last-run YYYY-MM-DD|""]
                                                 # recurring only; the due date
-                                                # is derived, never stored
+                                                # is derived from these
+          [--next-due YYYY-MM-DD|""]            # recurring only: overrides
+                                                # the derived date until a
+                                                # run is recorded
           [--status later]                      # park for a later iteration
           [--status not-planned --reason "<why>"]   # reason is required
           [--status shelved --reason "<why>"]       # not needed for now;

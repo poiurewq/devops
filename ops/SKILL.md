@@ -31,11 +31,11 @@ TASKS flow list [--all] [--json] | show <name> | runs <name>
 TASKS add --title "<title>" --type ops [--deps <id,id>]
           [--desc "<1–3 sentences>"] [--assignee <who>]
           [--kind umbrella|recurring] [--cadence <N><unit>]
-          [--status proposed|backlog|planned|later]
+          [--next-due <date>] [--status proposed|backlog|planned|later]
 TASKS update <id> [--title] [--status] [--assignee <who>|""] [--deps]
           [--needs decision|""] [--flow <name[,name]>|""] [--append "<paragraph>"]
           [--desc "<new body>"] [--kind umbrella|recurring|""]
-          [--cadence <N><unit>] [--status later]
+          [--cadence <N><unit>] [--next-due <date>|""] [--status later]
           [--status not-planned|shelved --reason "<why>"]
 TASKS pause <id> --at "<step>" --record "<what exists so far>"
             [--flow <name[,name]>] [--date YYYY-MM-DD]
@@ -170,7 +170,7 @@ A `kind: umbrella` task is a goal whose `deps` are its children. Children all be
 
 ## Recurring (inline)
 
-`kind: recurring` + `cadence: <N><unit>` (`d`/`w`/`m`, e.g. `2w`, `1m`) is perpetual work on a clock — the monthly close, the weekly review — not a task that finishes. `ran` stamps `last_run` and re-arms it to `backlog` rather than closing it; the next due date is derived (`last_run + cadence`), so changing the cadence re-dates it at once. `TASKS recur list --due` is the due view, and `board` marks due tasks. A shelved one is paused and a not-planned one retired: neither is ever due, and recording a run on one is refused until it is revived.
+`kind: recurring` + `cadence: <N><unit>` (`d`/`w`/`m`, e.g. `2w`, `1m`) is perpetual work on a clock — the monthly close, the weekly review — not a task that finishes. `ran` stamps `last_run` and re-arms it to `backlog` rather than closing it; the next due date is derived (`last_run + cadence`), so changing the cadence re-dates it at once. `--next-due <date>` (on `add` or `update`) sets the next due date directly — a first run on a chosen future day, or one run moved — without faking a `last_run`; the next recorded run clears it and the cadence takes over (`""` clears it sooner). Use a date the user named; never invent one. `TASKS recur list --due` is the due view, and `board` marks due tasks. A shelved one is paused and a not-planned one retired: neither is ever due, and recording a run on one is refused until it is revived.
 
 **Never invent a recurring task.** Whether work recurs, and how often, is the user's call: offer and wait.
 

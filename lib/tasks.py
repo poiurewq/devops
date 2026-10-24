@@ -119,11 +119,11 @@ OPS = "ops"
 # exists.
 FIELDS = ["id", "title", "area", "status", "kind", "type", "assignee", "branch",
           "deps", "pr", "needs", "waiting", "flow", "created", "cadence",
-          "last_run"]
+          "last_run", "next_due"]
 # Written only when non-empty, so an ordinary task file is byte-identical to
 # what a pre-schema-4 script produced. Older readers ignore them either way.
 # `type` is not among them: render always writes it (schema 8).
-OPTIONAL_FIELDS = ("waiting", "flow", "cadence", "last_run")
+OPTIONAL_FIELDS = ("waiting", "flow", "cadence", "last_run", "next_due")
 # Board push races on a shared integration branch: rebase onto origin and
 # retry this many times before queueing locally.
 PUSH_RETRIES = 3
@@ -486,8 +486,16 @@ def read_cache(root, scope):
     p = os.path.join(product_root(root, scope), ".dev", "boards.json")
     if os.path.exists(p):
         with open(p) as f:
-            return json.load(f)
+            try:
+                return json.load(f)
+            except json.JSONDecodeError:
+                print(f"warning: ignoring unreadable {p}", file=sys.stderr)
     return {}
+
+
+def cached_board(root, scope):
+    """True if this product's boards.json names a branch for `scope`."""
+    return bool(read_cache(root, scope).get(scope))
 
 
 def write_cache(root, scope, branch):
@@ -528,12 +536,12 @@ def find_scope(root):
         wt = worktree_root()
     except SystemExit:
         wt = root
-    s = nearest_scope(wt)
+    s = nearest_scope(wt, root)
     if s is not None:
         return s
     # cwd outside any worktree but under primary: walk primary
     if os.path.realpath(wt) != os.path.realpath(root):
-        s = nearest_scope(root)
+        s = nearest_scope(root, root)
         if s is not None:
             return s
     boards = discover_boards(root)
@@ -543,16 +551,23 @@ def find_scope(root):
     return None
 
 
-def nearest_scope(walk_root):
-    """Nearest board at or above cwd within walk_root (checkout board.yml)."""
+def nearest_scope(walk_root, primary=None):
+    """Nearest board at or above cwd within walk_root: a checkout board.yml,
+    or — when `primary` (repo_root) is given — that product's boards.json
+    cache at the matching path in the primary clone. The cache is what init
+    leaves behind while the checkout has not pulled the new board yet, and
+    reading it from primary lets a task worktree resolve the same way."""
     root_abs = os.path.realpath(walk_root)
     cur = os.path.realpath(os.getcwd())
     if not (cur == root_abs or cur.startswith(root_abs + os.sep)):
         cur = root_abs
     probe = cur
     while True:
+        rel = "." if probe == root_abs else os.path.relpath(probe, root_abs)
         if os.path.exists(os.path.join(probe, TASKS_DIR, "board.yml")):
-            return "." if probe == root_abs else os.path.relpath(probe, root_abs)
+            return rel
+        if primary is not None and cached_board(primary, rel):
+            return rel
         if probe == root_abs:
             break
         probe = os.path.dirname(probe)
@@ -791,7 +806,20 @@ def ctx():
         sys.exit(f"error: no board found (no {TASKS_DIR}/board.yml from cwd up "
                  "to repo root). Run: tasks.py init --name <you>")
     branch, bw = resolve_board(root, scope)
+    err = missing_board_error(bw, scope, branch)
+    if err:
+        sys.exit(err)
     return root, scope, branch, bw
+
+
+def missing_board_error(bw, scope, branch):
+    """The boards.json cache only locates a board; the synced board worktree
+    decides whether it exists (a removed board, or an init that died after
+    write_cache). Returns the error to exit with, or None."""
+    if os.path.exists(board_yml_path(bw, scope)):
+        return None
+    return (f"error: no board at '{scope}' on '{branch}' (stale "
+            f".dev/boards.json?); re-run init or remove that entry")
 
 
 def invoking_skill():
@@ -1656,7 +1684,11 @@ def validate_type(meta, set_type=False, set_area=False, new=False):
 # terminal: instead of done it re-arms — last_run is stamped and status goes
 # back to backlog. The due date is DERIVED (last_run + cadence), never
 # stored, so a cadence edit takes effect immediately and the two can't drift.
-# No last_run yet = due now.
+# No last_run yet = due now. The one override is next_due, a date a human set
+# (`update --next-due`): it replaces the derived date in either direction —
+# a first run on a chosen future day, or the next run pushed or pulled —
+# without inventing a last_run. Any recorded run clears it, so it governs
+# exactly one run and the cadence takes over again after.
 
 CADENCE_RE = re.compile(r"^(\d+)([dwm])$")
 CADENCE_HELP = "cadence must be <N><unit> with unit d, w, or m (e.g. 2w, 1m)"
@@ -1710,9 +1742,12 @@ def cadence_next(last_run, cadence):
 
 
 def task_due_date(t):
-    """Derived due date, or None for a task that has never run (= due now)."""
+    """Due date: next_due if set, else last_run + cadence, else None (= due now)."""
     if not is_recurring(t):
         return None
+    pinned = (t.get("next_due") or "").strip()
+    if pinned:
+        return iso_date(pinned, "next_due")
     last = (t.get("last_run") or "").strip()
     if not last:
         return None
@@ -1750,7 +1785,7 @@ def recur_at_rest(t):
 
 
 def validate_recurring(meta):
-    """kind and cadence must agree; last_run must be a date. Exits on error."""
+    """kind and cadence must agree; last_run/next_due must be dates. Exits on error."""
     cadence = (meta.get("cadence") or "").strip()
     if is_recurring(meta):
         if not cadence:
@@ -1759,24 +1794,28 @@ def validate_recurring(meta):
         parse_cadence(cadence)
     elif cadence:
         sys.exit(f"error: cadence only applies to kind {RECURRING} tasks")
-    last = (meta.get("last_run") or "").strip()
-    if last:
-        if not is_recurring(meta):
-            sys.exit(f"error: last_run only applies to kind {RECURRING} tasks")
-        parse_iso_date(last, "last_run")
+    for field in ("last_run", "next_due"):
+        value = (meta.get(field) or "").strip()
+        if value:
+            if not is_recurring(meta):
+                sys.exit(f"error: {field} only applies to kind {RECURRING} "
+                         "tasks")
+            parse_iso_date(value, field)
 
 
 def rearm_recurring(root, scope, branch, bw, meta, ran_on=None, record=None):
     """Record a run: stamp last_run and re-arm instead of going terminal.
 
     Callers pass a freshly read record. Clears the per-run fields (assignee,
-    branch, pr) so the next cycle starts clean; the run itself is recorded in
+    branch, pr) and any next_due override (it governed this run) so the next
+    cycle starts clean; the run itself is recorded in
     the body — a bare `Ran (<date>).` for a landed or `recur ran` run (the
     Shipped record already says what happened), or the full `Ran (<date>):
     …` line an ops run passes in.
     """
     ran = ran_on or datetime.date.today()
     meta["last_run"] = ran.isoformat()
+    meta["next_due"] = ""
     meta["status"] = "backlog"
     meta["assignee"] = meta["branch"] = meta["pr"] = ""
     meta["body"] = append_body(meta["body"], record or f"Ran ({ran.isoformat()}).")
@@ -5363,13 +5402,12 @@ def cmd_init(args):
             append_ignore_line(gi, line)
         if not board_commit(root, branch, bw, scope,
                             "dev: init task board"):
-            # Nothing was fast-forwarded into this checkout, so the board is
-            # not discoverable yet (find_scope reads the checkout).
+            # The board exists only on the private queue; discovery still
+            # finds it through boards.json, and any board command flushes it.
             sys.exit(f"error: the new board is queued on "
                      f"{board_branch_name(scope)} but did not reach "
-                     f"origin/{branch}, so it is not in this checkout yet and "
-                     f"board commands cannot find it. Fix the remote, then "
-                     f"re-run init to flush the queue.")
+                     f"origin/{branch}. Fix the remote, then re-run init "
+                     f"(or any board command) to flush the queue.")
         print(f"initialized board '{scope}' on '{branch}' (integrator: {args.name})")
     else:
         cfg = read_board_cfg(bw, scope)
@@ -5573,6 +5611,7 @@ def cmd_add(args):
         "deps": [int(x) for x in re.findall(r"\d+", args.deps or "")], "pr": "",
         "needs": "", "created": datetime.date.today().isoformat(),
         "cadence": (args.cadence or "").strip(), "last_run": "",
+        "next_due": (args.next_due or "").strip(),
         "body": args.desc or "",
     }
     validate_recurring(meta)
@@ -5599,7 +5638,8 @@ def cmd_update(args):
     old = dict(meta)
     changes = []
     for field in ("title", "area", "status", "kind", "type", "assignee",
-                  "branch", "pr", "needs", "desc", "cadence", "last_run"):
+                  "branch", "pr", "needs", "desc", "cadence", "last_run",
+                  "next_due"):
         v = getattr(args, field, None)
         if v is not None:
             key = "body" if field == "desc" else field
@@ -7236,8 +7276,8 @@ def reseed_later_tasks(bw, scope, old_index):
     by branch, not by id. Deps among everything reseeded are remapped; deps
     on anything else (done, not-planned) are dropped, since a missing id
     reads as an unfinished dep forever.
-    A recurring task keeps its cadence and last_run, so its derived due date
-    survives the iteration boundary untouched.
+    A recurring task keeps its cadence, last_run and next_due, so its due
+    date survives the iteration boundary untouched.
     Returns (carried, reseeded): each [(new_meta, old_id), ...] in old-id
     order.
     """
@@ -7302,6 +7342,7 @@ def reseed_later_tasks(bw, scope, old_index):
             "type": task_type(t),
             "cadence": t.get("cadence") or "",
             "last_run": t.get("last_run") or "",
+            "next_due": t.get("next_due") or "",
             "assignee": "",
             "branch": "",
             "deps": new_deps,
@@ -7723,6 +7764,9 @@ def main():
                         "no PR); dev (the default) = code work")
     s.add_argument("--cadence",
                    help="recurring tasks only: <N><unit>, unit d/w/m (2w, 1m)")
+    s.add_argument("--next-due", dest="next_due",
+                   help="recurring tasks only: YYYY-MM-DD of the first run "
+                        "(default: due now)")
     s.add_argument("--status",
                    choices=["proposed", "backlog", "planned", "later"],
                    default="backlog")
@@ -7736,6 +7780,10 @@ def main():
     s.add_argument("--last-run", dest="last_run",
                    help="recurring tasks only: YYYY-MM-DD of the last run "
                         "(empty string clears; due date is derived from it)")
+    s.add_argument("--next-due", dest="next_due",
+                   help="recurring tasks only: YYYY-MM-DD the next run is due, "
+                        "overriding last_run + cadence until a run is "
+                        "recorded (empty string clears)")
     s.add_argument("--flow", help="flow name(s) this task runs, comma-"
                                   "separated; stored as `<id> <name>` refs "
                                   "(empty string clears)")
