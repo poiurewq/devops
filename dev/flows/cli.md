@@ -5,15 +5,29 @@ Full invocation patterns. SKILL.md keeps the short index and the append / error 
 ```
 TASKS --scope <subdir> <subcommand> ...   # target another board in the repo
                                           # (goes BEFORE the subcommand)
-TASKS init --name <handle> [--scope <subdir>] [--integration <branch>]
+TASKS init [--name <handle>] [--scope <subdir>] [--integration <branch>]
            [--parent <branch>] [--iteration N] [--iteration-name <name>]
            [--iteration-started YYYY-MM-DD]
-TASKS whoami [--role]                   # this checkout's identity (exits
+                                        # reads the GitHub login from gh. No
+                                        # --name: join as the handle that login
+                                        # holds (error if none). --name:
+                                        # register it, or fill its missing
+                                        # login; refused if the login is
+                                        # another handle or the handle another
+                                        # login's. Required to create a board.
+                                        # Refused when gh is missing, signed
+                                        # out or offline: no handle without a
+                                        # login
+TASKS whoami [--role | --github]        # this checkout's identity (exits
                                         # nonzero if not set); --role prints
                                         # this identity's board role instead,
                                         # 'integrator' or 'contributor' — the
                                         # only way to ask, never compare
-                                        # identities against board config
+                                        # identities against board config;
+                                        # --github prints the roster handle
+                                        # this machine's gh login holds (auto's
+                                        # identity), nonzero if gh is
+                                        # unreadable or the login unregistered
 TASKS config [<key> [<value>]]          # settable: parent_branch,
                                         # iteration (renumber live index;
                                         # refused if that n is archived),
@@ -29,6 +43,13 @@ TASKS integrator rm <name>              # revoke it; refused for the last one
                                         # (an empty roster blocks land for
                                         # everyone). Ungated: any contributor
                                         # may run add/rm
+TASKS contributor list                  # handles with GitHub logins, marks
+                                        # integrators and '(you)'
+TASKS contributor rm <name>             # yourself, or anyone as integrator;
+                                        # refused for the last integrator and
+                                        # for anyone assigned a task not done
+                                        # or not-planned. Also drops them from
+                                        # the integrator roster
 TASKS area list
 TASKS area set <name> [--desc "<one-line scope>"]
 TASKS area rm <name> [--force]
@@ -201,6 +222,9 @@ TASKS claim <id> [--assignee <who>] [--branch <b>] [--stack-on <id>]
                                         # (primary stays hub), status=doing;
                                         # prints workdir + product + verified
                                         # base (edit + compile/test/run in product)
+                                        # --auto <model-id>: auto only; marks
+                                        # the task auto:<model-id> while doing
+                                        # and refuses any other claim of it
 TASKS diff <id>                         # location + review diff from the
                                         # task worktree (not session cwd);
                                         # implement self-review / resume

@@ -19,8 +19,9 @@ One board per project, shared by every contributor — human or agent — across
 
 ```
 TASKS --scope <subdir> <subcommand> ...
-TASKS init --name <handle> [--scope <subdir>] [--integration <branch>]
+TASKS init [--name <handle>] [--scope <subdir>] [--integration <branch>]
 TASKS whoami
+TASKS contributor list | rm <name>      # rm: yourself, or anyone as integrator
 TASKS flow list [--all] [--json] | show <name> | runs <name>
       | create <name> --desc "<one line>" [--inputs "<a, b (hint)>"]
            [--uses "<flow, flow>"] [--body T | --file F]
@@ -67,7 +68,7 @@ TASKS config [<key> [<value>]]          # iteration, iteration_name,
                                         # iteration_started, parent_branch
 ```
 
-Caveats: `--append` adds to a body (no prior `show` needed, can't truncate); `--desc` **replaces** it — only for genuine rewrites. Flags combine in one call; an empty string (`--assignee ""`, `--flow ""`) clears a field; multi-word values need quoting. When no board is found the error lists known boards — cd in, or pass `--scope`. **Whenever a `TASKS` command exits non-zero or prints `error: …`, surface that output to the user verbatim and stop** — never hide it, paraphrase it away, or paper over it with hand-run git.
+Caveats: `--append` adds to a body (no prior `show` needed, can't truncate); `--desc` **replaces** it — only for genuine rewrites. Flags combine in one call; an empty string (`--assignee ""`, `--flow ""`) clears a field; multi-word values need quoting. When no board is found the error lists known boards — cd in, or pass `--scope`. **Whenever a `TASKS` command exits non-zero or prints `error: …`, surface that output to the user verbatim and stop** — never hide it, paraphrase it away, or paper over it with hand-run git. When `whoami` warns that a GitHub login is already another handle's, surface it and ask the user which of its fixes to run.
 
 ## Ground rules
 

@@ -15,7 +15,7 @@
    Read the resolved task's body and any `Decision:` lines. The last `Intent:` line is the task's intent (earlier ones are history). Then **preflight** its current state:
    - `backlog`/`planned`, unassigned or assigned to this user → proceed. Picking first is not required; the claim in step 2 assigns it.
    - Assigned to **someone else** → stop and say who owns it; proceed only if the user explicitly reassigns (`TASKS update <id> --assignee <who>`). A review handoff stays `review` — do not claim.
-   - `doing` → someone (possibly this user, in another session) is on it; confirm before touching it. A `waiting:` marker means it stopped at a flow's `[external]` step: ask whether the reply is in before resuming (step 4 *Following a flow*).
+   - `doing` → someone (possibly this user, in another session) is on it; confirm before touching it. An `auto:` marker means an auto run is working it in its own worktree: stop and say so — never resume into it (`claim` refuses). If the user says that run is dead, they take the task back with `TASKS update <id> --status backlog`, which clears the marker; then claim as usual. A `waiting:` marker means it stopped at a flow's `[external]` step: ask whether the reply is in before resuming (step 4 *Following a flow*).
    - `draft` assigned to this user → your PR is out but not handed to the integrator yet. Continuing it is the resume path (bottom); reviewing it before promoting is `/dev review <id>` (flows/review.md). Never run `TASKS ready` on your own initiative — promotion is the user's call.
    - `review` assigned to this user → this is the resume path (bottom).
    - `proposed` → not yet approved; route through flows/review.md first.

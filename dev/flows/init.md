@@ -20,13 +20,16 @@ If they accept, continue below. If they decline, point at `/dev help` for later 
 
 Works from whatever branch the user happens to be on: board writes go through the script's hidden worktree, never the checkout.
 
-Prerequisites: at least one commit (the script pins its board worktree to the integration branch's tip — on a brand-new repo, make an initial commit first) and a GitHub remote named `origin`. Without a remote, board commits just queue locally and PRs are impossible, so implement and review can't run; help the user add one before going further.
+Prerequisites: at least one commit (the script pins its board worktree to the integration branch's tip — on a brand-new repo, make an initial commit first), a GitHub remote named `origin`, and `gh` installed and signed in with a network connection — init reads the GitHub login and refuses without it (help the user `gh auth login` first). Without a remote, board commits just queue locally and PRs are impossible, so implement and review can't run; help the user add one before going further.
 
-1. **Identity**: ask for a short stable handle (suggest one derived from `git config user.name`, never from the board's integrator or contributors — those identities are likely someone else). Identity is product-local (`<scope>/.dev/identity`). Skip if that file already exists for the target product and the user isn't asking to change it. In a monorepo, each product board gets its own identity (same handle is fine — re-run init per product).
+1. **Identity**: a handle is tied to one GitHub login, and one login holds one handle per board. Read the login with `gh api user --jq .login`; init refuses when gh is missing, signed out or offline, so fix that first — there is no handle without a login. Identity is product-local (`<scope>/.dev/identity`). Skip if that file already exists for the target product and the user isn't asking to change it. In a monorepo, each product board gets its own identity (same handle is fine — re-run init per product).
+   - **Existing board**: run `TASKS init` with no `--name` first. When the login is on the roster it joins as that handle — tell the user which handle they are; no prompt. When it says the login is not on the roster, ask which applies: **new** to this board → ask for a handle, offering the login as the suggestion (their own contributor name is fine; it stays distinct from the login), then `TASKS init --name <handle>`; **already a contributor** under another GitHub account → `gh auth switch` to that account and re-run init.
+   - **New board**: ask for a handle the same way, login suggested.
+   - Never suggest a name from the board's roster — those are other people. Init refuses a handle another login holds, or a second handle for this login; surface that error and ask again.
 
 2. **Scope** (monorepo support): if the repo hosts multiple products and the user wants a board for a subdir, confirm which one and pass `--scope <subdir>`. Default (no `--scope`) is the nearest board at/above cwd, else the repo root (create path only). Day-to-day commands require cwd under the product or `--scope`. Don't create scoped boards unprompted — one root board is the norm for single-product repos.
 
-3. **Existing board** (`.tasks/board.yml` present for that scope): just run `TASKS init --name <handle>` — it joins and registers the contributor. Then check gh (step 5) and offer the tour (step 8). Done.
+3. **Existing board** (`.tasks/board.yml` present for that scope): the step 1 init joins it — registering a new contributor, or recording the login on a handle registered before logins were kept. Then check gh (step 5) and offer the tour (step 8). Done.
 
 4. **No board — adoption**:
    - *Integration branch*: propose the current or default branch; if the repo already uses iteration branches, ask which. Pass `--integration` (and `--parent`, `--iteration N`, `--iteration-name`, `--iteration-started` when applicable).

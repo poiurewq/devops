@@ -5,7 +5,7 @@ Covers `/ops run <id[, id…]>`, `/ops run <flow-name> [inputs]`, and `/ops run 
 ## 1. Resolve what to run
 
 - **Digits** (`/ops run 12`, `/ops run 12, 14`) → those task ids. Unknown id → stop and say so; never treat a number as a flow or as new work.
-- **A flow name** (matches something in `TASKS flow list`, closest-name resolution) → this is "run this procedure now". First `TASKS related "<flow name + description>"`: if an open task already names that flow, run it instead of filing a second. A task that ran the same flow **today** is usually the same run — say so and confirm before filing another, since some flows are dated by nature. Otherwise file one (`flows/add.md`, title from the flow's purpose), then run it.
+- **A flow name** (matches something in `TASKS flow list`, closest-name resolution) → this is "run this procedure now". First `TASKS related "<flow name + description>"`: if an open task already names that flow, run it instead of filing a second. Then `TASKS flow runs <name>`, which reads the archive too (`related` reads only the live board, so it misses a run a same-day iteration close already archived): a run dated **today** is usually the same run — say so and confirm before filing another, since some flows are dated by nature. Otherwise file one (`flows/add.md`, title from the flow's purpose), then run it.
 - **Anything else** → a description of work to do. File it through `flows/add.md`, then run it without asking again.
 - **Nothing** → show what is runnable (`TASKS list --type ops --status backlog`, plus `TASKS recur list --due`) and ask which.
 

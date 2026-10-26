@@ -24,6 +24,7 @@ setup, optionally stacked on another task's review tip), `ship`
 """
 import argparse
 import calendar
+import contextlib
 import datetime
 import difflib
 import glob
@@ -91,7 +92,10 @@ VIEWER_NAME = "board"
 # 9: shelved status (not needed for now; revivable, carried over as shelved).
 #    No new fields, but an older script refuses the value on update, drops
 #    those tasks from the board render, and reads one as unfinished at close.
-SCHEMA_VERSION = 9
+# 10: each `contributors` entry may carry its GitHub login, `handle (login)`
+#    (bare `handle` = login not recorded yet). An older script compares whole
+#    entries, so its init would re-register `Q` beside `Q (login)`.
+SCHEMA_VERSION = 10
 CONFIG_KEYS = ["schema_version", "integration_branch", "parent_branch",
                "iteration", "iteration_name", "iteration_started",
                "integrator", "contributors"]
@@ -118,13 +122,18 @@ OPS = "ops"
 # (dev or ops) carries it, and render_task drops it the moment the task
 # leaves doing, so every path out of doing clears it without knowing it
 # exists.
+# auto: optional, the model id of an auto run that claimed the task (`claim
+# --auto`). Same lifetime as waiting — only a doing task carries it — so
+# auto's fork un-claim, its ship to draft and a manual move to backlog all
+# clear it. While it is set, claim refuses anyone else's resume.
 FIELDS = ["id", "title", "area", "status", "kind", "type", "assignee", "branch",
-          "deps", "pr", "needs", "waiting", "flow", "created", "cadence",
-          "last_run", "next_due"]
+          "deps", "pr", "needs", "waiting", "auto", "flow", "created",
+          "cadence", "last_run", "next_due"]
 # Written only when non-empty, so an ordinary task file is byte-identical to
 # what a pre-schema-4 script produced. Older readers ignore them either way.
 # `type` is not among them: render always writes it (schema 8).
-OPTIONAL_FIELDS = ("waiting", "flow", "cadence", "last_run", "next_due")
+OPTIONAL_FIELDS = ("waiting", "auto", "flow", "cadence", "last_run",
+                   "next_due")
 # Board push races on a shared integration branch: rebase onto origin and
 # retry this many times before queueing locally.
 PUSH_RETRIES = 3
@@ -981,6 +990,176 @@ def is_integrator(ident, cfg):
     return ident in board_integrators(cfg)
 
 
+_CONTRIBUTOR_RE = re.compile(r"(.+?)\s*\(([^()]*)\)")
+
+
+def board_contributors(cfg):
+    """The contributor roster as (handle, login) pairs, in board order.
+
+    One comma-separated board.yml key; each entry is `handle (login)`, or a
+    bare `handle` whose GitHub login is not recorded yet (login ""). Callers
+    go through this and format_contributors; nothing else splits the field."""
+    out = []
+    for e in (cfg.get("contributors") or "").split(","):
+        e = e.strip()
+        if not e:
+            continue
+        m = _CONTRIBUTOR_RE.fullmatch(e)
+        out.append((m.group(1).strip(), m.group(2).strip()) if m else (e, ""))
+    return out
+
+
+def format_contributors(entries):
+    return ", ".join(f"{h} ({l})" if l else h for h, l in entries)
+
+
+def valid_handle(name):
+    return bool(name) and not any(c in name for c in ",()")
+
+
+def same_login(a, b):
+    # GitHub logins are case-insensitive.
+    return bool(a) and bool(b) and a.lower() == b.lower()
+
+
+def roster_join(entries, name, login):
+    """Resolve an init against the contributor roster. Pure: returns
+    (entries, handle, error); error is None on success, and entries is the
+    roster to write (unchanged when nothing needs recording).
+
+    One GitHub login maps to exactly one handle, and handles are unique
+    ignoring case (`Q` and `q` would read as one person). No name: the
+    login picks the handle, and the error names any login-less handles so
+    an existing contributor knows to record theirs. A name: registered, or
+    its missing login filled in — refused when the login is already another handle, or
+    the handle already belongs to another login. `login` is required: init
+    refuses before this when gh cannot read one, so no handle is ever taken
+    on trust."""
+    held = next((h for h, l in entries if same_login(l, login)), None)
+    if name is None:
+        if held is None:
+            bare = [h for h, l in entries if not l]
+            return entries, None, (
+                f"GitHub login '{login}' is not on this board's roster. "
+                + (f"Already on it as one of {', '.join(bare)} (no GitHub "
+                   "login recorded yet): init --name <that handle> records "
+                   "it. " if bare else "")
+                + f"New contributor: init --name <handle> (suggested: "
+                f"{login}). Already a contributor under another GitHub "
+                "account: gh auth switch to it, then re-run init")
+        return entries, held, None
+    if not valid_handle(name):
+        return entries, None, "handle must be non-empty and free of , ( )"
+    if held is not None and held != name:
+        return entries, None, (
+            f"GitHub login '{login}' is already '{held}' on this board (one "
+            f"GitHub account, one handle); run init without --name to join "
+            f"as '{held}'")
+    # Only a new handle is checked: a pre-existing case pair (a roster
+    # from before this rule) must still be able to record its logins.
+    clash = None if name in [h for h, _ in entries] else next(
+        (h for h, _ in entries if h.lower() == name.lower()), None)
+    if clash is not None:
+        return entries, None, (
+            f"handle '{name}' differs from '{clash}' only by case; pick "
+            f"another handle, or init --name {clash} if that one is yours")
+    for i, (h, l) in enumerate(entries):
+        if h != name:
+            continue
+        if same_login(l, login):
+            return entries, name, None
+        if l:
+            return entries, None, (
+                f"handle '{name}' belongs to GitHub login '{l}', not "
+                f"'{login}'; pick another handle, or gh auth switch to "
+                f"'{l}' if that account is yours")
+        return entries[:i] + [(h, login)] + entries[i + 1:], name, None
+    return entries + [(name, login)], name, None
+
+
+def login_backfill(entries, handle, login):
+    """Record `login` on `handle` when the roster has that handle with no
+    login yet. Pure: returns (entries, warning). Never registers a handle
+    and never replaces a recorded login. A login already held by another
+    handle changes nothing: only the user can tell which side is wrong, so
+    the warning asks them to settle it once."""
+    if not login or (handle, "") not in entries:
+        return entries, None
+    held = next((h for h, l in entries if same_login(l, login)), None)
+    if held is not None:
+        return entries, (
+            f"GitHub login '{login}' (gh's active account) is already "
+            f"'{held}' on this board, so it was not recorded for this "
+            f"checkout's handle '{handle}'. Ask the user which is right and "
+            f"settle it once: this checkout is really '{held}' -> init "
+            f"(no --name) to switch to it; '{held}' is a stale entry -> "
+            f"contributor rm {held}, then whoami again; gh is signed in to "
+            f"the wrong account -> gh auth switch. Until then this repeats "
+            f"on every whoami")
+    return [(h, login) if (h, l) == (handle, "") else (h, l)
+            for h, l in entries], None
+
+
+def record_missing_login(root, scope, handle):
+    """Fill this checkout's handle's missing GitHub login, best-effort.
+
+    Read the roster from the board worktree as last synced first, so a
+    handle whose login is on record costs no fetch and no gh call; only a
+    missing one syncs, reads gh (the active account, the one PRs are
+    opened as) and commits. Board or gh trouble skips silently — whoami
+    never fails over this. Output goes to stderr: whoami's stdout is the
+    handle callers read."""
+    yml = board_yml_path(os.path.join(root, board_worktree_rel(scope)), scope)
+    if os.path.exists(yml):
+        with open(yml) as f:
+            if (handle, "") not in board_contributors(parse_kv(f.read())):
+                return
+    try:
+        with contextlib.redirect_stdout(sys.stderr):
+            branch, bw = resolve_board(root, scope)
+            if missing_board_error(bw, scope, branch):
+                return
+            cfg = read_board_cfg(bw, scope)
+            old = board_contributors(cfg)
+            if (handle, "") not in old:
+                return
+            login, err = gh_login(root)
+            if err:
+                return
+            entries, warn = login_backfill(old, handle, login)
+            if warn:
+                print(f"warning: {warn}", file=sys.stderr)
+                return
+            cfg["contributors"] = format_contributors(entries)
+            write_board_cfg(bw, scope, cfg)
+            board_commit(root, branch, bw, scope,
+                         f"dev: record GitHub login for {handle}")
+    except (SystemExit, Exception):
+        # Best-effort by contract: nothing here may fail whoami.
+        return
+
+
+def gh_login(root):
+    """This machine's GitHub login via gh, as (login, None), or (None, why)
+    when gh is missing, signed out, or cannot reach GitHub. Identity hangs on
+    the login, so callers refuse rather than fall back to a bare handle."""
+    if not shutil.which("gh"):
+        return None, ("gh (GitHub CLI) is not installed; install it and run "
+                      "gh auth login — a board handle is tied to your GitHub "
+                      "login")
+    r = sh(["gh", "api", "user", "--jq", ".login"], cwd=root, check=False,
+           timeout=GIT_NETWORK_TIMEOUT_S)
+    login = r.stdout.strip() if r.returncode == 0 else ""
+    if login:
+        return login, None
+    if r.returncode == 4:  # gh's exit code for "authentication required"
+        return None, "gh is not signed in; run gh auth login, then re-run"
+    detail = (r.stderr or r.stdout or "").strip().splitlines()
+    return None, ("gh could not read your GitHub login"
+                  + (f" ({detail[0]})" if detail else "")
+                  + "; check the network and gh auth status, then re-run")
+
+
 def write_board_cfg(bw, scope, cfg):
     ensure_schema_version(cfg)
     lines = [f"{k}: {cfg.get(k, '')}" for k in CONFIG_KEYS]
@@ -1163,7 +1342,14 @@ def flow_run_entries(bw, scope, flow):
     uses, so a rename never loses history and two flows sharing an id are
     still told apart. A tagless record (a landed recurring run) counts when
     the task's own `flow` field points here. A task that points here with no
-    record yet is a run in flight, listed first with no date.
+    record of its own is labelled by status: in flight (listed first, no
+    date) only while doing/draft/review on the live board; a done task — a
+    landed dev run — is a normal run dated by its latest `Shipped` record
+    (undated, still listed, when it has none); any other status is left out,
+    since no run happened there (a resting recurring task's runs are its own
+    records). An archived doing/draft/review copy is left out too: a --carry
+    close puts the live run on the next board, and a --force close abandoned
+    it, so listing it would show one run twice or a dead one forever.
 
     A carried task (later or recurring, reseeded by iteration-new) is copied
     body and all, so its predecessor's records live in two files at once.
@@ -1214,22 +1400,31 @@ def flow_run_entries(bw, scope, flow):
                             "title": meta.get("title", ""),
                             "status": meta["status"], "text": text,
                             "archived": arch is not None})
-        if on_task and not found:
-            entries.append({"date": "", "label": label, "id": meta["id"],
+        live_run = arch is None and meta["status"] in IN_FLIGHT
+        if on_task and not found and (live_run or meta["status"] == "done"):
+            date = text = ""
+            shipped = collect_shipped(meta["body"])
+            if meta["status"] == "done" and shipped:
+                m = SHIPPED_PARTS_RE.match(" ".join(shipped[-1].split()))
+                date, text = m.group(1), m.group(2).strip()
+            entries.append({"date": date, "label": label, "id": meta["id"],
                             "title": meta.get("title", ""),
-                            "status": meta["status"], "text": "",
+                            "status": meta["status"], "text": text,
                             "archived": arch is not None})
-    entries.sort(key=lambda e: (e["date"] or "9999-99-99", e["id"]),
+    # In flight first, then newest first; an undated done run sinks last.
+    entries.sort(key=lambda e: (e["date"] or ("9999-99-99" if e["status"]
+                                              in IN_FLIGHT else ""), e["id"]),
                  reverse=True)
     return entries
 
 
 def format_flow_run(e, color=False):
     """One run line: when, which task, and what the record said."""
-    when = e["date"] or "in flight"
+    in_flight = not e["date"] and e["status"] in IN_FLIGHT
+    when = e["date"] or ("in flight" if in_flight else "no date")
     head = f"  {when:<10}  {e['label']} {e['title']}"
     if color:
-        shown = _ansi(_DIM if e["date"] else _STATUS_COLOR["doing"],
+        shown = _ansi(_STATUS_COLOR["doing"] if in_flight else _DIM,
                       f"{when:<10}")
         head = (f"  {shown}  {_status_ansi(e['status'], e['label'])} "
                 f"{e['title']}")
@@ -1603,7 +1798,7 @@ def render_task(meta):
             v = task_type(meta)
         elif k in OPTIONAL_FIELDS and not v:
             continue
-        elif k == "waiting" and not waiting_allowed(meta):
+        elif k in ("waiting", "auto") and not waiting_allowed(meta):
             continue
         lines.append(f"{k}: {v}")
     lines.append("---")
@@ -3842,6 +4037,18 @@ def resolve_stack_start(root, bw, scope, tid, parent_id, integration):
     return remote
 
 
+def claim_auto_refusal(meta, run):
+    """Error text when a claim would resume into a running auto agent's
+    work, else ''. Only auto may re-claim its own run (same model id); the
+    owner takes a dead run back by moving the task to backlog."""
+    held = task_auto(meta)
+    if not held or held == run:
+        return ""
+    return (f"error: T{meta['id']} is being worked by an auto run "
+            f"({held}); do not resume into its worktree. If that run is "
+            f"dead, take it back with: update {meta['id']} --status backlog")
+
+
 def cmd_claim(args):
     """Implement claim/setup: branch from origin/integration, always a
     linked worktree under .dev/worktrees (primary stays on integration as
@@ -3875,6 +4082,10 @@ def cmd_claim(args):
     if not split_areas(meta.get("area", "")):
         sys.exit(f"error: T{tid} has no area; set a real name "
                  f"(reuse or area set) before claim")
+    run = (args.auto or "").strip()
+    refusal = claim_auto_refusal(meta, run)
+    if refusal:
+        sys.exit(refusal)
 
     assignee = (args.assignee if args.assignee is not None else "").strip()
     if not assignee:
@@ -3907,6 +4118,11 @@ def cmd_claim(args):
     # Refresh meta after git work (board may have moved on shared integration).
     integration, bw = resolve_board(root, scope)
     meta = find_task(bw, scope, tid)
+    # An auto run may have claimed it during the git work: never overwrite
+    # its marker.
+    refusal = claim_auto_refusal(meta, run)
+    if refusal:
+        sys.exit(refusal)
     changes = []
     if meta["status"] != "doing":
         meta["status"] = "doing"
@@ -3917,6 +4133,9 @@ def cmd_claim(args):
     if meta.get("branch") != branch:
         meta["branch"] = branch
         changes.append(f"branch={branch}")
+    if run and meta.get("auto") != run:
+        meta["auto"] = run
+        changes.append(f"auto={run}")
     if changes:
         with open(meta["path"], "w") as f:
             f.write(render_task(meta))
@@ -4176,6 +4395,11 @@ SHIPPED_RE = re.compile(
     r"(?ims)^Shipped \(\d{4}-\d{2}-\d{2}\):.*?(?=\n[ \t]*\n|\Z)")
 
 
+# One shipped record, split into its date and text.
+SHIPPED_PARTS_RE = re.compile(r"^Shipped \((\d{4}-\d{2}-\d{2})\):[ \t]*(.*)$",
+                              re.S | re.I)
+
+
 def format_shipped(text, date=None):
     """One shipped record. Collapsed to a single paragraph so it parses back."""
     text = " ".join((text or "").split())
@@ -4297,6 +4521,12 @@ def task_waiting(t):
         return m.group(1), datetime.date.fromisoformat(m.group(2))
     except ValueError:
         return None
+
+
+def task_auto(t):
+    """Model id of the auto run working this task, else ''. Like waiting,
+    only a doing task carries one."""
+    return (t.get("auto") or "").strip() if waiting_allowed(t) else ""
 
 
 def waiting_sort_rank(t):
@@ -5378,7 +5608,11 @@ def cmd_init(args):
         except SystemExit:
             wt = root
         scope = nearest_scope(wt) or nearest_scope(root) or "."
-    write_local(root, scope, "identity", args.name)
+    # Before any side effect: a handle is tied to a GitHub login, so no
+    # login means no init (never a handle taken on trust).
+    login, err = gh_login(root)
+    if err:
+        sys.exit(f"error: {err}")
     p = os.path.join(root, tdir(scope), "board.yml")
     if args.integration:
         branch = args.integration
@@ -5399,6 +5633,13 @@ def cmd_init(args):
         append_ignore_line(exclude, line)
     branch, bw = resolve_board(root, scope)
     if not os.path.exists(board_yml_path(bw, scope)):
+        if args.name is None:
+            sys.exit("error: --name <handle> is required to create a board "
+                     f"(suggested: {login})")
+        entries, name, err = roster_join([], args.name, login)
+        if err:
+            sys.exit(f"error: {err}")
+        write_local(root, scope, "identity", name)
         os.makedirs(os.path.join(bw, tdir(scope)), exist_ok=True)
         idx = parse_positive_int(
             args.iteration if args.iteration is not None else 1, "iteration")
@@ -5412,7 +5653,8 @@ def cmd_init(args):
                "iteration": str(idx),
                "iteration_name": iname,
                "iteration_started": started,
-               "integrator": args.name, "contributors": args.name}
+               "integrator": name,
+               "contributors": format_contributors(entries)}
         write_board_cfg(bw, scope, cfg)
         gi = os.path.join(bw, ".gitignore")
         for line in ignore_lines:
@@ -5425,15 +5667,20 @@ def cmd_init(args):
                      f"{board_branch_name(scope)} but did not reach "
                      f"origin/{branch}. Fix the remote, then re-run init "
                      f"(or any board command) to flush the queue.")
-        print(f"initialized board '{scope}' on '{branch}' (integrator: {args.name})")
+        print(f"initialized board '{scope}' on '{branch}' (integrator: {name})")
     else:
         cfg = read_board_cfg(bw, scope)
-        roster = [c.strip() for c in cfg.get("contributors", "").split(",") if c.strip()]
-        if args.name not in roster:
-            cfg["contributors"] = ", ".join(roster + [args.name])
+        old = board_contributors(cfg)
+        entries, name, err = roster_join(old, args.name, login)
+        if err:
+            sys.exit(f"error: {err}")
+        write_local(root, scope, "identity", name)
+        if entries != old:
+            cfg["contributors"] = format_contributors(entries)
             write_board_cfg(bw, scope, cfg)
-            board_commit(root, branch, bw, scope,
-                         f"dev: register contributor {args.name}")
+            verb = ("register contributor" if len(entries) > len(old)
+                    else "record GitHub login for")
+            board_commit(root, branch, bw, scope, f"dev: {verb} {name}")
         print(f"joined board '{scope}' on '{branch}'")
         gi = os.path.join(bw, ".gitignore")
         if (not os.path.isdir(dest)
@@ -5445,7 +5692,7 @@ def cmd_init(args):
         print(f"viewer: skipped ({VIEWER_NAME} is a directory)")
     else:
         print(f"viewer: ./{VIEWER_NAME}  (r refresh, a by area, e expand, l latest, c check, f flows, q back/quit, arrows scroll, space/b page, type id↵)")
-    print(f"identity: {args.name}")
+    print(f"identity: {name} (GitHub: {login})")
     if scope != ".":
         print(f"note: commands target this board from inside '{scope}/' "
               f"(or pass --scope {scope})")
@@ -5457,11 +5704,39 @@ def cmd_whoami(args):
     if scope is None:
         sys.exit(f"error: no board found (no {TASKS_DIR}/board.yml from cwd up "
                  "to repo root). Run: tasks.py init --name <you>")
+    if args.github:
+        # Auto's identity: the human who owns this machine's gh login, read
+        # from the roster rather than the checkout, so agent work always
+        # traces to a registered person. Never registers anyone.
+        login, err = gh_login(root)
+        if err:
+            sys.exit(f"error: {err}")
+        branch, bw = resolve_board(root, scope)
+        cfg = read_board_cfg(bw, scope)
+        entries = board_contributors(cfg)
+        _, handle, err = roster_join(entries, None, login)
+        if err:
+            # The checkout's own handle may be on the roster without its
+            # login (joined before logins were recorded): record it there
+            # and act as that handle. Never registers anyone new.
+            ident = read_local(root, scope, "identity")
+            filled, warn = login_backfill(entries, ident, login)
+            if warn or filled == entries:
+                sys.exit(f"error: {warn or err}")
+            cfg["contributors"] = format_contributors(filled)
+            write_board_cfg(bw, scope, cfg)
+            with contextlib.redirect_stdout(sys.stderr):
+                board_commit(root, branch, bw, scope,
+                             f"dev: record GitHub login for {ident}")
+            handle = ident
+        print(handle)
+        return
     ident = read_local(root, scope, "identity")
     if ident is None:
         id_path = os.path.join(product_root(root, scope), ".dev", "identity")
         sys.exit(f"error: no identity set for this product "
                  f"({id_path}). Run: init --name <handle>")
+    record_missing_login(root, scope, ident)
     if args.role:
         # The board answers "am I an integrator?" so callers never have to
         # compare identities themselves — and so the roster's shape stays
@@ -5574,6 +5849,73 @@ def cmd_integrator(args):
     board_commit(root, branch, bw, scope,
                  f"dev: integrator {args.action} {name}")
     print(f"integrator: {', '.join(roster)}")
+
+
+def contributor_rm_refusal(ident, name, entries, integrators, tasks):
+    """Why `contributor rm <name>` must not run, or None. Pure.
+
+    Only the contributor themself or an integrator may remove a handle. The
+    last integrator stays (an empty integrator roster blocks land for
+    everyone), and so does anyone still assigned work that will carry on:
+    every status but done and not-planned, since later and shelved tasks
+    come back still assigned."""
+    if name not in [h for h, _ in entries]:
+        return (f"'{name}' is not a contributor "
+                f"({', '.join(h for h, _ in entries) or 'none'})")
+    if ident != name and ident not in integrators:
+        return (f"only '{name}' themself or a board integrator "
+                f"({', '.join(integrators) or 'unset'}) can remove them "
+                f"(whoami='{ident}')")
+    if integrators == [name]:
+        return (f"'{name}' is the only integrator; removing them would block "
+                "land for everyone. Add a replacement first: "
+                "TASKS integrator add <name>")
+    held = [t["id"] for t in tasks if t.get("assignee") == name
+            and t["status"] not in ("done", "not-planned")]
+    if held:
+        return (f"'{name}' still holds "
+                f"{', '.join(f'T{i}' for i in held)}; reassign or finish "
+                "those first (TASKS update <id> --assignee <who>)")
+    return None
+
+
+def cmd_contributor(args):
+    """Read the roster, or remove a handle from it. Joining is init's job,
+    since that is where the GitHub login is read."""
+    root, scope, branch, bw = ctx()
+    cfg = read_board_cfg(bw, scope)
+    entries = board_contributors(cfg)
+    integrators = board_integrators(cfg)
+    ident = read_local(root, scope, "identity")
+    if args.action == "list":
+        for h, l in entries:
+            tags = [f"github: {l or 'unknown'}"]
+            if h in integrators:
+                tags.append("integrator")
+            if h == ident:
+                tags.append("you")
+            print(f"{h}  ({', '.join(tags)})")
+        if not entries:
+            print("(no contributors registered)")
+        return
+    name = args.name.strip()
+    ident = identity_or_exit(root, scope)
+    err = contributor_rm_refusal(ident, name, entries, integrators,
+                                 all_tasks(bw, scope))
+    if err:
+        sys.exit(f"error: {err}")
+    cfg["contributors"] = format_contributors(
+        [(h, l) for h, l in entries if h != name])
+    if name in integrators:
+        cfg["integrator"] = ", ".join(n for n in integrators if n != name)
+    write_board_cfg(bw, scope, cfg)
+    board_commit(root, branch, bw, scope, f"dev: contributor rm {name}")
+    print(f"removed contributor '{name}'"
+          + (" (and from the integrator roster)" if name in integrators
+             else ""))
+    if name == ident:
+        print("note: this checkout's identity is still that handle; re-run "
+              "init to join as someone on the roster")
 
 
 def cmd_area(args):
@@ -6187,6 +6529,9 @@ def fmt_line(t, tasks, color=False):
     if t.get("assignee"):
         who = f"@{t['assignee']}"
         parts.append(_assignee_ansi(t["assignee"], who) if color else who)
+    if task_auto(t):
+        run = f"auto:{task_auto(t)}"
+        parts.append(_ansi(_DIM, run) if color else run)
     if t.get("needs"):
         flag = f"❓needs-{t['needs']}"
         parts.append(_ansi(_NEEDS, flag) if color else flag)
@@ -7362,9 +7707,12 @@ def reseed_later_tasks(bw, scope, old_index):
             "kind": t.get("kind") or "",
             # Carry the type: a recurring ops task that came back as a dev
             # task would be refused by `ran` and demand an area it must not
-            # have. `flow` is deliberately not carried — it records runs
-            # this new task has not done yet.
+            # have. `flow` is carried so the task keeps naming the flow it
+            # follows; run history stays right because a reseeded task with
+            # no record of its own is left out, and its inherited records
+            # are skipped through the `carried from` note.
             "type": task_type(t),
+            "flow": t.get("flow") or "",
             "cadence": t.get("cadence") or "",
             "last_run": t.get("last_run") or "",
             "next_due": t.get("next_due") or "",
@@ -7691,7 +8039,9 @@ def main():
     sub = p.add_subparsers(dest="cmd", required=True)
 
     s = sub.add_parser("init", help="set identity; create or join a board")
-    s.add_argument("--name", required=True)
+    s.add_argument("--name",
+                   help="your handle; omit to join an existing board as the "
+                        "handle your GitHub login (gh) is registered under")
     s.add_argument("--scope", default=argparse.SUPPRESS,
                    help="subdir (relative to repo root) whose board "
                    "to create/join; default: nearest board at/above cwd, else root")
@@ -7706,9 +8056,13 @@ def main():
     s.set_defaults(fn=cmd_init)
 
     s = sub.add_parser("whoami", help="print this checkout's identity")
-    s.add_argument("--role", action="store_true",
+    g = s.add_mutually_exclusive_group()
+    g.add_argument("--role", action="store_true",
                    help="print this identity's board role instead: "
                         "'integrator' or 'contributor'")
+    g.add_argument("--github", action="store_true",
+                   help="print the roster handle this machine's GitHub login "
+                        "(gh) holds; error if unreadable or not registered")
     s.set_defaults(fn=cmd_whoami)
 
     s = sub.add_parser("config", help="show or set board settings")
@@ -7724,6 +8078,15 @@ def main():
     m = isub.add_parser("rm", help="revoke the integrator role")
     m.add_argument("name")
     s.set_defaults(fn=cmd_integrator)
+
+    s = sub.add_parser("contributor",
+                       help="read or prune the board's contributor roster")
+    csub = s.add_subparsers(dest="action", required=True)
+    m = csub.add_parser("list", help="handles with their GitHub logins")
+    m = csub.add_parser("rm", help="remove a handle (yourself, or any as "
+                                   "integrator)")
+    m.add_argument("name")
+    s.set_defaults(fn=cmd_contributor)
 
     s = sub.add_parser("area", help="manage the board's area list")
     msub = s.add_subparsers(dest="action", required=True)
@@ -7979,7 +8342,7 @@ def main():
                        help="implement setup: branch + linked worktree, status=doing")
     s.add_argument("id", type=int)
     s.add_argument("--assignee",
-                   help="assignee (default: product identity; auto agents pass auto/<model>)")
+                   help="assignee (default: product identity)")
     s.add_argument("--branch",
                    help="task branch (default: recorded or dev/<scope?>-<id>-<slug>)")
     s.add_argument("--stack-on", type=int, metavar="ID",
@@ -7987,6 +8350,9 @@ def main():
                         "origin/<integration> (collisions exit 3, when this "
                         "task builds on that unmerged code); ship then bases "
                         "the PR on that branch")
+    s.add_argument("--auto", metavar="MODEL_ID",
+                   help="auto only: mark the task as worked by this auto "
+                        "run until it leaves doing (others' claims refuse)")
     s.set_defaults(fn=cmd_claim)
 
     s = sub.add_parser("diff",

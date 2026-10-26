@@ -23,7 +23,7 @@ At any prompt, `q` quits and nothing is changed; ctrl-C does the same.
 
 Useful flags: `--dry-run` prints the plan and changes nothing; `--home DIR` puts the clone elsewhere; `--root PATH` (repeatable) and `--skills dev,ops` skip the prompts; `--yes` takes the defaults without asking. The prompts come from your terminal, so they work even though the command above pipes the script into python. With no terminal at all (a CI job, cron), the installer still links into free paths but refuses to replace an existing install unless you pass `--yes`.
 
-Requires `git`, `python3`, and for board workflows `gh` (GitHub CLI) authenticated against the target repo.
+Requires `git`, `python3`, and `gh` (GitHub CLI) signed in — init ties your board handle to your GitHub login, for `/ops` too; `/dev` also needs it authenticated against the target repo.
 
 ### Self-contained copies
 

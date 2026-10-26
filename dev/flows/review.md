@@ -12,7 +12,7 @@ Three kinds of pending human judgment live on the board. You draft; the user dec
 
 After a PR state refresh (SKILL.md):
 1. **Implementation PRs**: tasks in `review` with a `pr` — each with one plain sentence of purpose, then whether the current user may land (the role check above says `integrator` → yes; otherwise review/approve only — do not `TASKS land`). Mention integrator only when it does. Ones already at `CHANGES_REQUESTED` are the assignee's move, not a review item. When several share a `Dev-batch:` line (or stack bases), group them and prefer `/dev review <ids…>` over landing one-by-one. Only `review` tasks belong on this line — a `draft` is not one, see below.
-2. **Your own drafts, and every `auto/…` one**: tasks in `draft` with a `pr` **assigned to this user or to an `auto/…` identity** — one plain sentence of purpose each, then that it is yours to review and `ready` (your own are also yours to finish). Nobody else will move them, so the inbox is where they surface — auto ships to draft, is barred from promoting, and has no next session, so its drafts would otherwise be seen by no one. **Another human's draft never appears here**: its author has not handed it over, and readying it for them is not yours to do (it is not a review item, not even an informational one).
+2. **Your own drafts**: tasks in `draft` with a `pr` **assigned to this user** — including ones an auto agent shipped as you (their shipped record ends `(auto, <model-id>)`; say so) — one plain sentence of purpose each, then that it is yours to review, finish and `ready`. Nobody else will move them, so the inbox is where they surface. **Another human's draft never appears here**: its author has not handed it over, and readying it for them is not yours to do (it is not a review item, not even an informational one).
 3. **Design forks**: `TASKS list --needs decision` — one plain sentence of purpose, then the open question in one line.
 4. **Proposed tasks**: `TASKS list --status proposed` — one plain sentence of purpose each; group by umbrella/goal if noted in their bodies.
 
@@ -56,14 +56,14 @@ Reading the reply:
 
 ## Reviewing a draft (`/dev review <id>` on a `draft` task)
 
-A draft is the **author's own** review loop, not the integrator's queue — it shows in its author's inbox and no other human's. The exception is a draft owned by an `auto/…` identity: auto cannot promote its own work and never returns, so any human reviewing the board owns it. Entry is that inbox line or an explicit `/dev review <id>`, usually in a fresh session after implement.
+A draft is the **author's own** review loop, not the integrator's queue — it shows in its author's inbox and no other human's. A draft auto shipped belongs to the human it ran as, like any of theirs. Entry is that inbox line or an explicit `/dev review <id>`, usually in a fresh session after implement.
 
 Review it exactly as an implementation PR (below) — `gh pr diff`, numbered findings and their proposal line (above), recommendation. Only the verdict differs:
 
 - **Needs work** → no `gh pr review` (it is the author's own branch): say what to fix and hand to the resume path in flows/implement.md. Fix on the branch and re-ship; a re-ship of a draft stays `draft`.
 - **Good** → `TASKS ready <id>` promotes it to `review` and marks the PR ready, putting it on the integrator's queue. The **user** calls that; an agent never promotes on its own judgment.
 
-**Integrator sugar**: when `TASKS whoami --role` prints `integrator` and the task's `assignee` is either this user or an `auto/…` identity (the check at the top), there is no handoff to wait for — after a **good** verdict, offer ready + land as one step on the proposal line, where `go` covers it (above), and on the user's go-ahead run `TASKS ready <id>` then `TASKS land <id>` in that order (land refuses a draft). Still one explicit go-ahead; never chain them silently.
+**Integrator sugar**: when `TASKS whoami --role` prints `integrator` and the task's `assignee` is this user, there is no handoff to wait for — after a **good** verdict, offer ready + land as one step on the proposal line, where `go` covers it (above), and on the user's go-ahead run `TASKS ready <id>` then `TASKS land <id>` in that order (land refuses a draft). Still one explicit go-ahead; never chain them silently.
 
 Pulling a promoted PR back off the queue is `TASKS unready <id>` (assignee or integrator only) — task back to `draft`, PR back to draft.
 
