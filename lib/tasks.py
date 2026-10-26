@@ -36,6 +36,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import unicodedata
 
 STATUSES = ["proposed", "backlog", "planned", "doing", "draft", "review",
             "done", "later", "shelved", "not-planned"]
@@ -1228,7 +1229,10 @@ def format_flow_run(e, color=False):
     when = e["date"] or "in flight"
     head = f"  {when:<10}  {e['label']} {e['title']}"
     if color:
-        head = f"  {when:<10}  {_ansi(_DIM, e['label'])} {e['title']}"
+        shown = _ansi(_DIM if e["date"] else _STATUS_COLOR["doing"],
+                      f"{when:<10}")
+        head = (f"  {shown}  {_status_ansi(e['status'], e['label'])} "
+                f"{e['title']}")
     bits = []
     if not e["date"]:
         bits.append(e["status"])
@@ -1244,7 +1248,8 @@ def format_flow_run(e, color=False):
 def flow_runs_text(bw, scope, flow, color=False):
     """`flow runs <name>` body: the header line plus every run."""
     entries = flow_run_entries(bw, scope, flow)
-    head = f"{flow['name']} (id {flow['id']})"
+    name = _ansi(_FLOW_NAME, flow["name"]) if color else flow["name"]
+    head = f"{name} (id {flow['id']})"
     if not flow_is_active(flow):
         head += " [retired]"
     n = len(entries)
@@ -1698,13 +1703,15 @@ def is_recurring(t):
     return (t.get("kind") or "").strip() == RECURRING
 
 
-# Statuses that stop a recurring task's clock: shelved pauses it, not-planned
-# retires it. Neither is ever due, and `recur ran` refuses both until revived.
-RECUR_STOPPED = ("shelved", "not-planned")
+# Statuses that stop a recurring task's clock: proposed is not approved yet,
+# later is not this iteration, shelved pauses it, not-planned retires it. None
+# is ever due, and `recur ran` refuses each until revived. Cadence, last_run
+# and next_due are kept, so the clock resumes when the status goes active.
+RECUR_STOPPED = ("proposed", "later", "shelved", "not-planned")
 
 
 def on_the_clock(t):
-    """A recurring task whose cadence is live (not shelved or retired)."""
+    """A recurring task whose cadence is live (status not in RECUR_STOPPED)."""
     return is_recurring(t) and t.get("status") not in RECUR_STOPPED
 
 
@@ -2171,12 +2178,14 @@ def flows_pane_text(bw, scope, color=False):
         if not group:
             continue
         if head:
-            lines.extend(["", head])
+            lines.extend(["", _ansi(_DIM, head) if color else head])
         for f in group:
             fid = f"{f['id']:>3}"
-            line = (f"{_ansi(_DIM, fid) if color else fid}  "
-                    f"{f['name'].ljust(width)}  "
-                    f"{f.get('description', '')}").rstrip()
+            name = f["name"].ljust(width)
+            if color:
+                fid = _ansi(_DIM, fid)
+                name = _ansi(_FLOW_NAME if head is None else _DIM, name)
+            line = f"{fid}  {name}  {f.get('description', '')}".rstrip()
             uses = split_names(f.get("uses"))
             if uses:
                 tail = f"uses {', '.join(uses)}"
@@ -2207,7 +2216,10 @@ def watch_flow_search_view(query, flows, color=False):
 
 
 def watch_flow_view(bw, scope, fid):
-    """One flow's file plus its run history, or None if no such id."""
+    """One flow's file plus its run history, or None if no such id.
+
+    Returns (page, line where the run history starts) — h scrolls there.
+    """
     flow = next((f for f in all_flows(bw, scope) if f["id"] == fid), None)
     if flow is None:
         return None
@@ -2216,7 +2228,8 @@ def watch_flow_view(bw, scope, fid):
             text = fh.read().rstrip()
     except OSError:
         text = render_flow(flow).rstrip()
-    return f"{text}\n\n{flow_runs_text(bw, scope, flow, color=_use_color())}"
+    runs = flow_runs_text(bw, scope, flow, color=_use_color())
+    return f"{text}\n\n{runs}", len(text.splitlines()) + 1
 
 
 def watch_missing_fid(fid, color=False):
@@ -2311,8 +2324,12 @@ def iteration_label(cfg):
     return f"{idx} — {name}" if name else str(idx)
 
 
-def title_prefix(idx, tid):
-    return f"[{int(idx)}/T{int(tid)}]"
+def title_prefix(idx, tid, scope="."):
+    """PR title / ship commit tag: '[n/T<id>]', or '[<scope> n/T<id>]' on a
+    scoped board so tasks from boards sharing one repo stay distinguishable
+    (same reason board commits carry their scope — scoped_message)."""
+    ref = f"{int(idx)}/T{int(tid)}"
+    return f"[{ref}]" if scope == "." else f"[{scope} {ref}]"
 
 
 # Schema-3 dirs are `{n}` or `{n}-{slug}`. Pre-3 leftovers are
@@ -4757,7 +4774,7 @@ def cmd_ship(args):
     idx = iteration_index(cfg)
     meta = find_task(bw, scope, args.id)
     tid = meta["id"]
-    prefix = title_prefix(idx, tid)
+    prefix = title_prefix(idx, tid, scope)
     branch = task_branch_name(meta)
     if not branch:
         if meta["status"] in OPEN_PR:
@@ -5805,6 +5822,11 @@ def cmd_recur(args):
         if not is_recurring(meta):
             sys.exit(f"error: T{meta['id']} is not a recurring task "
                      f"(kind: {meta.get('kind') or 'normal'})")
+        if meta["status"] == "proposed":
+            # Approving a proposal is a human call; never point at a status
+            # flip that would do it.
+            sys.exit(f"error: T{meta['id']} is proposed; its clock is stopped "
+                     f"until a human approves it")
         if not on_the_clock(meta):
             sys.exit(f"error: T{meta['id']} is {meta['status']}; its clock is "
                      f"stopped — revive it (--status backlog) before "
@@ -5960,7 +5982,7 @@ def cmd_wait(args):
     The work reached an [external] step: the task stays `doing` with its
     assignee (a dev task keeps its branch and its area locks), the
     `waiting` marker says who and by when (the board's flag and its
-    waiting row), and a `Waiting (<date>): …` record keeps the
+    index 📨 mark), and a `Waiting (<date>): …` record keeps the
     trace after the marker is gone. Re-running it moves the date. `--clear`
     is for the reply arriving mid-run; leaving doing clears it anyway.
     """
@@ -6102,6 +6124,7 @@ def cmd_collisions(args):
 
 # 16-color SGR. Paint-time only — never write these into TASKS.md.
 _DIM, _OK, _ERR, _NEEDS = "2", "32", "31", "33;1"
+_FLOW_NAME = "36"  # cyan: flow names in the flows pane
 _STATUS_COLOR = {
     "proposed": "2",      # dim
     "backlog": "34",      # blue
@@ -6165,11 +6188,11 @@ def fmt_line(t, tasks, color=False):
         who = f"@{t['assignee']}"
         parts.append(_assignee_ansi(t["assignee"], who) if color else who)
     if t.get("needs"):
-        flag = f"⚑needs-{t['needs']}"
+        flag = f"❓needs-{t['needs']}"
         parts.append(_ansi(_NEEDS, flag) if color else flag)
     w = task_waiting(t)
     if w:
-        flag = f"⚑waiting {w[0]} by {w[1].isoformat()}"
+        flag = f"📨waiting {w[0]} by {w[1].isoformat()}"
         sgr = _ERR if w[1] < datetime.date.today() else _NEEDS
         parts.append(_ansi(sgr, flag) if color else flag)
     if on_the_clock(t):
@@ -6199,13 +6222,35 @@ def recur_marker(t, today=None):
         return "⏰due now", _ERR
     if due <= (today or datetime.date.today()):
         return f"⏰due {due.isoformat()}", _ERR
-    return f"⏳{due.isoformat()}", _DIM
+    return f"↻{due.isoformat()}", _DIM
+
+
+def _fmt_id(t, color=False):
+    """One index id, carrying the same marks as its line: ↻ for a recurring
+    task on the clock (⏰ when due), then ❓ for an open needs, then 📨 for a
+    run waiting on a third party (T81↻❓📨). Emoji only for marks that ask for
+    attention (❓ 📨 ⏰); routine marks stay dimmable text glyphs (↻ ⊘ ⚙ ⇢ ☂).
+    Marks are plain text too so TASKS.md shows them; in color a due
+    recurring id or an overdue wait is red instead of its status color. A
+    stopped clock (RECUR_STOPPED) gets no recurring mark."""
+    tid = f"T{t['id']}"
+    red = False
+    if on_the_clock(t):
+        red = task_is_due(t)
+        tid += "⏰" if red else "↻"
+    if t.get("needs"):
+        tid += "❓"
+    w = task_waiting(t)
+    if w:
+        tid += "📨"
+        red = red or w[1] < datetime.date.today()
+    if not color:
+        return tid
+    return _ansi(_ERR, tid) if red else _status_ansi(t["status"], tid)
 
 
 def _fmt_ids(col, color=False):
-    if not color:
-        return " ".join(f"T{t['id']}" for t in col)
-    return " ".join(_status_ansi(t["status"], f"T{t['id']}") for t in col)
+    return " ".join(_fmt_id(t, color=color) for t in col)
 
 
 def _sort_by_status(col, status_order=None):
@@ -6219,43 +6264,6 @@ def _sort_by_status(col, status_order=None):
 
 def _fmt_count(col):
     return f"({len(col)})"
-
-
-def _recur_index_row(tasks, color=False):
-    """Extra index row listing recurring tasks, due first. [] when none.
-
-    Additional to the status/area rows, not a replacement — a recurring task
-    genuinely sits in backlog (or doing, or review) and stays on that row.
-    The duplication is what makes "what is on the clock" one line to read,
-    so a shelved or not-planned one (clock stopped) is left off.
-    """
-    col = sorted([t for t in tasks if on_the_clock(t)], key=recur_due_sort)
-    if not col:
-        return []
-    if not color:
-        return [("Recurring", " ".join(f"T{t['id']}" for t in col))]
-    ids = " ".join(_ansi(_ERR if task_is_due(t) else _DIM, f"T{t['id']}")
-                   for t in col)
-    return [("Recurring", ids, _DIM)]
-
-
-def _waiting_index_row(tasks, label, color=False):
-    """Index row of runs awaiting a third party, soonest expected-by first,
-    overdue ids in red. [] when none.
-
-    Like the Recurring row it repeats ids already on their status row: a
-    waiting run is still doing. It is what tells "can act on" from "can't".
-    """
-    col = sorted([t for t in tasks if task_waiting(t)],
-                 key=lambda t: (waiting_sort_rank(t), t["id"]))
-    if not col:
-        return []
-    if not color:
-        return [(label, " ".join(f"T{t['id']}" for t in col))]
-    today = datetime.date.today()
-    ids = " ".join(_ansi(_ERR if task_waiting(t)[1] < today else _DIM,
-                         f"T{t['id']}") for t in col)
-    return [(label, ids, _DIM)]
 
 
 def _index_block(rows):
@@ -6350,9 +6358,6 @@ def _board_by_status(tasks, expand=False, color=False, status_order=None):
         rhs = _fmt_count(col) if fold else _fmt_ids(col, color=color)
         sgr = _STATUS_COLOR.get(status) if color else None
         rows.append((_status_label(status), rhs, sgr))
-        if status == "doing":
-            rows.extend(_waiting_index_row(tasks, "  waiting", color=color))
-    rows.extend(_recur_index_row(tasks, color=color))
     lines = _index_block(rows)
     listed = _list_block(tasks, expand=expand, color=color,
                          status_order=order)
@@ -6409,8 +6414,6 @@ def _board_by_area(bw, scope, tasks, expand=False, color=False,
             if col:
                 sgr = _STATUS_COLOR.get(status) if color else None
                 rows.append((_status_label(status), _fmt_count(col), sgr))
-    rows.extend(_recur_index_row(tasks, color=color))
-    rows.extend(_waiting_index_row(tasks, "Waiting", color=color))
     lines = _index_block(rows)
     listed = _list_block(tasks, expand=expand, color=color,
                          status_order=status_order)
@@ -6621,7 +6624,10 @@ _ANSI_RE = re.compile(r"\033\[[0-9;]*m")
 
 
 def _visible_len(s):
-    return len(_ANSI_RE.sub("", s or ""))
+    """Terminal columns, not characters: a wide glyph (the ❓ 📨 ⏰ marks)
+    takes two, or wrap counts run short and the frame overflows."""
+    return sum(2 if unicodedata.east_asian_width(c) in "WF" else 1
+               for c in _ANSI_RE.sub("", s or ""))
 
 
 def _term_size():
@@ -6641,10 +6647,10 @@ def _rows_of(lines, cols):
 
 
 def _watch_help(by_area, expand, more_above=0, more_below=0, check=False,
-                showing=False, flows=False, search=False, latest=False,
+                history=False, flows=False, search=False, latest=False,
                 back=False):
-    """`showing`: output r re-runs is up. `back`: q steps back, not quits."""
-    r_key = "r re-run" if showing else "r refresh"
+    """`history`: the flows pane's h> prompt is open. `back`: q steps back."""
+    r_key = "r refresh"
     q_key = "q back" if back else "q quit"
     if search:
         # Every printable key is query text, so no letter shortcut is live.
@@ -6652,8 +6658,9 @@ def _watch_help(by_area, expand, more_above=0, more_below=0, check=False,
                                   more_above, more_below)
     if flows:
         return _watch_help_counts(
-            f"{r_key}  s search  f board  {q_key}  · type flow id↵  arrows"
-            f"  space/b page",
+            f"{r_key}  s search  f board  {q_key}"
+            f"  · {'history id↵  h close' if history else 'type flow id↵  h history'}"
+            f"  arrows  space/b page",
             more_above, more_below)
     other = "by status" if by_area else "by area"
     fold = "collapse" if expand else "expand"
@@ -6680,19 +6687,21 @@ def _watch_help_counts(help_line, more_above, more_below):
 
 def _watch_footer_lines(by_area, expand, buf, result,
                         more_above=0, more_below=0, check=False,
-                        showing=False, flows=False, search=False,
+                        history=False, flows=False, search=False,
                         latest=False, back=False):
     help_line = _watch_help(by_area, expand, more_above, more_below,
-                           check=check, showing=showing, flows=flows,
+                           check=check, history=history, flows=flows,
                            search=search, latest=latest, back=back)
     if _use_color():
         help_line = _ansi(_DIM, help_line)
     lines = ["", help_line]
-    if check or search or buf:
+    if check or search or history or buf:
         if search:
             lines.append(f"s> {buf}")
         elif check:
             lines.append(f"c> {buf}".rstrip())
+        elif history:
+            lines.append(f"h> {buf}".rstrip())
         else:
             lines.append(f"{'f> ' if flows else '> '}{buf}")
     if result:
@@ -6743,7 +6752,7 @@ def _watch_page_offsets(body, offset, body_rows, cols):
 
 
 def _paint_watch(out, by_area, expand, buf, result, offset, check=False,
-                 showing=False, flows=False, search=False, latest=False,
+                 history=False, flows=False, search=False, latest=False,
                  back=False):
     """Paint a terminal-height viewport.
 
@@ -6754,7 +6763,7 @@ def _paint_watch(out, by_area, expand, buf, result, offset, check=False,
     # First pass: footer without counts, so the body budget is stable.
     footer_rows = _rows_of(
         _watch_footer_lines(by_area, expand, buf, result,
-                            check=check, showing=showing, flows=flows,
+                            check=check, history=history, flows=flows,
                             search=search, latest=latest, back=back), cols)
     body_rows = max(1, rows - footer_rows)
     shown, offset, more_below = _window_lines(body, offset, body_rows, cols)
@@ -6764,7 +6773,7 @@ def _paint_watch(out, by_area, expand, buf, result, offset, check=False,
         footer_rows = _rows_of(
             _watch_footer_lines(by_area, expand, buf, result,
                                 more_above, more_below, check=check,
-                                showing=showing, flows=flows, search=search,
+                                history=history, flows=flows, search=search,
                                 latest=latest, back=back),
             cols)
         body_rows = max(1, rows - footer_rows)
@@ -6773,7 +6782,7 @@ def _paint_watch(out, by_area, expand, buf, result, offset, check=False,
         more_above = offset
     footer = _watch_footer_lines(by_area, expand, buf, result,
                                  more_above, more_below, check=check,
-                                 showing=showing, flows=flows, search=search,
+                                 history=history, flows=flows, search=search,
                                  latest=latest, back=back)
     _clear_screen()
     # No trailing newline: print() on the last row scrolls the first line off.
@@ -6833,6 +6842,8 @@ def cmd_board(args):
         last_tid = None
         last_kind = None  # "show" | "check" | "search" | None
         last_fid = None   # flows pane: the flow being shown
+        history_at = 0    # ...and the line its run history starts on
+        history_mode = False  # h> prompt: each flow id↵ opens at history
         last_query = ""   # the search last_kind "search" shows
         check_mode = False
         search_mode = False  # s> prompt open: printable keys are query
@@ -6858,8 +6869,10 @@ def cmd_board(args):
                                 last_fid, color=_use_color())
                             last_fid = None
                         else:
-                            display = view
+                            display, history_at = view
                             result = ""
+                            if history_mode:
+                                offset = history_at
                 elif last_kind == "check" and last_tid is not None:
                     result = watch_check_result(
                         last_tid, tasks, color=_use_color())
@@ -6887,8 +6900,7 @@ def cmd_board(args):
                         display, by_area, expand, buf, result, offset,
                         check=check_mode, flows=flows_mode,
                         search=search_mode, latest=latest_mode,
-                        showing=(last_fid is not None or bool(last_query))
-                        if flows_mode else last_kind is not None,
+                        history=history_mode,
                         back=bool(flows_mode or latest_mode or check_mode
                                   or buf or result
                                   or last_kind is not None))
@@ -6930,6 +6942,9 @@ def cmd_board(args):
                         if buf or (result and last_kind != "check"):
                             buf = ""
                             result = ""
+                            continue
+                        if history_mode:
+                            history_mode = False  # the page stays up
                             continue
                         offset = 0
                         if flows_mode:
@@ -6973,6 +6988,7 @@ def cmd_board(args):
                         last_fid = None
                         last_query = ""
                         check_mode = False
+                        history_mode = False
                         offset = 0
                         break
                     if not buf and key in "lL" and not flows_mode:
@@ -7012,6 +7028,7 @@ def cmd_board(args):
                     if not buf and key in ("s", "S"):
                         search_mode = True
                         check_mode = False
+                        history_mode = False
                         continue
                     if not buf and key in "cC" and not flows_mode:
                         check_mode = not check_mode
@@ -7050,7 +7067,9 @@ def cmd_board(args):
                                 continue
                             last_fid = fid
                             result = ""
-                            display = view
+                            display, history_at = view
+                            if history_mode:
+                                offset = history_at
                             continue
                         # In check mode tid is a list of ids (a group).
                         tid = (parse_watch_ids(buf) if check_mode
@@ -7089,6 +7108,12 @@ def cmd_board(args):
                         last_kind = "show"
                         result = ""
                         display = view
+                        continue
+                    if not buf and key in "hH" and flows_mode:
+                        # Like c: a toggle. On an open flow it also jumps.
+                        history_mode = not history_mode
+                        if history_mode and last_fid is not None:
+                            offset = history_at
                         continue
                     if not buf and key in "tT" and not flows_mode:
                         buf = key
@@ -7970,15 +7995,18 @@ def main():
     s.set_defaults(fn=cmd_diff)
 
     s = sub.add_parser("ship",
-                       help="implement ship: commit [n/T<id>], push, open "
-                            "draft PR, status=draft")
+                       help="implement ship: commit [n/T<id>] (scoped: "
+                            "[<scope> n/T<id>]), push, open draft PR, "
+                            "status=draft")
     s.add_argument("id", type=int)
     s.add_argument("--message", "-m",
                    help="commit message if worktree dirty "
-                        "(default: [n/T<id>] <title>)")
+                        "(default: [n/T<id>] <title>; scoped board: "
+                        "[<scope> n/T<id>] <title>)")
     s.add_argument("--title",
                    help="PR title on create only "
-                        "(default: [n/T<id>] <task title>)")
+                        "(default: [n/T<id>] <task title>; scoped "
+                        "board: [<scope> n/T<id>] <task title>)")
     s.add_argument("--body",
                    help="PR body on create only (default: task body)")
     s.add_argument("--version-intent",

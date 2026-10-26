@@ -2,7 +2,7 @@
 
 An iteration = one integration branch + its board. Task ids reset each iteration; the iteration itself is a positive integer. Cross-iteration references are `<n>/T<id>` (log.md lines are already written that way). A board with no `parent_branch` (typically integration is `main`) closes in place: archive, then start the next iteration on the same branch — no parent merge, no new integration branch. Branched iterations still land into the parent, then start on a new branch.
 
-**Identity is the integer.** `board.yml` `iteration` is `1`, `2`, `3`… (default 1 at init; `init --iteration N` to match a team already in progress). `iteration_name` is an optional display label. Archive dirs are `{n}-{slug}` (or `{n}` if unnamed); clash is on the number, not the slug. `iteration_started` is `YYYY-MM-DD`, stamped at init / iteration-new (today unless given) and settable so it can match an external calendar. Close writes `started:` / `closed:` lines under `## {n}` (or `## {n} — {name}`). Ship titles PRs `[n/T<id>] …`.
+**Identity is the integer.** `board.yml` `iteration` is `1`, `2`, `3`… (default 1 at init; `init --iteration N` to match a team already in progress). `iteration_name` is an optional display label. Archive dirs are `{n}-{slug}` (or `{n}` if unnamed); clash is on the number, not the slug. `iteration_started` is `YYYY-MM-DD`, stamped at init / iteration-new (today unless given) and settable so it can match an external calendar. Close writes `started:` / `closed:` lines under `## {n}` (or `## {n} — {name}`). Ship titles PRs `[n/T<id>] …` (`[<scope> n/T<id>] …` on a scoped board).
 
 ## `/dev iteration` — show
 

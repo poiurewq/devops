@@ -56,7 +56,7 @@ Record it rather than leaving it in the chat, which does not survive the session
 TASKS update <id> --needs decision --append "Question: <the call, the options, what is already known>"
 ```
 
-**The status stays `doing`** and the assignee stays yours — the run is open, just blocked, and the board shows it as `⚑needs-decision` so it reads as paused rather than active. Do not send it back to `backlog`; that would throw away the fact that a run is half-done. Say plainly that it is parked, what unblocks it, and that `/ops decide <id>` answers it and `/ops run <id>` picks the run back up.
+**The status stays `doing`** and the assignee stays yours — the run is open, just blocked, and the board shows it as `❓needs-decision` so it reads as paused rather than active. Do not send it back to `backlog`; that would throw away the fact that a run is half-done. Say plainly that it is parked, what unblocks it, and that `/ops decide <id>` answers it and `/ops run <id>` picks the run back up.
 
 The edge case is nobody being there to ask at all — a session ending mid-run, or a run driven asynchronously. Same mechanism. Either way, never park a question to avoid asking one.
 
@@ -84,7 +84,7 @@ TASKS wait <id> --on "<who>" --by YYYY-MM-DD --at "<step>" --record "<what was s
 
 `--on` is who it waits on, as the flow names them; `--by` is when the reply is expected — the turnaround they gave, or else ask the user. Never invent a date. `--record` says what they have (a reference number, the submission, where a copy lives), so the resume can match their reply to it. A third party that moves the date is the same call again with the new `--by`.
 
-**The status stays `doing`** and the assignee stays yours. The board flags the task `⚑waiting <who> by <date>` (red once overdue), lists it on the `waiting` row under Doing, and sorts it after the runs you can act on. Tell the user that `/ops run <id>` picks it back up once the reply is in; the marker clears itself when the task leaves `doing`. A wait the flow did not mark — a step turns out to need someone outside — is the same call, plus a note (`TASKS note <id> --at "<step>" "waits on <who>; no [external] mark"`) so the tweak in section 6 adds the mark.
+**The status stays `doing`** and the assignee stays yours. The board flags the task `📨waiting <who> by <date>` (red once overdue), marks its id `📨` on the Doing index row (`T81📨`), and sorts it after the runs you can act on. Tell the user that `/ops run <id>` picks it back up once the reply is in; the marker clears itself when the task leaves `doing`. A wait the flow did not mark — a step turns out to need someone outside — is the same call, plus a note (`TASKS note <id> --at "<step>" "waits on <who>; no [external] mark"`) so the tweak in section 6 adds the mark.
 
 ## 4. Running with no flow
 

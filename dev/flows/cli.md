@@ -154,14 +154,17 @@ TASKS list [--assignee <who>] [--status <s>] [--needs decision]
 TASKS recur list [--due]                # recurring tasks + derived due dates
                                         # (overdue and never-run first);
                                         # --due limits to due/overdue now;
-                                        # shelved/not-planned (clock
-                                        # stopped) are left out
+                                        # proposed/later/shelved/
+                                        # not-planned (clock stopped) are
+                                        # left out
 TASKS recur ran <id> [--date YYYY-MM-DD]
                                         # record a run with no PR: stamp
                                         # last_run (default today), re-arm to
                                         # backlog. Refused if branch or pr is
                                         # set — land owns that run — or
-                                        # if shelved/not-planned.
+                                        # while the clock is stopped
+                                        # (proposed/later/shelved/
+                                        # not-planned).
 TASKS board [--expand] [--by-area] [--watch]
                                         # index: one line per status (or
                                         # area) of task ids; then in-play
@@ -206,7 +209,8 @@ TASKS diff <id>                         # location + review diff from the
 TASKS ship <id> --shipped "<what actually shipped>"
                 [--message M] [--title T] [--body B]
                 [--version-intent <intent>] [--base <branch>]
-                [--batch <id,id,…>]     # commit if dirty ([n/T<id>] prefix),
+                [--batch <id,id,…>]     # commit if dirty ([n/T<id>] prefix;
+                                        # [<scope> n/T<id>] on a scoped board),
                                         # push, gh pr create --draft if none
                                         # open, status=draft + pr URL (a first
                                         # ship always lands in draft; only
