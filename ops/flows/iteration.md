@@ -21,7 +21,7 @@ An iteration is one stretch of work on the board plus the archive it leaves behi
 
 `TASKS iteration-new [--name <name>] [--iteration N] [--iteration-started <date>]`. Ask for a display name first; unnamed is allowed, but a name is what makes the archive readable later. The script refuses until the close has run.
 
-The new board starts empty except for what carries over on its own: tasks closed with `--carry` (status, assignee and record intact), tasks parked as `later`, shelved tasks (still shelved), and recurring tasks (a shelved one stays shelved). All are renumbered 1..N in their old order, and each gets a `carried from <n>/T<id>` note; links to tasks that did not come back are dropped. Do not re-add those by hand. Anything left behind by `--force` is re-filed through `flows/add.md`, reading it from `.tasks/archive/<n>-<slug>/`.
+The new board starts empty except for what carries over on its own: tasks closed with `--carry` (status, assignee and record intact), tasks parked as `later`, shelved tasks (still shelved), and recurring tasks (a shelved one stays shelved). All are renumbered 1..N in their old order, and each gets a `carried from <n>/T<id>` note; links to tasks that did not come back are dropped. A recurring task that was not `--carry`'d comes back without its per-run records (Ran, Shipped, Note, Paused, Waiting, `Inputs:`) or its older `carried from` notes; a shelved one keeps its records, since it may hold a paused run to resume, and loses only the old notes. The dropped records stay in the archive, and run history still lists them. Do not re-add those by hand. Anything left behind by `--force` is re-filed through `flows/add.md`, reading it from `.tasks/archive/<n>-<slug>/`.
 
 ## A board with a parent branch
 

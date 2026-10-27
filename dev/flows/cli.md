@@ -48,8 +48,10 @@ TASKS contributor list                  # handles with GitHub logins, marks
 TASKS contributor rm <name>             # yourself, or anyone as integrator;
                                         # refused for the last integrator and
                                         # for anyone assigned a task not done
-                                        # or not-planned. Also drops them from
-                                        # the integrator roster
+                                        # or not-planned, and for the last
+                                        # accessor of an agent or environment.
+                                        # Also drops them from the integrator
+                                        # roster and every accessor list
 TASKS area list
 TASKS area set <name> [--desc "<one-line scope>"]
 TASKS area rm <name> [--force]
@@ -85,6 +87,30 @@ TASKS flow retire <name>                # kept for the record; revive with
                                         # errors) — never a number, which is
                                         # always a task id. <new-name> is a
                                         # fresh slug and is never matched
+TASKS agent list [--json]               # name — description (accessors)
+TASKS agent show <name>                 # print the entry file
+TASKS agent add <new-name> --accessors "<handle, handle>" --desc "<who it is>"
+                                        # <new-name>: slug; project, runner,
+                                        # any are reserved, and so is every
+                                        # entry's former name. Accessors:
+                                        # contributor handles who can reach
+                                        # it now, at least one
+TASKS agent rename <name> <new-name>    # old name joins `formerly`, stays
+                                        # reserved and still matches
+TASKS agent update <name> [--accessors "<handle, …>"]  # REPLACES the list
+           [--desc "<who it is>"]
+TASKS agent rm <name>                   # frees all its names
+                                        # <name>: exact name or a former one
+                                        # (prints what it matched); no fuzzy
+TASKS env list [--json]                 # name — machine (accessors)
+TASKS env show <name>                   # print the entry file
+TASKS env add <new-name> --accessors "<handle, handle>"
+           [--machine <m>]              # the machine it lives on
+           [--expects "<prose>"]        # what a step can count on there
+                                        # same name and accessor rules as agent
+TASKS env update <name> [--accessors] [--machine <m>|""] [--expects]
+TASKS env rename <name> <new-name>
+TASKS env rm <name>
 TASKS add --title "<title>" [--area <m>] [--deps <id,id>]
           [--desc "<1–3 sentences>"] [--assignee <who>]
           [--kind umbrella|recurring]           # empty = normal
@@ -145,7 +171,8 @@ TASKS wait <id> --on "<who>" --by YYYY-MM-DD --at "<step>"
                 --record "<what was sent, where>"
                 [--flow <name[,name]>] [--date YYYY-MM-DD]
                                         # work stopped at an [external]
-                                        # step: sets waiting: <who> by
+                                        # step or a handed-off sequence
+                                        # (ops): sets waiting: <who> by
                                         # <date>, appends Waiting (<date>):
                                         # …, stays doing. Any doing task,
                                         # dev or ops; re-run moves the date.

@@ -118,7 +118,8 @@ OPS = "ops"
 # time. A record, not a pointer: lookups match on the id, so a flow rename
 # never rewrites a task. Set by `ran` (or `update --flow` at run start).
 # waiting: optional, `<who> by <YYYY-MM-DD>` — work stopped at an
-# [external] step, awaiting a third party. Set by `wait`; only a doing task
+# [external] step or a handed-off sequence, awaiting a third party or an
+# agent's report. Set by `wait`; only a doing task
 # (dev or ops) carries it, and render_task drops it the moment the task
 # leaves doing, so every path out of doing clears it without knowing it
 # exists.
@@ -1351,12 +1352,14 @@ def flow_run_entries(bw, scope, flow):
     close puts the live run on the next board, and a --force close abandoned
     it, so listing it would show one run twice or a dead one forever.
 
-    A carried task (later or recurring, reseeded by iteration-new) is copied
-    body and all, so its predecessor's records live in two files at once.
-    The `carried from <n>/T<id>` marker reseed leaves is what tells them
-    apart: a record the ancestor already holds is the ancestor's run, counted
-    where it happened and skipped here. Without that, every iteration close
-    would duplicate a recurring task's whole history.
+    A carried task (--carry, later, or a shelved recurring one, reseeded by
+    iteration-new) is copied body and all, so its predecessor's records live
+    in two files at once. The `carried from <n>/T<id>` marker reseed leaves
+    is what tells them apart: a record the ancestor already holds is the
+    ancestor's run, counted where it happened and skipped here. Without
+    that, every iteration close would duplicate a recurring task's whole
+    history. A recurring task reseeded without --carry and not shelved is
+    trimmed instead (trim_run_records), so it holds no inherited records.
     """
     names = {flow["name"]} | set(split_names(flow.get("formerly")))
     want = {f"{flow['id']} {n}" for n in names}
@@ -1643,6 +1646,7 @@ def cmd_flow(args):
         write_flow(meta)
         board_commit(root, branch, bw, scope, f"dev: flow create {name}")
         print(render_flow(meta).rstrip())
+        warn_sequence_names(bw, scope, meta["body"])
         return
     f = find_flow(bw, scope, args.name, flows)
     name = f["name"]
@@ -1677,6 +1681,7 @@ def cmd_flow(args):
         board_commit(root, branch, bw, scope,
                      f"dev: flow update {name} ({', '.join(changes)})")
         print(f"flow {name} updated: {', '.join(changes)}")
+        warn_sequence_names(bw, scope, f["body"])
         return
     if act == "rename":
         new = validate_flow_name((args.new_name or "").strip())
@@ -1742,6 +1747,306 @@ def cmd_flow(args):
         print(f"flow {name} retired (id {f['id']} keeps resolving its runs; "
               f"revive with flow update {name} --status active)")
         return
+
+
+# ---------- agent and environment registries ----------
+# <scope>/.flows/agents/<name>.md and <scope>/.flows/environments/<name>.md,
+# one entry per file. They sit under .flows/ because flows name them and,
+# like flows, they outlive iterations; board_commit stages them and the ship
+# guard refuses them with the rest of .flows/. all_flows globs only the top
+# level, so these subdirs are never read as flows.
+#   ---
+#   name: grok-bot
+#   accessors: Q, bob     (board contributors who can reach it now; never
+#                          empty, so every name leads to a human)
+#   description: one line, who it is            (agent only)
+#   machine: studio-mac                         (environment only, optional)
+#   formerly: old-name     (past names; still reserved, still resolve)
+#   created: 2026-10-27
+#   ---
+#   prose expectations                          (environment only)
+#
+# Accessors are a routing aid, not history: who ran an agent for a given run
+# lives in that run's record. There is no id: run records name an entry by
+# the name it had then, so unlike a flow's, a former name stays reserved
+# (add/rename refuse it) and keeps resolving for as long as the entry
+# exists. rm frees all of its names.
+
+REGISTRIES = {
+    "agent": {"dir": "agents", "label": "agent",
+              "fields": ["name", "accessors", "description", "formerly",
+                         "created"]},
+    "env": {"dir": "environments", "label": "environment",
+            "fields": ["name", "accessors", "machine", "formerly",
+                       "created"]},
+}
+# Words a flow uses for "whoever is running it" / "this repo" / "no
+# preference", so no entry may take them.
+REGISTRY_RESERVED = ("project", "runner", "any")
+
+
+def registry_dir(bw, scope, kind):
+    return os.path.join(bw, fdir(scope), REGISTRIES[kind]["dir"])
+
+
+def all_registry(bw, scope, kind):
+    out = []
+    for p in sorted(glob.glob(os.path.join(registry_dir(bw, scope, kind),
+                                           "*.md"))):
+        with open(p) as fh:
+            m = re.match(r"^---\n(.*?)\n---\n?(.*)$", fh.read(), re.DOTALL)
+        if not m:
+            sys.exit(f"error: malformed {REGISTRIES[kind]['label']} file {p}")
+        meta = parse_kv(m.group(1))
+        for k in REGISTRIES[kind]["fields"]:
+            meta.setdefault(k, "")
+        meta.update(kind=kind, body=m.group(2).strip(), path=p)
+        out.append(meta)
+    return out
+
+
+def write_registry(meta):
+    lines = ["---"] + [f"{k}: {meta.get(k, '')}"
+                       for k in REGISTRIES[meta["kind"]]["fields"]] + ["---"]
+    body = (meta.get("body") or "").strip()
+    with open(meta["path"], "w") as f:
+        f.write("\n".join(lines) + ("\n\n" + body + "\n" if body else "\n"))
+
+
+def registry_name_error(name):
+    """Why `name` cannot name an agent or environment, or None. Pure."""
+    if not FLOW_NAME_RE.match(name or "") or name.isdigit():
+        return (f"name '{name}' must be a slug: lowercase letters, digits, "
+                "hyphens (grok-bot), not a bare number")
+    if name in REGISTRY_RESERVED:
+        return (f"'{name}' is reserved ({', '.join(REGISTRY_RESERVED)} mean "
+                "something to a flow already)")
+    return None
+
+
+def registry_holder(entries, name):
+    """The entry holding `name` as its name or a former one, else None.
+    Pure. A current name wins over another entry's former one (which add
+    and rename never let arise, but a merged board might)."""
+    return (next((e for e in entries if e["name"] == name), None)
+            or next((e for e in entries
+                     if name in split_names(e.get("formerly"))), None))
+
+
+def registry_rename(e, new):
+    """Rename entry `e` in place to `new`: the old name joins `formerly`,
+    and `new` leaves it (renaming back to a former name). Pure."""
+    formerly = [n for n in split_names(e.get("formerly")) if n != new]
+    if e["name"] not in formerly:
+        formerly.append(e["name"])
+    e["formerly"] = ", ".join(formerly)
+    e["name"] = new
+    return e
+
+
+def accessors_error(accessors, handles):
+    """Why this accessor list cannot be written, or None. Pure."""
+    if not accessors:
+        return ("needs at least one accessor (--accessors \"<handle, …>\"): "
+                "every name has to lead to a contributor who can reach it")
+    unknown = [a for a in accessors if a not in handles]
+    if unknown:
+        return (f"accessors must be board contributors; not on the roster: "
+                f"{', '.join(unknown)} ({', '.join(handles) or 'none'})")
+    return None
+
+
+def last_accessor_of(entries, name):
+    """Entries `name` is the only accessor of, as 'agent x' labels. Pure."""
+    return [f"{REGISTRIES[e['kind']]['label']} {e['name']}" for e in entries
+            if split_names(e.get("accessors")) == [name]]
+
+
+def registry_line(e):
+    kind = e["kind"]
+    if kind == "agent":
+        what = e.get("description") or "(no description)"
+    else:
+        what = (f"machine: {e['machine']}" if e.get("machine")
+                else "(no machine)")
+    was = f"; formerly {e['formerly']}" if e.get("formerly") else ""
+    return (f"{e['name']} — {what} "
+            f"(accessors: {e.get('accessors') or 'none'}{was})")
+
+
+def cmd_registry(args):
+    root, scope, branch, bw = ctx()
+    kind = args.registry
+    label = REGISTRIES[kind]["label"]
+    entries = all_registry(bw, scope, kind)
+    act = args.action
+    if act == "list":
+        if args.json:
+            print(json.dumps([{k: e.get(k, "") for k in
+                               REGISTRIES[kind]["fields"] + ["body"]}
+                              for e in entries], indent=1))
+            return
+        for e in entries:
+            print(registry_line(e))
+        if not entries:
+            print(f"(no {label}s)")
+        return
+    name = (args.name or "").strip()
+    e = registry_holder(entries, name)
+    if act == "add":
+        err = registry_name_error(name)
+        if err:
+            sys.exit(f"error: {err}")
+        if e:
+            sys.exit(f"error: {label} " + (
+                f"'{name}' already exists" if e["name"] == name else
+                f"'{e['name']}' was formerly '{name}', so that name stays "
+                "reserved (run records may use it)"))
+        e = {"kind": kind, "name": name, "created":
+             datetime.date.today().isoformat(),
+             "path": os.path.join(registry_dir(bw, scope, kind), f"{name}.md")}
+        if kind == "agent" and not " ".join((args.desc or "").split()):
+            sys.exit("error: agent add needs --desc \"<one line: who it "
+                     "is>\"")
+    elif e is None:
+        have = ", ".join(x["name"] for x in entries) or "none"
+        sys.exit(f"error: no {label} '{name}' ({have}). See: {kind} list")
+    elif e["name"] != name:
+        print(f"matched {label} '{e['name']}' (formerly '{name}')",
+              file=sys.stderr)
+    if act == "show":
+        with open(e["path"]) as fh:
+            print(fh.read().rstrip())
+        return
+    if act == "rm":
+        os.remove(e["path"])
+        board_commit(root, branch, bw, scope, f"dev: {kind} rm {e['name']}")
+        freed = [e["name"]] + split_names(e.get("formerly"))
+        print(f"{label} '{e['name']}' removed (frees {', '.join(freed)})")
+        return
+    if act == "rename":
+        new = (args.new_name or "").strip()
+        old = e["name"]
+        err = registry_name_error(new)
+        if err:
+            sys.exit(f"error: {err}")
+        if new == old:
+            sys.exit(f"error: {label} is already named '{old}'")
+        held = registry_holder(entries, new)
+        if held is not None and held is not e:
+            sys.exit(f"error: '{new}' is held by {label} '{held['name']}'"
+                     + ("" if held["name"] == new else " as a former name"))
+        old_path = e["path"]
+        registry_rename(e, new)
+        e["path"] = os.path.join(registry_dir(bw, scope, kind), f"{new}.md")
+        os.replace(old_path, e["path"])
+        write_registry(e)
+        board_commit(root, branch, bw, scope, f"dev: {kind} rename {old} → {new}")
+        print(f"{label} {old} → {new} (formerly: {e['formerly']}; former "
+              "names stay reserved and still match)")
+        return
+    changes = []
+    if args.accessors is not None or act == "add":
+        acc = list(dict.fromkeys(split_names(args.accessors)))
+        handles = [h for h, _ in board_contributors(read_board_cfg(bw, scope))]
+        err = accessors_error(acc, handles)
+        if err:
+            sys.exit(f"error: {label} {err}")
+        e["accessors"] = ", ".join(acc)
+        changes.append("accessors")
+    if kind == "agent" and args.desc is not None:
+        desc = " ".join(args.desc.split())
+        if not desc:
+            sys.exit("error: an agent's description cannot be empty")
+        e["description"] = desc
+        changes.append("description")
+    if kind == "env" and args.machine is not None:
+        e["machine"] = args.machine.strip()
+        changes.append("machine")
+    if kind == "env" and args.expects is not None:
+        e["body"] = args.expects.strip()
+        changes.append("expectations")
+    if act == "update" and not changes:
+        sys.exit("error: nothing to update")
+    os.makedirs(os.path.dirname(e["path"]), exist_ok=True)
+    write_registry(e)
+    board_commit(root, branch, bw, scope,
+                 f"dev: {kind} {act} {e['name']}"
+                 + (f" ({', '.join(changes)})" if act == "update" else ""))
+    print(f"{label} '{e['name']}' {'added' if act == 'add' else 'updated'}: "
+          + registry_line(e))
+
+
+# ---------- flow sequences ----------
+# A flow body groups its steps into sequences: a markdown heading, then
+# labeled lines before the steps —
+#   ## Draft on the studio mac
+#   Environment: studio-mac
+#   Agent: grok-bot (usually)
+#   Needs: a signed-in browser
+#   Inputs: client
+#   Returns: the draft's URL
+# All of it is prose for whoever runs the flow. The script reads only the
+# first word of Agent: and Environment:, and only to warn on a name the
+# registries do not hold. No heading, or no label, means runner + project.
+
+SEQUENCE_LABEL_RE = re.compile(
+    r"^(Environment|Agent|Needs|Inputs|Returns):\s*(.*)$")
+
+
+def flow_sequences(body):
+    """[{'title', 'labels': {label: value}}] for each heading in a flow
+    body, labels read from the block of labeled lines right under it
+    (blank lines skipped). Pure."""
+    seqs, labels = [], None
+    for line in (body or "").splitlines():
+        s = line.strip()
+        if s.startswith("#"):
+            labels = {}
+            seqs.append({"title": s.lstrip("#").strip(), "labels": labels})
+            continue
+        if labels is None or not s:
+            continue
+        m = SEQUENCE_LABEL_RE.match(s)
+        if m:
+            labels.setdefault(m.group(1), m.group(2).strip())
+        else:
+            labels = None    # the steps began; later lines are not labels
+    return seqs
+
+
+def sequence_name_warnings(body, agents, envs):
+    """Warnings for Agent:/Environment: names the registries do not hold
+    as a current name: a former name says what it now points at, an
+    unknown one says so. Reserved words (runner, project, any) pass. Pure."""
+    out = []
+    for seq in flow_sequences(body):
+        for label, kind, entries in (("Agent", "agent", agents),
+                                     ("Environment", "env", envs)):
+            word = re.split(r"[\s(]", seq["labels"].get(label, ""), 1)[0]
+            name = word.rstrip(".,;:")
+            if not name or name in REGISTRY_RESERVED:
+                continue
+            e = registry_holder(entries, name)
+            if e is not None and e["name"] == name:
+                continue
+            what = REGISTRIES[kind]["label"]
+            where = f"sequence '{seq['title']}'"
+            if e is not None:
+                out.append(f"{what} '{name}' in {where} is a former name of "
+                           f"'{e['name']}'; write the current name")
+            else:
+                have = ", ".join(x["name"] for x in entries) or "none"
+                out.append(f"{where} names {what} '{name}', which the board "
+                           f"does not have ({have}); add it: {kind} add "
+                           f"{name} …")
+    return out
+
+
+def warn_sequence_names(bw, scope, body):
+    for w in sequence_name_warnings(body, all_registry(bw, scope, "agent"),
+                                    all_registry(bw, scope, "env")):
+        print(f"warning: {w}", file=sys.stderr)
 
 
 # ---------- task file format ----------
@@ -4491,10 +4796,11 @@ def format_note(text, refs, at, date=None):
     return f"Note ({date}): [{tag}] {text}" if tag else f"Note ({date}): {text}"
 
 
-# ---------- waiting record (work awaiting a third party) ----------
+# ---------- waiting record (work awaiting someone outside) ----------
 
-# A run (or a dev task following a flow) that reaches an [external] step —
-# the next move belongs to someone outside, days out — records who it waits
+# A run (or a dev task following a flow) that reaches an [external] step,
+# or a run that handed a sequence to an agent who reports later — the next
+# move belongs to someone outside, days out — records who it waits
 # on and when the reply is due:
 #   Waiting (2026-10-21): [7 file-permit step 5] on county clerk by
 #   2026-11-04 — application submitted via the portal…
@@ -4509,7 +4815,7 @@ def waiting_allowed(t):
 
 
 def task_waiting(t):
-    """(who, expected-by date) for a run awaiting a third party, else None.
+    """(who, expected-by date) for a run awaiting someone outside, else None.
 
     None too for a marker on a task that may not carry one, or one that does
     not parse — the board must never crash on a hand-edited file.
@@ -5851,14 +6157,16 @@ def cmd_integrator(args):
     print(f"integrator: {', '.join(roster)}")
 
 
-def contributor_rm_refusal(ident, name, entries, integrators, tasks):
+def contributor_rm_refusal(ident, name, entries, integrators, tasks,
+                           registries=()):
     """Why `contributor rm <name>` must not run, or None. Pure.
 
     Only the contributor themself or an integrator may remove a handle. The
     last integrator stays (an empty integrator roster blocks land for
     everyone), and so does anyone still assigned work that will carry on:
     every status but done and not-planned, since later and shelved tasks
-    come back still assigned."""
+    come back still assigned. So does the last accessor of an agent or
+    environment (`registries`), which would otherwise lead to nobody."""
     if name not in [h for h, _ in entries]:
         return (f"'{name}' is not a contributor "
                 f"({', '.join(h for h, _ in entries) or 'none'})")
@@ -5876,6 +6184,11 @@ def contributor_rm_refusal(ident, name, entries, integrators, tasks):
         return (f"'{name}' still holds "
                 f"{', '.join(f'T{i}' for i in held)}; reassign or finish "
                 "those first (TASKS update <id> --assignee <who>)")
+    only = last_accessor_of(registries, name)
+    if only:
+        return (f"'{name}' is the only accessor of {', '.join(only)}; add "
+                "another accessor (TASKS agent|env update <name> "
+                "--accessors …) or remove the entry first")
     return None
 
 
@@ -5900,10 +6213,21 @@ def cmd_contributor(args):
         return
     name = args.name.strip()
     ident = identity_or_exit(root, scope)
+    registries = all_registry(bw, scope, "agent") + all_registry(bw, scope,
+                                                                "env")
     err = contributor_rm_refusal(ident, name, entries, integrators,
-                                 all_tasks(bw, scope))
+                                 all_tasks(bw, scope), registries)
     if err:
         sys.exit(f"error: {err}")
+    # Accessors say who can reach an entry now, so a removed contributor
+    # leaves every list; the refusal above kept any list from emptying.
+    dropped = []
+    for e in registries:
+        acc = split_names(e.get("accessors"))
+        if name in acc:
+            e["accessors"] = ", ".join(a for a in acc if a != name)
+            write_registry(e)
+            dropped.append(f"{REGISTRIES[e['kind']]['label']} {e['name']}")
     cfg["contributors"] = format_contributors(
         [(h, l) for h, l in entries if h != name])
     if name in integrators:
@@ -5913,6 +6237,8 @@ def cmd_contributor(args):
     print(f"removed contributor '{name}'"
           + (" (and from the integrator roster)" if name in integrators
              else ""))
+    if dropped:
+        print(f"  dropped as accessor of: {', '.join(dropped)}")
     if name == ident:
         print("note: this checkout's identity is still that handle; re-run "
               "init to join as someone on the roster")
@@ -6319,9 +6645,10 @@ def cmd_pause(args):
 
 
 def cmd_wait(args):
-    """Mark doing work as waiting on a third party, or clear the mark.
+    """Mark doing work as waiting on someone outside, or clear the mark.
 
-    The work reached an [external] step: the task stays `doing` with its
+    The work reached an [external] step, or handed a sequence to an agent
+    whose report comes later: the task stays `doing` with its
     assignee (a dev task keeps its branch and its area locks), the
     `waiting` marker says who and by when (the board's flag and its
     index 📨 mark), and a `Waiting (<date>): …` record keeps the
@@ -6347,21 +6674,20 @@ def cmd_wait(args):
         return
     who = " ".join((args.on or "").split())
     if not who:
-        sys.exit(f"error: wait needs --on \"<who>\": the third party the run "
-                 f"now waits on")
+        sys.exit(f"error: wait needs --on \"<who>\": the third party or agent "
+                 f"the run now waits on")
     if not args.by:
         sys.exit("error: wait needs --by YYYY-MM-DD: when their reply is "
                  "expected")
     by = iso_date(args.by, "--by").isoformat()
     at = " ".join((args.at or "").split())
     if not at:
-        sys.exit("error: wait needs --at \"<step>\": the [external] step the "
-                 "run is waiting at")
+        sys.exit("error: wait needs --at \"<step>\": the [external] step, or "
+                 "the handed-off sequence's last step, the run waits at")
     text = " ".join((args.record or "").split())
     if not text:
         sys.exit(f"error: wait needs --record \"<what was sent, and where>\": "
-                 f"what the third party has, so the resume can pick up their "
-                 f"reply")
+                 f"what they have, so the resume can pick up their reply")
     refs = resolve_flow_refs(bw, scope, args.flow) if args.flow else []
     if not refs and meta.get("flow"):
         refs = [f"{i} {n}" for i, n in parse_flow_refs(meta["flow"])]
@@ -6573,7 +6899,7 @@ def recur_marker(t, today=None):
 def _fmt_id(t, color=False):
     """One index id, carrying the same marks as its line: ↻ for a recurring
     task on the clock (⏰ when due), then ❓ for an open needs, then 📨 for a
-    run waiting on a third party (T81↻❓📨). Emoji only for marks that ask for
+    run waiting on someone else (T81↻❓📨). Emoji only for marks that ask for
     attention (❓ 📨 ⏰); routine marks stay dimmable text glyphs (↻ ⊘ ⚙ ⇢ ☂).
     Marks are plain text too so TASKS.md shows them; in color a due
     recurring id or an overdue wait is red instead of its status color. A
@@ -7635,6 +7961,29 @@ def remap_dev_batch(body, mapping):
     return body[:start] + format_dev_batch(ids) + "\n" + body[end:]
 
 
+# Paragraphs that record one run of a recurring task: its outcome (Ran,
+# Shipped), what happened along the way (Note, Paused, Waiting) and what it
+# was given (Inputs — one run's values; the flow declares its own inputs).
+RUN_RECORD_PARA_RE = re.compile(
+    r"^(?:Ran \(\d{4}-\d{2}-\d{2}\)[:.]"
+    r"|(?:Shipped|Note|Paused|Waiting) \(\d{4}-\d{2}-\d{2}\):"
+    r"|Inputs:)")
+CARRIED_FROM_PARA_RE = re.compile(r"^carried from \d+/T\d+$")
+
+
+def trim_run_records(body, keep_runs=False):
+    """A recurring task's body for the copy reseeded onto the next board:
+    every `carried from` paragraph dropped (reseed appends the new one) and,
+    unless keep_runs, every per-run paragraph too. A shelved task keeps its
+    runs, since it may hold a paused run to resume. The archived copy keeps
+    everything, so run history still finds each record where it happened,
+    and a trimmed copy has nothing left to double."""
+    drop = [CARRIED_FROM_PARA_RE] + ([] if keep_runs else [RUN_RECORD_PARA_RE])
+    paras = [p.strip() for p in re.split(r"\n[ \t]*\n", body or "")]
+    return "\n\n".join(p for p in paras
+                        if p and not any(r.match(p) for r in drop))
+
+
 def reseed_later_tasks(bw, scope, old_index):
     """Copy carried, later, shelved and recurring tasks onto the live board.
 
@@ -7647,7 +7996,9 @@ def reseed_later_tasks(bw, scope, old_index):
     on anything else (done, not-planned) are dropped, since a missing id
     reads as an unfinished dep forever.
     A recurring task keeps its cadence, last_run and next_due, so its due
-    date survives the iteration boundary untouched.
+    date survives the iteration boundary untouched; its body loses its
+    older `carried from` lines and, unless shelved, its per-run records
+    (trim_run_records), which stay in the archive.
     Returns (carried, reseeded): each [(new_meta, old_id), ...] in old-id
     order.
     """
@@ -7687,8 +8038,13 @@ def reseed_later_tasks(bw, scope, old_index):
     for t in sorted(laters, key=lambda x: x["id"]):
         new_id = mapping[t["id"]]
         new_deps = [mapping[d] for d in t.get("deps", []) if d in mapping]
-        body = append_body(t.get("body") or "",
-                           f"carried from {old_index}/T{t['id']}")
+        # A recurring task at rest sheds its run records so its file stays
+        # short. A shelved one keeps them, and a --carry copy (above) stays
+        # whole: either may hold a run to resume from its Paused/Waiting/Inputs.
+        body = t.get("body") or ""
+        if is_recurring(t):
+            body = trim_run_records(body, keep_runs=t["status"] == "shelved")
+        body = append_body(body, f"carried from {old_index}/T{t['id']}")
         meta = {
             "id": new_id,
             "title": t.get("title") or "",
@@ -8139,6 +8495,38 @@ def main():
     m.add_argument("name")
     s.set_defaults(fn=cmd_flow)
 
+    for kind, r in REGISTRIES.items():
+        label = r["label"]
+        s = sub.add_parser(kind, help=f"the {label} registry "
+                                      f"(.flows/{r['dir']}/): named {label}s "
+                                      "flows can point at")
+        rsub = s.add_subparsers(dest="action", required=True)
+        m = rsub.add_parser("list", help=f"every {label}")
+        m.add_argument("--json", action="store_true")
+        for act in ("show", "rm"):
+            m = rsub.add_parser(act, help=f"{act} one {label}")
+            m.add_argument("name", help="its name or a former one")
+        m = rsub.add_parser("rename", help=f"rename one {label}; the old "
+                                           "name stays reserved")
+        m.add_argument("name", help="its name or a former one")
+        m.add_argument("new_name")
+        for act in ("add", "update"):
+            m = rsub.add_parser(act, help=f"{act} one {label}")
+            m.add_argument("name", help="slug: lowercase letters, digits, "
+                                        "hyphens; not project, runner, any"
+                                        + ("" if act == "add" else
+                                           " (a former name also matches)"))
+            m.add_argument("--accessors", help="comma-separated contributor "
+                                               "handles who can reach it now")
+            if kind == "agent":
+                m.add_argument("--desc", help="one line: who it is")
+            else:
+                m.add_argument("--machine", help="the machine it lives on "
+                                                 "(empty string clears)")
+                m.add_argument("--expects", help="prose: what a step can "
+                                                 "count on there")
+        s.set_defaults(fn=cmd_registry, registry=kind)
+
     s = sub.add_parser("add", help="add a task")
     s.add_argument("--title", required=True)
     s.add_argument("--area")
@@ -8239,12 +8627,13 @@ def main():
     s.set_defaults(fn=cmd_pause)
 
     s = sub.add_parser("wait",
-                       help="mark doing work as waiting on a third party; "
-                            "it stays doing")
+                       help="mark doing work as waiting on a third party "
+                            "or a handed-off agent; it stays doing")
     s.add_argument("id", type=int)
     s.add_argument("--on", help="who the run waits on")
     s.add_argument("--by", help="YYYY-MM-DD their reply is expected")
-    s.add_argument("--at", help="the [external] step the run waits at")
+    s.add_argument("--at", help="the [external] step (or the handed-off "
+                                "sequence's last step) the run waits at")
     s.add_argument("--record", help="what was sent to them and where it "
                                     "lives — recorded as Waiting (<date>): …")
     s.add_argument("--flow", help="flow name(s) being followed, comma-"
