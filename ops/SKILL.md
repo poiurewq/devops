@@ -22,6 +22,7 @@ TASKS --scope <subdir> <subcommand> ...
 TASKS init [--name <handle>] [--scope <subdir>] [--integration <branch>]
 TASKS whoami
 TASKS contributor list | rm <name>      # rm: yourself, or anyone as integrator
+      | rename <name> <new-name>       # same rule; the old handle stays reserved
 TASKS flow list [--all] [--json] | show <name> | runs <name>
       | create <name> --desc "<one line>" [--inputs "<a, b (hint)>"]
            [--uses "<flow, flow>"] [--body T | --file F]
@@ -143,7 +144,7 @@ Statuses for an ops task: `proposed` (filed for approval) → `backlog` → `pla
 | `/ops meta` | Read `flows/meta.md` (pressure the playbook and the board). |
 | `/ops skill …` | Read `flows/skill.md` (status, update, auto on/off, feedback). |
 
-Anything not in the table maps onto the closest verb: read the intent, do it, and name the verb once. Before any board operation, check identity with `TASKS whoami` — never probe the filesystem for it. Identity is per project (`<scope>/.dev/identity`), so run from the project directory or pass `--scope`. If `whoami` errors, run the init flow. Given a description instead of an id, run `TASKS list`, match, and confirm if it is not obvious.
+Anything not in the table maps onto the closest verb: read the intent, do it, and name the verb once. Before any board operation, check identity with `TASKS whoami` — never probe the filesystem for it. Identity is per project (`<scope>/.dev/identity`), so run from the project directory or pass `--scope`. If `whoami` errors, run the init flow. A handle is renamed with `TASKS contributor rename <name> <new-name>` (yourself, or anyone as integrator), never by re-joining: the old handle stays reserved and other checkouts follow on their next `whoami`. Given a description instead of an id, run `TASKS list`, match, and confirm if it is not obvious.
 
 ## Skill check
 

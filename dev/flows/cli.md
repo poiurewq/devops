@@ -52,6 +52,14 @@ TASKS contributor rm <name>             # yourself, or anyone as integrator;
                                         # accessor of an agent or environment.
                                         # Also drops them from the integrator
                                         # roster and every accessor list
+TASKS contributor rename <name> <new>   # yourself, or anyone as integrator.
+                                        # Renames on the roster, integrator
+                                        # roster, live task assignees and
+                                        # agent/env accessors (not archives
+                                        # or run records); the old handle
+                                        # stays reserved. A checkout whose
+                                        # identity is an old handle follows
+                                        # on whoami (last-synced roster)
 TASKS area list
 TASKS area set <name> [--desc "<one-line scope>"]
 TASKS area rm <name> [--force]

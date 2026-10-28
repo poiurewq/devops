@@ -1023,7 +1023,7 @@ def same_login(a, b):
     return bool(a) and bool(b) and a.lower() == b.lower()
 
 
-def roster_join(entries, name, login):
+def roster_join(entries, name, login, formers=None):
     """Resolve an init against the contributor roster. Pure: returns
     (entries, handle, error); error is None on success, and entries is the
     roster to write (unchanged when nothing needs recording).
@@ -1035,7 +1035,8 @@ def roster_join(entries, name, login):
     its missing login filled in — refused when the login is already another handle, or
     the handle already belongs to another login. `login` is required: init
     refuses before this when gh cannot read one, so no handle is ever taken
-    on trust."""
+    on trust. A handle in `formers` (board_former_handles) stays reserved
+    for the contributor who renamed away from it."""
     held = next((h for h, l in entries if same_login(l, login)), None)
     if name is None:
         if held is None:
@@ -1056,6 +1057,12 @@ def roster_join(entries, name, login):
             f"GitHub login '{login}' is already '{held}' on this board (one "
             f"GitHub account, one handle); run init without --name to join "
             f"as '{held}'")
+    was = former_holder(formers, name)
+    if was is not None and name not in [h for h, _ in entries]:
+        return entries, None, (
+            f"handle '{name}' is a former handle of '{was}' and stays "
+            f"reserved; pick another handle, or init without --name if "
+            f"'{was}' is you")
     # Only a new handle is checked: a pre-existing case pair (a roster
     # from before this rule) must still be able to record its logins.
     clash = None if name in [h for h, _ in entries] else next(
@@ -1099,6 +1106,106 @@ def login_backfill(entries, handle, login):
             f"on every whoami")
     return [(h, login) if (h, l) == (handle, "") else (h, l)
             for h, l in entries], None
+
+
+def board_former_handles(cfg):
+    """Renamed-away handles as {old: current}, from the additive
+    `former_handles` key (`old (current), …`; handles are free of , ( ), so
+    the same entry shape as `contributors` parses unambiguously). Kept out
+    of `contributors` so no schema bump: an older script preserves the key
+    and ignores it."""
+    out = {}
+    for e in (cfg.get("former_handles") or "").split(","):
+        m = _CONTRIBUTOR_RE.fullmatch(e.strip())
+        if m:
+            out[m.group(1).strip()] = m.group(2).strip()
+    return out
+
+
+def set_former_handles(cfg, formers):
+    if formers:
+        cfg["former_handles"] = ", ".join(f"{o} ({c})"
+                                          for o, c in formers.items())
+    else:
+        cfg.pop("former_handles", None)
+
+
+def former_holder(formers, name):
+    """The current handle that once was `name` (ignoring case), else None."""
+    return next((c for o, c in (formers or {}).items()
+                 if o.lower() == (name or "").lower()), None)
+
+
+def contributor_rename_refusal(ident, old, new, entries, integrators,
+                               formers):
+    """Why `contributor rename <old> <new>` must not run, or None. Pure.
+    Yourself or an integrator; `new` is a valid handle unique ignoring case
+    (`old` itself excepted, so a case-only rename works), and not a former
+    handle of anyone else — a former handle stays reserved."""
+    handles = [h for h, _ in entries]
+    if old not in handles:
+        was = former_holder(formers, old)
+        return (f"'{old}' is not a contributor"
+                + (f" (it is a former handle of '{was}')" if was else
+                   f" ({', '.join(handles) or 'none'})"))
+    if ident != old and ident not in integrators:
+        return (f"only '{old}' themself or a board integrator "
+                f"({', '.join(integrators) or 'unset'}) can rename them "
+                f"(whoami='{ident}')")
+    if not valid_handle(new):
+        return "handle must be non-empty and free of , ( )"
+    if new == old:
+        return f"'{old}' is already that handle"
+    clash = next((h for h in handles
+                  if h != old and h.lower() == new.lower()), None)
+    if clash is not None:
+        return f"handle '{new}' is taken by '{clash}' (handles are unique " \
+               "ignoring case)"
+    was = former_holder(formers, new)
+    if was is not None and was != old:
+        return (f"handle '{new}' is a former handle of '{was}' and stays "
+                "reserved")
+    return None
+
+
+def roster_rename(entries, integrators, formers, old, new):
+    """Apply a rename to the roster. Pure: returns (entries, integrators,
+    formers). The login stays with the handle; `old` joins the former
+    handles, every former handle of `old` now points at `new`, and `new`
+    leaves them (renaming back to a former handle)."""
+    entries = [(new if h == old else h, l) for h, l in entries]
+    integrators = [new if n == old else n for n in integrators]
+    formers = {o: (new if c == old else c) for o, c in formers.items()
+               if o.lower() != new.lower()}
+    formers[old] = new
+    return entries, integrators, formers
+
+
+def healed_identity(ident, entries, formers):
+    """The current handle when `ident` was renamed away from, else None."""
+    if not ident or ident in [h for h, _ in entries]:
+        return None
+    return formers.get(ident)
+
+
+def heal_renamed_identity(root, scope, ident):
+    """Follow a rename made elsewhere: when this checkout's identity is a
+    former handle in the last-synced roster, rewrite it to the current one.
+    No fetch and no gh call; a board not synced yet heals on a later run.
+    Notes go to stderr (whoami's stdout is the handle)."""
+    yml = board_yml_path(os.path.join(root, board_worktree_rel(scope)), scope)
+    if not ident or not os.path.exists(yml):
+        return ident
+    with open(yml) as f:
+        cfg = parse_kv(f.read())
+    new = healed_identity(ident, board_contributors(cfg),
+                          board_former_handles(cfg))
+    if new is None:
+        return ident
+    write_local(root, scope, "identity", new)
+    print(f"note: handle '{ident}' was renamed to '{new}'; this checkout's "
+          "identity now follows it", file=sys.stderr)
+    return new
 
 
 def record_missing_login(root, scope, handle):
@@ -4325,7 +4432,9 @@ def identity_or_exit(root, scope):
         id_path = os.path.join(product_root(root, scope), ".dev", "identity")
         sys.exit(f"error: no identity set for this product ({id_path}). "
                  "Run: init --name <handle> (or pass --assignee)")
-    return ident
+    # A rename made elsewhere must not let this checkout write its old
+    # handle as an assignee once the board has synced it.
+    return heal_renamed_identity(root, scope, ident)
 
 
 def resolve_stack_start(root, bw, scope, tid, parent_id, integration):
@@ -5995,7 +6104,8 @@ def cmd_init(args):
     else:
         cfg = read_board_cfg(bw, scope)
         old = board_contributors(cfg)
-        entries, name, err = roster_join(old, args.name, login)
+        entries, name, err = roster_join(old, args.name, login,
+                                         board_former_handles(cfg))
         if err:
             sys.exit(f"error: {err}")
         write_local(root, scope, "identity", name)
@@ -6060,6 +6170,7 @@ def cmd_whoami(args):
         id_path = os.path.join(product_root(root, scope), ".dev", "identity")
         sys.exit(f"error: no identity set for this product "
                  f"({id_path}). Run: init --name <handle>")
+    ident = heal_renamed_identity(root, scope, ident)
     record_missing_login(root, scope, ident)
     if args.role:
         # The board answers "am I an integrator?" so callers never have to
@@ -6211,13 +6322,14 @@ def contributor_rm_refusal(ident, name, entries, integrators, tasks,
 
 
 def cmd_contributor(args):
-    """Read the roster, or remove a handle from it. Joining is init's job,
-    since that is where the GitHub login is read."""
+    """Read the roster, rename a handle, or remove one. Joining is init's
+    job, since that is where the GitHub login is read."""
     root, scope, branch, bw = ctx()
     cfg = read_board_cfg(bw, scope)
     entries = board_contributors(cfg)
     integrators = board_integrators(cfg)
     ident = read_local(root, scope, "identity")
+    formers = board_former_handles(cfg)
     if args.action == "list":
         for h, l in entries:
             tags = [f"github: {l or 'unknown'}"]
@@ -6225,6 +6337,9 @@ def cmd_contributor(args):
                 tags.append("integrator")
             if h == ident:
                 tags.append("you")
+            was = [o for o, c in formers.items() if c == h]
+            if was:
+                tags.append(f"formerly {', '.join(was)}")
             print(f"{h}  ({', '.join(tags)})")
         if not entries:
             print("(no contributors registered)")
@@ -6233,6 +6348,10 @@ def cmd_contributor(args):
     ident = identity_or_exit(root, scope)
     registries = all_registry(bw, scope, "agent") + all_registry(bw, scope,
                                                                 "env")
+    if args.action == "rename":
+        contributor_rename(root, scope, branch, bw, cfg, ident, name,
+                           args.new_name.strip(), registries)
+        return
     err = contributor_rm_refusal(ident, name, entries, integrators,
                                  all_tasks(bw, scope), registries)
     if err:
@@ -6248,6 +6367,8 @@ def cmd_contributor(args):
             dropped.append(f"{REGISTRIES[e['kind']]['label']} {e['name']}")
     cfg["contributors"] = format_contributors(
         [(h, l) for h, l in entries if h != name])
+    # rm frees every name the handle held, like a registry entry's.
+    set_former_handles(cfg, {o: c for o, c in formers.items() if c != name})
     if name in integrators:
         cfg["integrator"] = ", ".join(n for n in integrators if n != name)
     write_board_cfg(bw, scope, cfg)
@@ -6260,6 +6381,54 @@ def cmd_contributor(args):
     if name == ident:
         print("note: this checkout's identity is still that handle; re-run "
               "init to join as someone on the roster")
+
+
+def contributor_rename(root, scope, branch, bw, cfg, ident, old, new,
+                       registries):
+    """Rename a handle everywhere it means a person now: the roster, the
+    integrator roster, assignees on the live board, and agent/env
+    accessors. Archives, run records and flow prose are history and keep
+    the old name; former_handles is what still ties it to `new`."""
+    entries = board_contributors(cfg)
+    integrators = board_integrators(cfg)
+    formers = board_former_handles(cfg)
+    err = contributor_rename_refusal(ident, old, new, entries, integrators,
+                                     formers)
+    if err:
+        sys.exit(f"error: {err}")
+    entries, integrators, formers = roster_rename(entries, integrators,
+                                                  formers, old, new)
+    reassigned = []
+    for t in all_tasks(bw, scope):
+        if t.get("assignee") == old:
+            t["assignee"] = new
+            with open(t["path"], "w") as f:
+                f.write(render_task(t))
+            reassigned.append(f"T{t['id']}")
+    accessed = []
+    for e in registries:
+        acc = split_names(e.get("accessors"))
+        if old in acc:
+            e["accessors"] = ", ".join(new if a == old else a for a in acc)
+            write_registry(e)
+            accessed.append(f"{REGISTRIES[e['kind']]['label']} {e['name']}")
+    cfg["contributors"] = format_contributors(entries)
+    cfg["integrator"] = ", ".join(integrators)
+    set_former_handles(cfg, formers)
+    write_board_cfg(bw, scope, cfg)
+    board_commit(root, branch, bw, scope,
+                 f"dev: contributor rename {old} -> {new}")
+    print(f"renamed contributor '{old}' to '{new}' ('{old}' stays reserved)")
+    if new in integrators:
+        print("  integrator roster updated")
+    if reassigned:
+        print(f"  assignee on: {', '.join(reassigned)}")
+    if accessed:
+        print(f"  accessor of: {', '.join(accessed)}")
+    if ident == old:
+        write_local(root, scope, "identity", new)
+        print(f"  this checkout's identity is now '{new}'; other checkouts "
+              "follow on their next whoami")
 
 
 def cmd_area(args):
@@ -8455,12 +8624,18 @@ def main():
     s.set_defaults(fn=cmd_integrator)
 
     s = sub.add_parser("contributor",
-                       help="read or prune the board's contributor roster")
+                       help="read, rename or prune the board's contributor "
+                            "roster")
     csub = s.add_subparsers(dest="action", required=True)
     m = csub.add_parser("list", help="handles with their GitHub logins")
     m = csub.add_parser("rm", help="remove a handle (yourself, or any as "
                                    "integrator)")
     m.add_argument("name")
+    m = csub.add_parser("rename", help="rename a handle (yourself, or any as "
+                                       "integrator); the old one stays "
+                                       "reserved")
+    m.add_argument("name")
+    m.add_argument("new_name")
     s.set_defaults(fn=cmd_contributor)
 
     s = sub.add_parser("area", help="manage the board's area list")
