@@ -26,7 +26,8 @@ TASKS flow list [--all] [--json] | show <name> | runs <name>
       | create <name> --desc "<one line>" [--inputs "<a, b (hint)>"]
            [--uses "<flow, flow>"] [--body T | --file F]
       | update <name> [--desc] [--inputs] [--uses] [--status active|retired]
-           [--body T | --file F] [--append "<paragraph>"]
+           [--body T | --file F] [--append "<paragraph>"]   # --append repeats,
+                                                            # one paragraph each, in order
       | rename <name> <new-name> | retire <name>     # names, never numbers
       | reid <name>                  # only when two boards minted one id
 TASKS agent list [--json] | show <name> | rm <name>
@@ -44,6 +45,7 @@ TASKS add --title "<title>" --type ops [--deps <id,id>]
           [--next-due <date>] [--status proposed|backlog|planned|later]
 TASKS update <id> [--title] [--status] [--assignee <who>|""] [--deps]
           [--needs decision|""] [--flow <name[,name]>|""] [--append "<paragraph>"]
+                                        # --append repeats, one paragraph each, in order
           [--desc "<new body>"] [--kind umbrella|recurring|""]
           [--cadence <N><unit>] [--next-due <date>|""] [--status later]
           [--status not-planned|shelved --reason "<why>"]

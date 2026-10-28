@@ -62,6 +62,8 @@ Reply "go", or say what to change.
 - Every adjustment is noted: `TASKS note <id> --at "<step>" "<what changed>"`. It is a departure from the flow, and the tweak pass reads it.
 - After you perform the irreversible act, show the result — that is the check. A `[user]` step that performs it needs none: their doing it is the check.
 
+**Nobody there to say `go`** — a run driven unattended or asynchronously — never passes a checkpoint on its own judgment. It parks the checkpoint as the open question (*Parking an open question*), writing the full `About to:` block into it — the payload itself, numbered — so whoever picks it up approves from the board: `TASKS update <id> --needs decision --append "Question: [step <n>] About to: 1. … · 2. … — go, or what to change?"`, `<n>` being the checkpoint's step — the place `/ops run <id>` carries on from. The status stays `doing`. A `go` recorded through `/ops decide` is the `go`: `/ops run <id>` then does exactly what the record shows. A decision that changes what goes out, or a payload that no longer matches the record when the run resumes, is shown again for a fresh `go`.
+
 ### Parking an open question
 
 A run can reach a call that is not yours to make — something with money, other people, or a commitment behind it. You are talking to someone, so **ask**. Parking is for the question they have seen and chosen not to answer yet: they want to check with someone, they do not have the figure, they want to sleep on it.

@@ -1673,7 +1673,8 @@ def cmd_flow(args):
             f["body"] = body
             changes.append("body")
         if args.append is not None:
-            f["body"] = append_body(f["body"], args.append)
+            for text in args.append:
+                f["body"] = append_body(f["body"], text)
             changes.append("append")
         if not changes:
             sys.exit("error: nothing to update")
@@ -6351,7 +6352,8 @@ def cmd_update(args):
         sys.exit(strand_err)
     today = datetime.date.today().isoformat()
     if args.append is not None:
-        meta["body"] = append_body(meta["body"], args.append)
+        for text in args.append:
+            meta["body"] = append_body(meta["body"], text)
         changes.append("append")
     if args.reason is not None:
         meta["body"] = append_body(
@@ -8483,7 +8485,9 @@ def main():
     m.add_argument("--status", help="active | retired")
     m.add_argument("--body", help="replace the procedure")
     m.add_argument("--file", help="replace the procedure from a file ('-' = stdin)")
-    m.add_argument("--append", help="append a paragraph to the procedure")
+    m.add_argument("--append", action="append",
+                   help="append a paragraph to the procedure (repeatable; "
+                        "each one is its own paragraph, in order)")
     m = fsub.add_parser("rename", help="rename a flow; the old name is free "
                                        "at once and kept as a matching hint")
     m.add_argument("name")
@@ -8563,8 +8567,9 @@ def main():
     s.add_argument("--flow", help="flow name(s) this task runs, comma-"
                                   "separated; stored as `<id> <name>` refs "
                                   "(empty string clears)")
-    s.add_argument("--append", help="append a paragraph to the body "
-                                    "(leaves existing text untouched)")
+    s.add_argument("--append", action="append",
+                   help="append a paragraph to the body (leaves existing text "
+                        "untouched; repeatable, each in order)")
     s.add_argument("--reason", help="why this task is not being pursued "
                                     "(or not needed for now); required with "
                                     "--status not-planned or shelved")

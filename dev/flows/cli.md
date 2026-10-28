@@ -71,7 +71,8 @@ TASKS flow create <new-name> --desc "<one line: what it does, when to use it>"
 TASKS flow update <name> [--desc] [--inputs] [--uses]
            [--status active|retired]
            [--body "<procedure>" | --file <path|->]   # REPLACE the procedure
-           [--append "<paragraph>"]     # add to the procedure
+           [--append "<paragraph>"]     # add to the procedure; repeatable,
+                                        # one paragraph each, in order
 TASKS flow rename <name> <new-name>     # old name is free at once and kept in
                                         # `formerly` as a matching hint; other
                                         # flows' `uses` follow, tasks' recorded
@@ -133,7 +134,9 @@ TASKS update <id> [--title "<t>"] [--area <m>] [--status <s>]
           [--flow <name[,name]>|""]             # flow(s) governing this task;
                                                 # names resolve to `<id>
                                                 # <name>` refs at write time
-          [--append "<paragraph>"]              # add to body, keeping it
+          [--append "<paragraph>"]              # add to body, keeping it;
+                                                # repeatable, one paragraph
+                                                # each, in order
           [--desc "<new body>"]                 # REPLACE whole body
           [--cadence <N><unit>] [--last-run YYYY-MM-DD|""]
                                                 # recurring only; the due date
