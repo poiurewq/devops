@@ -1782,8 +1782,9 @@ REGISTRIES = {
                        "created"]},
 }
 # Words a flow uses for "whoever is running it" / "this repo" / "no
-# preference", so no entry may take them.
-REGISTRY_RESERVED = ("project", "runner", "any")
+# preference" / "described right here in the sequence", so no entry may
+# take them.
+REGISTRY_RESERVED = ("project", "runner", "any", "inline")
 
 
 def registry_dir(bw, scope, kind):
@@ -1987,12 +1988,15 @@ def cmd_registry(args):
 #   Needs: a signed-in browser
 #   Inputs: client
 #   Returns: the draft's URL
-# All of it is prose for whoever runs the flow. The script reads only the
-# first word of Agent: and Environment:, and only to warn on a name the
-# registries do not hold. No heading, or no label, means runner + project.
+# `Environment: inline` describes a place no registry entry holds yet, on
+# its own `Expects:` and `Accessors:` lines.
+# All of it is prose for whoever runs the flow. The script reads the first
+# word of Agent: and Environment:, an inline sequence's Expects:, and the
+# handles on Accessors:, and only to warn. No heading, or no label, means
+# runner + project.
 
 SEQUENCE_LABEL_RE = re.compile(
-    r"^(Environment|Agent|Needs|Inputs|Returns):\s*(.*)$")
+    r"^(Environment|Agent|Needs|Inputs|Returns|Expects|Accessors):\s*(.*)$")
 
 
 def flow_sequences(body):
@@ -2016,23 +2020,35 @@ def flow_sequences(body):
     return seqs
 
 
-def sequence_name_warnings(body, agents, envs):
+def sequence_name_warnings(body, agents, envs, handles):
     """Warnings for Agent:/Environment: names the registries do not hold
     as a current name: a former name says what it now points at, an
-    unknown one says so. Reserved words (runner, project, any) pass. Pure."""
+    unknown one says so. Reserved words (runner, project, any, inline)
+    pass. Also an inline environment with no Expects:, and an Accessors:
+    handle that is not a board contributor. Pure."""
     out = []
     for seq in flow_sequences(body):
+        where = f"sequence '{seq['title']}'"
+        unknown = [h for h in split_names(seq["labels"].get("Accessors"))
+                   if h not in handles]
+        if unknown:
+            out.append(f"{where} lists accessors that are not board "
+                       f"contributors: {', '.join(unknown)} "
+                       f"({', '.join(handles) or 'none'})")
         for label, kind, entries in (("Agent", "agent", agents),
                                      ("Environment", "env", envs)):
             word = re.split(r"[\s(]", seq["labels"].get(label, ""), 1)[0]
             name = word.rstrip(".,;:")
+            if (kind == "env" and name == "inline"
+                    and not seq["labels"].get("Expects")):
+                out.append(f"{where} is inline but has no Expects: line; "
+                           "say what the place must provide")
             if not name or name in REGISTRY_RESERVED:
                 continue
             e = registry_holder(entries, name)
             if e is not None and e["name"] == name:
                 continue
             what = REGISTRIES[kind]["label"]
-            where = f"sequence '{seq['title']}'"
             if e is not None:
                 out.append(f"{what} '{name}' in {where} is a former name of "
                            f"'{e['name']}'; write the current name")
@@ -2045,8 +2061,9 @@ def sequence_name_warnings(body, agents, envs):
 
 
 def warn_sequence_names(bw, scope, body):
+    handles = [h for h, _ in board_contributors(read_board_cfg(bw, scope))]
     for w in sequence_name_warnings(body, all_registry(bw, scope, "agent"),
-                                    all_registry(bw, scope, "env")):
+                                    all_registry(bw, scope, "env"), handles):
         print(f"warning: {w}", file=sys.stderr)
 
 
