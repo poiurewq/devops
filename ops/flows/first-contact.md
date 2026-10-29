@@ -39,7 +39,7 @@ Every agent shows the same menu, so the user learns one map of the tool. Emit it
 | **See** | `/ops board` — the whole board · `/ops status` — your plate · `/ops show <id>` — one task |
 | **Add work** | `/ops add <task-or-goal>` — file something to be done · `/ops absorb <source>` — import a list of things to do |
 | **Do work** | `/ops pick <id>` — claim it for later · `/ops run <id[, id…]>` — run a task and record it · `/ops run <flow-name>` — run a flow now · `/ops run <description>` — file it and run it |
-| **Playbook** | `/ops flow list` — every flow · `/ops flow show <name>` — read one · `/ops flow runs <name>` — every run of it · `/ops flow adopt <source>` — take in one you already wrote · `/ops flow create` — write one (from a run, a conversation, or scratch) · `/ops flow edit <name> [<what>]` · `/ops flow retire <name>` |
+| **Playbook** | `/ops flow list` — every flow · `/ops flow show <name>` — read one · `/ops flow runs <name>` — every run of it · `/ops flow adopt <source>` — take in one you already wrote · `/ops flow create` — write one (from a run, a conversation, or scratch) · `/ops flow edit <name> [<what>]` · `/ops rehearse [<flow-name>]` — dry-run one before relying on it · `/ops flow retire <name>` |
 | **Registry** | `/ops agent list` — the agents flows hand work to · `/ops env list` — the places sequences run · `/ops agent add <name>` / `/ops env add <name>` — register one |
 | **Adjust** | `/ops change <id> <what>` · `/ops drop <id>` — decided against · `/ops delete <id>` |
 | **Decide** | `/ops decide` — open questions and proposed tasks waiting on you |

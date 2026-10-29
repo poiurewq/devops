@@ -129,6 +129,9 @@ TASKS add --title "<title>" [--area <m>] [--deps <id,id>]
           [--type ops|dev]                      # default dev; ops = run
                                                 # through /ops flows, and
                                                 # refuses --area
+          [--rehearsal]                         # ops only, never recurring:
+                                                # a dry run of its flow
+                                                # (rehearsal: true)
           [--status proposed|backlog|planned|later]  # default backlog
 TASKS update <id> [--title "<t>"] [--area <m>] [--status <s>]
           [--kind umbrella|recurring|""] [--assignee <who>|""]
@@ -141,7 +144,12 @@ TASKS update <id> [--title "<t>"] [--area <m>] [--status <s>]
                                                 # (one call, any flag order)
           [--flow <name[,name]>|""]             # flow(s) governing this task;
                                                 # names resolve to `<id>
-                                                # <name>` refs at write time
+                                                # <name>` refs at write time;
+                                                # an ops task entering doing
+                                                # is refused while the
+                                                # opposite kind (run vs
+                                                # rehearsal) of the same
+                                                # flow id is doing
           [--append "<paragraph>"]              # add to body, keeping it;
                                                 # repeatable, one paragraph
                                                 # each, in order
@@ -164,13 +172,17 @@ TASKS verify <id> "<how the children met the goal>"
                                         # required, and --status done on one
                                         # is refused in favour of this
 TASKS ran <id> --record "<inputs; deviations>"
-               [--flow <name[,name]>] [--date YYYY-MM-DD]
+               [--flow <name[,name]>] [--date YYYY-MM-DD] [--rehearsal]
                                         # close an ops task with its run
                                         # record (Ran (<date>): …); --flow
                                         # omitted keeps the task's flow
                                         # field. Recurring re-arms to backlog
                                         # instead of done. Refused on a dev
-                                        # task, or one with a branch/PR
+                                        # task, or one with a branch/PR.
+                                        # --rehearsal: a dry run, recorded
+                                        # Rehearsed (<date>): … (needs a
+                                        # flow; refused on a recurring task;
+                                        # required on a rehearsal: true one)
 TASKS pause <id> --at "<step>" --record "<what exists so far, where>"
                  [--flow <name[,name]>] [--date YYYY-MM-DD]
                                         # an ops run stopped partway:

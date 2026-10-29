@@ -10,7 +10,7 @@ Follow attention. Do not open with a tour of axes. Open with whatever looks wron
 
 Things a sitting may notice — not a checklist:
 
-- **A flow nobody runs.** `TASKS flow runs <name>` is empty, or the last run is old. Either the work stopped, the flow is not being found, or its description does not say what it is for. Ask which; the fix for the third is an edit, not a retirement.
+- **A flow nobody runs.** `TASKS flow runs <name>` is empty, or the last run is old — `[rehearsal]` entries do not count, so a flow that has only been rehearsed is one nobody runs. Either the work stopped, the flow is not being found, or its description does not say what it is for. Ask which; the fix for the third is an edit, not a retirement.
 - **A flow that deviates every time.** Recent `Ran:` records keep noting the same departure. The flow is describing a procedure nobody follows any more — propose the specific edit that makes it true again.
 - **An unguarded outward step.** A step that sends, pays, publishes, or deletes with no `[confirm]` step before it and not itself `[user]` — or `Note:` lines saying a run gated one. Propose the `[confirm]` step. The reverse too: a `[confirm]` whose next step is read-only, or a check after a step the user performed, is ceremony; propose dropping it.
 - **A description that no longer picks it.** Read each description as if choosing between flows for a task. Vague ones ("handles the monthly stuff") cause the wrong flow to be picked, and the symptom shows up as deviations elsewhere.

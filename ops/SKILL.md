@@ -1,6 +1,6 @@
 ---
 name: ops
-description: Playbook of flows plus the runs that follow them, on a shared task board inside the user's repo. Use for /ops and subcommands (init, tour, add, run, flow list/show/create/edit/retire, agent, env, status, board, show, change, drop, delete, meta), and whenever the user asks to run a procedure or checklist, follow or write a flow, record what a run did, or work a task that is not code.
+description: Playbook of flows plus the runs that follow them, on a shared task board inside the user's repo. Use for /ops and subcommands (init, tour, add, run, rehearse, flow list/show/create/edit/retire, agent, env, status, board, show, change, drop, delete, meta), and whenever the user asks to run a procedure or checklist, follow or write a flow, record what a run did, dry-run (rehearse) a flow, or work a task that is not code.
 ---
 
 # ops — procedures that run, recorded where they ran
@@ -44,6 +44,7 @@ TASKS add --title "<title>" --type ops [--deps <id,id>]
           [--desc "<1–3 sentences>"] [--assignee <who>]
           [--kind umbrella|recurring] [--cadence <N><unit>]
           [--next-due <date>] [--status proposed|backlog|planned|later]
+          [--rehearsal]                 # a dry run of its flow (rehearse.md)
 TASKS update <id> [--title] [--status] [--assignee <who>|""] [--deps]
           [--needs decision|""] [--flow <name[,name]>|""] [--append "<paragraph>"]
                                         # --append repeats, one paragraph each, in order
@@ -63,6 +64,7 @@ TASKS note <id> [--at "<step>"] "<what the flow did not predict>"
                                         # proposed/not-planned, done included
 TASKS ran <id> [--flow <name[,name]>] --record "<inputs; deviations>"
                [--date YYYY-MM-DD]   # close an ops task with its run record
+               [--rehearsal]         # a dry run: Rehearsed (<date>): …
 TASKS verify <id> "<how the children met the goal>"   # close an umbrella
 TASKS related "<text>"                  # run before every add
 TASKS list [--type ops] [--assignee <who>] [--status <s>] [--needs decision]
@@ -87,6 +89,7 @@ Caveats: `--append` adds to a body (no prior `show` needed, can't truncate); `--
 
 - **Ops changes the world, not the codebase.** A run sends the mail, files the form, updates the spreadsheet, moves the thing. It never edits, commits, or branches project code — no branches, no PRs, no review queue. A task that turns out to need code changes is not an ops task; say so and stop (see The boundary, below).
 - **Never edit `.tasks/` or `.flows/` by hand.** All board and flow reads/writes go through `TASKS`, which serializes every mutation through the integration branch on the remote — that is what makes the board conflict-free across machines. Bypassing it breaks the model.
+- **Secrets never reach the board.** Passwords, one-time codes, API keys and session tokens never go into a task, a flow, a registry entry, or any record on one (`Inputs:`, `Note:`, `Decision:`, `Shipped:`, `Ran:`, …): the board is git history, which every clone keeps for good. Sign-in state and secrets live in the environment itself — its browser session, keychain or password manager — so a flow step says "assumes signed in to <X>" instead of carrying the credential. Identifiers (a username, an account number) are not secrets and go on the board as they are — in a flow body, an `Inputs:` line, a note or a record — since the board is as private as the repo. Reread every free-text board write for anything secret-shaped before sending it. A secret that lands anyway is reported to the user at once and fixed by rotating it, never by rewriting board history.
 - **Humans decide; agents draft.** A run ends when the task's aim is met, not when the steps are exhausted — judged by the user, except for a clean run whose outcome the agent can show meets it (*Runs (inline)*). Flow creation, flow edits, and proposal approvals are theirs too. Surface the question and wait. A question they decline to answer now is recorded on the task (`TASKS update <id> --needs decision --append "Question: …"`), never left in the chat — that is what puts it in `/ops decide` (`flows/run.md`).
 - **Every run is recorded.** `TASKS ran <id> --record "…"` is what closes an ops task. The record says what the run was given and where it departed from the flow — it is the only durable trace of what happened, and it is what later makes a flow improvable.
 - **A flow is a procedure, not a policy.** Write the steps someone could follow, each marked `[agent]`, `[user]`, `[confirm]`, or `[external]` (*Step marks*, below). Do not write constraints, approvals, or non-goals the user did not state.
@@ -119,6 +122,7 @@ Statuses for an ops task: `proposed` (filed for approval) → `backlog` → `pla
 | `/ops run <id[, id…]>` | Read `flows/run.md` (preflight, flow choice, inputs, run, record). Several ids run one after another. |
 | `/ops run <flow-name> [inputs]` | Read `flows/run.md` — files a task for that flow first. |
 | `/ops run <description>` | Read `flows/run.md` — files via `flows/add.md` first, then runs it. |
+| `/ops rehearse [<flow-name>]` / "dry run <flow-name>" | Read `flows/rehearse.md` (no flow named → it asks which, offering likely candidates) — go through a new or changed flow once, with the user present, holding back its outward steps, then sharpen the flow from what it found. Its own task (`add --rehearsal`), closed with `ran --rehearsal`; while it is `doing`, the script refuses starting a real run of that flow, and the reverse. |
 | `/ops flow` / `/ops flow list` | `TASKS flow list` (`--all` includes retired). |
 | `/ops flow show <name>` | `TASKS flow show <name>`. |
 | `/ops flow runs <name>` | `TASKS flow runs <name>` — every run of it, newest first. |
@@ -156,9 +160,9 @@ A run is one execution against one task, and it ends inside the same session it 
 
 - **Every flow declares its inputs, and a run must have all of them.** Missing ones are asked for before the first step, in the user's words, and recorded on the task (`TASKS update <id> --append`) so the run is reproducible and the record is honest.
 - **Checkpoints belong to the user.** Honour the flow's step marks, and gate every outward or hard-to-undo step on a `go` even when the flow forgot the `[confirm]` before it (*Step marks*, below). Whatever the flow says, a run always ends with one overall check against the task's last `Intent:` line — the user's aim in their words. A **clean run** closes without asking: every step went as the flow says (no deviation notes, corrections or handoffs), nothing outward happened without an explicit `go`, and the outcome is checkable against the intent with evidence you show. Any other run asks whether the outcome meets the intent, and closes only on a yes. Either way the closing message shows the outcome against the intent, so the user can object (`flows/run.md` *Closing*).
-- **Note what the flow did not predict.** A step the user did themselves, a step inserted mid-run, a correction: each gets `TASKS note <id> --at "<step>" "<what>"` when it happens. Steps that went as written get nothing — a note is the exception, so task bodies stay light. Notes are what the closing record's deviations, the post-run flow tweak, and `flow create from <id>` read; one remembered after the close still goes on the task. A `file:` note records a file left outside the project; it is not a deviation, and none of those three reads it.
+- **Note what the flow did not predict.** A step the user did themselves, a step inserted mid-run, a correction: each gets `TASKS note <id> --at "<step>" "<what>"` when it happens. Steps that went as written get nothing — a note is the exception, so task bodies stay light. Notes are what the closing record's deviations, the post-run flow tweak, and `flow create from <id>` read; one remembered after the close still goes on the task. A `file:` note records a file left outside the project, a `draft:` note something left unsubmitted on an external platform, and a `left:` note something a rehearsal could not clean up; none is a deviation, and none of those three reads them.
 - **Only the runner writes the board.** Before the first step the runner checks itself against every sequence's `Needs:` and `Environment:` and says which need a handoff. One it cannot do passes the run to a capable agent (a pause it resumes from), goes to another agent as a self-contained brief (every agent gets the brief, this skill or not) whose report comes back to the runner (a `wait` on `<agent> via <contributor>` when it comes later), or, with nobody capable reachable, to the user by hand. Each handoff is noted as it happens, naming the agent and the contributor it was reached through (`direct` when none — the assignee is accountable), and the closing record names them (`flows/run.md` *Handoffs*).
-- **Closing is `TASKS ran <id> --flow <names> --record "<inputs; deviations>"`** — one call that stamps which flows ran, appends `Ran (<date>): …` to the task body, and closes the task (a recurring one re-arms to `backlog` with its next due date instead).
+- **Closing is `TASKS ran <id> --flow <names> --record "<inputs; deviations>"`** — one call that stamps which flows ran, appends `Ran (<date>): …` to the task body, and closes the task (a recurring one re-arms to `backlog` with its next due date instead). A rehearsal closes with `--rehearsal`, which writes `Rehearsed (<date>): …` instead, so it never passes for a real run: `flow runs` lists it marked `[rehearsal]`, and it is refused on a recurring task.
 - **Then improve the flow.** After the task is closed, re-read each flow that ran against what actually happened and offer small fixes on the spot (`flows/run.md`). Runs are where a flow's rough edges show. Tweaks come after closing so they never hold up the user's task.
 - **No flow yet?** The run is still a run: it proceeds in chunks the user verifies, each noted on the task as it is verified. At the end, offer to turn it into a flow (`/ops flow create from <id>`).
 

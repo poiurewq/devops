@@ -117,6 +117,10 @@ OPS = "ops"
 # separated (`7 send-invoice, 3 prep-agenda`), the name as it was at the
 # time. A record, not a pointer: lookups match on the id, so a flow rename
 # never rewrites a task. Set by `ran` (or `update --flow` at run start).
+# rehearsal: optional, `true` on an ops task that is a dry run of its flow
+# (`add --rehearsal`). The field, not the `Rehearse ` title, is what makes a
+# task one: `update` refuses a real run and a rehearsal of the same flow id
+# both being doing (rehearsal_clash_refusal).
 # waiting: optional, `<who> by <YYYY-MM-DD>` — work stopped at an
 # [external] step or a handed-off sequence, awaiting a third party or an
 # agent's report. Set by `wait`; only a doing task
@@ -128,13 +132,13 @@ OPS = "ops"
 # auto's fork un-claim, its ship to draft and a manual move to backlog all
 # clear it. While it is set, claim refuses anyone else's resume.
 FIELDS = ["id", "title", "area", "status", "kind", "type", "assignee", "branch",
-          "deps", "pr", "needs", "waiting", "auto", "flow", "created",
-          "cadence", "last_run", "next_due"]
+          "deps", "pr", "needs", "waiting", "auto", "flow", "rehearsal",
+          "created", "cadence", "last_run", "next_due"]
 # Written only when non-empty, so an ordinary task file is byte-identical to
 # what a pre-schema-4 script produced. Older readers ignore them either way.
 # `type` is not among them: render always writes it (schema 8).
-OPTIONAL_FIELDS = ("waiting", "auto", "flow", "cadence", "last_run",
-                   "next_due")
+OPTIONAL_FIELDS = ("waiting", "auto", "flow", "rehearsal", "cadence",
+                   "last_run", "next_due")
 # Board push races on a shared integration branch: rebase onto origin and
 # retry this many times before queueing locally.
 PUSH_RETRIES = 3
@@ -1431,10 +1435,11 @@ def flow_ref_holders(bw, scope, flow):
 
 # One run record, split: Ran (<date>): [<refs>] <text>. The refs tag is
 # what format_ran writes; a landed recurring run leaves the bare
-# `Ran (<date>).` line instead, which parses with no tag and no text.
+# `Ran (<date>).` line instead, which parses with no tag and no text. A
+# rehearsal's `Rehearsed (<date>): [<refs>] <text>` splits the same way.
 RAN_PARTS_RE = re.compile(
-    r"^Ran \((\d{4}-\d{2}-\d{2})\)[:.][ \t]*(?:\[([^\]]*)\])?[ \t]*(.*)$",
-    re.S)
+    r"^(Ran|Rehearsed) \((\d{4}-\d{2}-\d{2})\)[:.][ \t]*"
+    r"(?:\[([^\]]*)\])?[ \t]*(.*)$", re.S)
 
 
 # Left on a task reseed_later_tasks carried onto the next board.
@@ -1445,7 +1450,9 @@ def flow_run_entries(bw, scope, flow):
     """Every recorded run of this flow, newest first.
 
     A run is a `Ran (<date>)` record, not a task: a recurring task holds one
-    per run. Records are matched on their refs tag, which pairs the flow's
+    per run. A `Rehearsed (<date>)` record is listed too, flagged
+    `rehearsal`, so a dry run is visible but never passes for a real one.
+    Records are matched on their refs tag, which pairs the flow's
     fixed id with a name it held — the same id+name rule flow_ref_holders
     uses, so a rename never loses history and two flows sharing an id are
     still told apart. A tagless record (a landed recurring run) counts when
@@ -1481,7 +1488,8 @@ def flow_run_entries(bw, scope, flow):
             meta = parse_task(path)
         except SystemExit:
             continue
-        recs = [" ".join(r.split()) for r in collect_ran(meta["body"])]
+        recs = [" ".join(r.split()) for r in
+                collect_ran(meta["body"]) + collect_rehearsed(meta["body"])]
         loaded.append((arch, meta, recs))
         by_key.setdefault((arch, meta["id"]), set()).update(recs)
     entries = []
@@ -1499,7 +1507,8 @@ def flow_run_entries(bw, scope, flow):
             m = RAN_PARTS_RE.match(rec)
             if not m:
                 continue
-            date, tag, text = m.group(1), m.group(2), m.group(3).strip()
+            verb, date, tag = m.group(1), m.group(2), m.group(3)
+            text = m.group(4).strip()
             if tag is None:
                 if not on_task:
                     continue
@@ -1509,7 +1518,8 @@ def flow_run_entries(bw, scope, flow):
             entries.append({"date": date, "label": label, "id": meta["id"],
                             "title": meta.get("title", ""),
                             "status": meta["status"], "text": text,
-                            "archived": arch is not None})
+                            "archived": arch is not None,
+                            "rehearsal": verb == "Rehearsed"})
         live_run = arch is None and meta["status"] in IN_FLIGHT
         if on_task and not found and (live_run or meta["status"] == "done"):
             date = text = ""
@@ -1520,7 +1530,8 @@ def flow_run_entries(bw, scope, flow):
             entries.append({"date": date, "label": label, "id": meta["id"],
                             "title": meta.get("title", ""),
                             "status": meta["status"], "text": text,
-                            "archived": arch is not None})
+                            "archived": arch is not None,
+                            "rehearsal": False})
     # In flight first, then newest first; an undated done run sinks last.
     entries.sort(key=lambda e: (e["date"] or ("9999-99-99" if e["status"]
                                               in IN_FLIGHT else ""), e["id"]),
@@ -1538,7 +1549,7 @@ def format_flow_run(e, color=False):
                       f"{when:<10}")
         head = (f"  {shown}  {_status_ansi(e['status'], e['label'])} "
                 f"{e['title']}")
-    bits = []
+    bits = ["rehearsal"] if e.get("rehearsal") else []
     if not e["date"]:
         bits.append(e["status"])
     if e["archived"]:
@@ -1557,8 +1568,11 @@ def flow_runs_text(bw, scope, flow, color=False):
     head = f"{name} (id {flow['id']})"
     if not flow_is_active(flow):
         head += " [retired]"
-    n = len(entries)
+    k = sum(1 for e in entries if e["rehearsal"])
+    n = len(entries) - k
     head += f" — {n} run{'' if n == 1 else 's'}"
+    if k:
+        head += f", {k} rehearsal{'' if k == 1 else 's'}"
     lines = [head]
     if not entries:
         lines.append("  (no runs recorded)")
@@ -1754,6 +1768,7 @@ def cmd_flow(args):
         board_commit(root, branch, bw, scope, f"dev: flow create {name}")
         print(render_flow(meta).rstrip())
         warn_sequence_names(bw, scope, meta["body"])
+        warn_placeholders(meta["inputs"], meta["body"])
         return
     f = find_flow(bw, scope, args.name, flows)
     name = f["name"]
@@ -1790,6 +1805,7 @@ def cmd_flow(args):
                      f"dev: flow update {name} ({', '.join(changes)})")
         print(f"flow {name} updated: {', '.join(changes)}")
         warn_sequence_names(bw, scope, f["body"])
+        warn_placeholders(f["inputs"], f["body"])
         return
     if act == "rename":
         new = validate_flow_name((args.new_name or "").strip())
@@ -2174,6 +2190,53 @@ def warn_sequence_names(bw, scope, body):
         print(f"warning: {w}", file=sys.stderr)
 
 
+# Inputs are written as {name} where a step uses them. The script checks
+# that pairing at authoring time, and only to warn: a {placeholder} with no
+# declared input is fine (a derived value) unless it is a near-miss of one,
+# and ${...} is shell, never a placeholder.
+PLACEHOLDER_RE = re.compile(r"(?<!\$)\{([A-Za-z_][\w-]*)\}")
+
+
+def placeholder_warnings(inputs, body):
+    """Warnings for declared inputs never referenced as {name} in the
+    body, an input name {name} cannot spell (spaces), and an undeclared
+    {placeholder} that looks like a typo of a declared input. An input's
+    name is its text before the first '('; a hint may hold commas, so
+    only commas outside parentheses separate inputs. Pure."""
+    out, names = [], []
+    for item in re.split(r",(?![^(]*\))", inputs or ""):
+        name = item.split("(", 1)[0].strip()
+        if not name:
+            continue
+        if re.search(r"\s", name):
+            out.append(f"input '{name}' cannot be referenced as a "
+                       "{placeholder}; rename it without spaces "
+                       f"({'_'.join(name.split())})")
+            continue
+        names.append(name)
+    used = PLACEHOLDER_RE.findall(body or "")
+    for name in names:
+        if name not in used:
+            out.append(f"input '{name}' is declared but never referenced as "
+                       f"{{{name}}} in the body (inputs are written as "
+                       "{name} where a step uses them)")
+    lowered = {n.lower(): n for n in names}
+    for ph in dict.fromkeys(used):
+        if ph in names:
+            continue
+        near = lowered.get(ph.lower()) or next(iter(
+            difflib.get_close_matches(ph, names, n=1, cutoff=0.8)), None)
+        if near:
+            out.append(f"{{{ph}}} is not a declared input; did you mean "
+                       f"{{{near}}}?")
+    return out
+
+
+def warn_placeholders(inputs, body):
+    for w in placeholder_warnings(inputs, body):
+        print(f"warning: {w}", file=sys.stderr)
+
+
 # ---------- task file format ----------
 # <scope>/.tasks/NNN.md :
 #   ---
@@ -2414,6 +2477,52 @@ RECUR_RESTING = ("backlog", "planned")
 
 def recur_at_rest(t):
     return is_recurring(t) and t["status"] in RECUR_RESTING
+
+
+def is_rehearsal(t):
+    return (t.get("rehearsal") or "").strip() == "true"
+
+
+def validate_rehearsal(meta):
+    """A rehearsal is a one-off ops task (ran --rehearsal refuses a recurring
+    one). Exits on error."""
+    if not is_rehearsal(meta):
+        return
+    if not is_ops(meta):
+        sys.exit(f"error: a rehearsal is an ops task; T{meta['id']} would be "
+                 f"{task_type(meta)}")
+    if is_recurring(meta):
+        sys.exit(f"error: a rehearsal is a one-off task on its flow; "
+                 f"T{meta['id']} would be recurring")
+
+
+def rehearsal_clash_refusal(meta, tasks):
+    """Refusal message when this doing ops task and another doing ops task
+    share a flow id with opposite rehearsal markers, else ''. A real run
+    must not race a flow still being tested and edited, and a rehearsal
+    must not start under a live run. Matched on the id, so a renamed flow
+    cannot slip past.
+    """
+    if not (is_ops(meta) and meta.get("status") == "doing"):
+        return ""
+    mine = {fid for fid, _ in parse_flow_refs(meta.get("flow"))}
+    for t in tasks:
+        if (t["id"] == meta["id"] or not is_ops(t)
+                or t.get("status") != "doing"
+                or is_rehearsal(t) == is_rehearsal(meta)):
+            continue
+        for fid, name in parse_flow_refs(t.get("flow")):
+            if fid not in mine:
+                continue
+            if is_rehearsal(t):
+                return (f"error: flow {fid} {name} is being rehearsed in "
+                        f"T{t['id']}; finish or close that rehearsal before "
+                        f"T{meta['id']} runs it (/ops rehearse {name} "
+                        f"resumes it)")
+            return (f"error: flow {fid} {name} has a real run in flight "
+                    f"(T{t['id']}); finish it before rehearsing that flow "
+                    f"in T{meta['id']}")
+    return ""
 
 
 def validate_recurring(meta):
@@ -4873,18 +4982,32 @@ RAN_RE = re.compile(
     r"(?ims)^Ran \(\d{4}-\d{2}-\d{2}\)[:.].*?(?=\n[ \t]*\n|\Z)")
 
 
-def format_ran(text, refs, date=None):
-    """One run record, collapsed to a single paragraph."""
+def format_ran(text, refs, date=None, verb="Ran"):
+    """One run record (or, with verb="Rehearsed", one rehearsal record),
+    collapsed to a single paragraph."""
     text = " ".join((text or "").split())
     date = date or datetime.date.today().isoformat()
     tag = ", ".join(refs) if refs else "no flow"
-    return f"Ran ({date}): [{tag}] {text}"
+    return f"{verb} ({date}): [{tag}] {text}"
 
 
 def collect_ran(text):
     """Every run record in a task body, in order (bare `Ran (<date>).` lines
     from landed recurring runs included)."""
     return [m.group(0).strip() for m in RAN_RE.finditer(text or "")]
+
+
+# A rehearsal (a dry run of a flow, `ran --rehearsal`) closes with its own
+# verb rather than a tag inside Ran, so a Ran reader skips it without
+# knowing; the ones that must show it (run history, log.md) opt in:
+#   Rehearsed (2026-10-29): [7 send-invoice] dry: steps 4, 6; …
+REHEARSED_RE = re.compile(
+    r"(?ims)^Rehearsed \(\d{4}-\d{2}-\d{2}\):.*?(?=\n[ \t]*\n|\Z)")
+
+
+def collect_rehearsed(text):
+    """Every rehearsal record in a task body, in order."""
+    return [m.group(0).strip() for m in REHEARSED_RE.finditer(text or "")]
 
 
 # ---------- paused record (ops run stopped partway) ----------
@@ -6484,10 +6607,12 @@ def cmd_add(args):
         "needs": "", "created": datetime.date.today().isoformat(),
         "cadence": (args.cadence or "").strip(), "last_run": "",
         "next_due": (args.next_due or "").strip(),
+        "rehearsal": "true" if args.rehearsal else "",
         "body": args.desc or "",
     }
     validate_recurring(meta)
     validate_type(meta, new=True)
+    validate_rehearsal(meta)
     known = {t["id"] for t in tasks}
     for d in meta["deps"]:
         if d not in known:
@@ -6558,6 +6683,14 @@ def cmd_update(args):
     validate_recurring(meta)
     validate_type(meta, set_type=args.type is not None,
                   set_area=args.area is not None)
+    validate_rehearsal(meta)
+    # Checked on entering the state (start, flow set or type changed while
+    # doing), so an unrelated edit to a doing task is never refused.
+    if (old["status"], old["flow"], task_type(old)) != \
+            (meta["status"], meta["flow"], task_type(meta)):
+        clash = rehearsal_clash_refusal(meta, all_tasks(bw, scope))
+        if clash:
+            sys.exit(clash)
     if is_recurring(meta) and meta["status"] == "done":
         sys.exit(f"error: T{meta['id']} is recurring and never goes done; "
                  f"record a run instead: TASKS recur ran {meta['id']}")
@@ -6747,7 +6880,9 @@ def cmd_ran(args):
     PR, so the record is the whole outcome. Appends `Ran (<date>): …`,
     stamps the task's `flow` field with the flows followed, and closes —
     done for a normal task, re-armed via rearm_recurring for a recurring
-    one (same as a landed run).
+    one (same as a landed run). With --rehearsal the record is
+    `Rehearsed (<date>): …` instead: the task was a dry run of a flow, its
+    own one-off task, so a recurring task never takes one.
     """
     root, scope, branch, bw = ctx()
     meta = find_task(bw, scope, args.id)
@@ -6764,11 +6899,23 @@ def cmd_ran(args):
     if not text:
         sys.exit(f"error: ran needs --record \"<inputs; deviations>\": what "
                  f"the run was given and where it departed from the flow")
+    if is_rehearsal(meta) and not args.rehearsal:
+        sys.exit(f"error: T{tid} is a rehearsal (rehearsal: true); record it "
+                 f"as one so it never counts as a real run: "
+                 f"ran {tid} --rehearsal --record \"…\"")
+    if args.rehearsal and is_recurring(meta):
+        sys.exit(f"error: T{tid} is recurring; a rehearsal is its own one-off "
+                 f"ops task on the flow, so this task's clock and run history "
+                 f"never take one")
     refs = resolve_flow_refs(bw, scope, args.flow) if args.flow else []
     if not refs and meta.get("flow"):
         refs = [f"{i} {n}" for i, n in parse_flow_refs(meta["flow"])]
+    if args.rehearsal and not refs:
+        sys.exit(f"error: a rehearsal is of a flow; name it: "
+                 f"ran {tid} --rehearsal --flow <name> --record \"…\"")
     ran = iso_date(args.date, "date") if args.date else datetime.date.today()
-    record = format_ran(text, refs, ran.isoformat())
+    record = format_ran(text, refs, ran.isoformat(),
+                        "Rehearsed" if args.rehearsal else "Ran")
     meta["flow"] = ", ".join(refs)
     if is_recurring(meta):
         meta = rearm_recurring(root, scope, branch, bw, meta, ran_on=ran,
@@ -6781,8 +6928,9 @@ def cmd_ran(args):
         meta["body"] = append_body(meta["body"], record)
         with open(meta["path"], "w") as f:
             f.write(render_task(meta))
-        board_commit(root, branch, bw, scope, f"dev: T{tid} ran (closed)")
-        print(f"T{tid} closed")
+        verb = "rehearsed" if args.rehearsal else "ran"
+        board_commit(root, branch, bw, scope, f"dev: T{tid} {verb} (closed)")
+        print(f"T{tid} closed" + (" (rehearsal)" if args.rehearsal else ""))
     print(f"  {record}")
 
 
@@ -8150,11 +8298,12 @@ def remap_dev_batch(body, mapping):
 
 
 # Paragraphs that record one run of a recurring task: its outcome (Ran,
-# Shipped), what happened along the way (Note, Paused, Waiting) and what it
-# was given (Inputs — one run's values; the flow declares its own inputs).
+# Rehearsed, Shipped), what happened along the way (Note, Paused, Waiting)
+# and what it was given (Inputs — one run's values; the flow declares its
+# own inputs).
 RUN_RECORD_PARA_RE = re.compile(
     r"^(?:Ran \(\d{4}-\d{2}-\d{2}\)[:.]"
-    r"|(?:Shipped|Note|Paused|Waiting) \(\d{4}-\d{2}-\d{2}\):"
+    r"|(?:Rehearsed|Shipped|Note|Paused|Waiting) \(\d{4}-\d{2}-\d{2}\):"
     r"|Inputs:)")
 CARRIED_FROM_PARA_RE = re.compile(r"^carried from \d+/T\d+$")
 
@@ -8257,6 +8406,7 @@ def reseed_later_tasks(bw, scope, old_index):
             # are skipped through the `carried from` note.
             "type": task_type(t),
             "flow": t.get("flow") or "",
+            "rehearsal": t.get("rehearsal") or "",
             "cadence": t.get("cadence") or "",
             "last_run": t.get("last_run") or "",
             "next_due": t.get("next_due") or "",
@@ -8359,7 +8509,7 @@ def cmd_iteration_close(args):
         # skim — an umbrella has no ship, so Verified is its only outcome line.
         body = t.get("body") or ""
         for rec in (collect_shipped(body) + collect_verified(body)
-                    + collect_ran(body)):
+                    + collect_ran(body) + collect_rehearsed(body)):
             entry.append("  - " + " ".join(rec.split()))
     log = os.path.join(bw, tdir(scope), "log.md")
     existing = open(log).read() if os.path.exists(log) else "# Iteration log\n"
@@ -8739,6 +8889,9 @@ def main():
     s.add_argument("--next-due", dest="next_due",
                    help="recurring tasks only: YYYY-MM-DD of the first run "
                         "(default: due now)")
+    s.add_argument("--rehearsal", action="store_true",
+                   help="ops tasks only: a dry run of its flow; no real run "
+                        "of that flow may be doing while it is")
     s.add_argument("--status",
                    choices=["proposed", "backlog", "planned", "later"],
                    default="backlog")
@@ -8806,6 +8959,9 @@ def main():
     s.add_argument("--record", help="inputs the run was given; deviations "
                                     "from the flow — recorded as Ran (<date>): …")
     s.add_argument("--date", help="YYYY-MM-DD the run happened (default today)")
+    s.add_argument("--rehearsal", action="store_true",
+                   help="the task was a dry run of a flow: record "
+                        "Rehearsed (<date>): … so it never counts as a run")
     s.set_defaults(fn=cmd_ran)
 
     s = sub.add_parser("pause",
