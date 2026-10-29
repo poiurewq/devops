@@ -9,9 +9,9 @@ When the user arrived via bare `/ops` or `/ops help` and this project has no boa
 
 **What it is.** A **flow** is a written procedure: how you close the month, onboard a client, publish an issue. A **run** is one execution of it, recorded on the task it was run for — inputs it was given, anything that went differently. Both live in small files inside your project, synced through git, so every contributor on any machine sees the same board and the same playbook.
 
-**How it works.** You file what needs doing. When you run a task, I find the flow that fits, ask for anything it needs, and walk it with you — checking in where the flow says to, and once more at the end before anything is marked done. No flow yet? We do it a chunk at a time, I write down what we actually did, and you can turn that into a flow at the end.
+**How it works.** You file what needs doing. When you run a task, I find the flow that fits, ask for anything it needs, and walk it with you — checking in where the flow says to, and once more at the end before anything is marked done — unless the run went exactly to plan and its result shows it. No flow yet? We do it a chunk at a time, I write down what we actually did, and you can turn that into a flow at the end.
 
-**The philosophy.** The playbook is written by using it. Procedures start rough and get sharper every run, and you approve every step that matters. Nothing is marked done because the steps ran out — only because you said the aim was met.
+**The philosophy.** The playbook is written by using it. Procedures start rough and get sharper every run, and you approve every step that matters. Nothing is marked done because the steps ran out — only because the aim was met: you say so, or a run that went exactly as the flow says shows it plainly, and I tell you it closed.
 
 Want me to set it up here? It takes about a minute — a name for attribution, and that's nearly it.
 ---
