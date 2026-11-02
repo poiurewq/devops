@@ -31,7 +31,8 @@ Commands:
           public or network fails. One line if behind. If auto_update, apply.
   update  Ignore throttle; git pull --ff-only origin main (requires clone).
   auto    Show or set auto_update (on|off|true|false).
-  feedback  Open an issue on the public repo (maintainer inbox) via gh.
+  feedback  Open an issue on the public repo (maintainer inbox) via gh;
+            REST when GraphQL is blocked, else a prefilled link to file by hand.
 """
 
 from __future__ import annotations
@@ -45,6 +46,7 @@ import shutil
 import subprocess
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -522,38 +524,68 @@ def feedback_context() -> str:
     )
 
 
+# gh issue create speaks GraphQL, which some hosted agent sandboxes refuse;
+# feedback then retries over REST, as lib/tasks.py does for PR calls (its
+# GRAPHQL_BLOCKED and DEVOPS_PR_TRANSPORT, duplicated here on purpose: this
+# module stays importable without tasks.py).
+GRAPHQL_BLOCKED = "graphql is not available"
+
+
+def graphql_blocked(returncode: int, err: str) -> bool:
+    return returncode != 0 and GRAPHQL_BLOCKED in (err or "").lower()
+
+
+def new_issue_url(title: str, body: str) -> str:
+    """A prefilled new-issue link, for filing by hand when gh cannot."""
+    q = urllib.parse.urlencode({"title": title, "body": body},
+                               quote_via=urllib.parse.quote)
+    return f"{CANONICAL_REPO}/issues/new?{q}"
+
+
+def file_issue(title: str, body: str) -> tuple[str | None, str]:
+    """File the issue with gh; returns (issue URL, "") or (None, error)."""
+    rest = (os.environ.get("DEVOPS_PR_TRANSPORT") or "").strip().lower() == "rest"
+    if not rest:
+        r = subprocess.run(
+            ["gh", "issue", "create", "--repo", REPO_SLUG,
+             "--title", title, "--body", body],
+            capture_output=True, text=True, check=False,
+        )
+        detail = (r.stderr or r.stdout or "").strip()
+        if r.returncode == 0:
+            # gh prints the new issue URL as its last stdout line.
+            lines = (r.stdout or "").strip().splitlines()
+            return (lines[-1] if lines else CANONICAL_REPO + "/issues"), ""
+        if not graphql_blocked(r.returncode, detail):
+            return None, f"gh issue create failed: {detail}"
+    r = subprocess.run(
+        ["gh", "api", "--method", "POST", f"repos/{REPO_SLUG}/issues",
+         "-f", f"title={title}", "-f", f"body={body}", "--jq", ".html_url"],
+        capture_output=True, text=True, check=False,
+    )
+    if r.returncode == 0 and r.stdout.strip():
+        return r.stdout.strip(), ""
+    detail = (r.stderr or r.stdout or "").strip()
+    return None, f"filing over the REST API (gh api) failed: {detail}"
+
+
 def cmd_feedback(title: str, body: str | None) -> int:
     title = (title or "").strip()
     if not title:
         print("error: feedback title is empty", file=sys.stderr)
         return 1
-    if shutil.which("gh") is None:
-        print(
-            "error: gh not found; install GitHub CLI and run 'gh auth login', "
-            f"or open an issue directly at {CANONICAL_REPO}/issues",
-            file=sys.stderr,
-        )
-        return 1
     text = (body or "").strip()
     full_body = f"{text}\n\n---\n\n{feedback_context()}" if text else feedback_context()
-    r = subprocess.run(
-        [
-            "gh", "issue", "create",
-            "--repo", REPO_SLUG,
-            "--title", title,
-            "--body", full_body,
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if r.returncode != 0:
-        detail = (r.stderr or r.stdout or "").strip()
-        print(f"error: gh issue create failed: {detail}", file=sys.stderr)
+    if shutil.which("gh") is None:
+        url, err = None, "gh not found (install GitHub CLI and run 'gh auth login')"
+    else:
+        url, err = file_issue(title, full_body)
+    if url is None:
+        print(f"error: {err}", file=sys.stderr)
+        print("not filed; open this prefilled link to file it by hand:\n"
+              f"  {new_issue_url(title, full_body)}", file=sys.stderr)
         return 1
-    # gh prints the new issue URL as its last stdout line.
-    lines = (r.stdout or "").strip().splitlines()
-    print(f"filed: {lines[-1] if lines else CANONICAL_REPO + '/issues'}")
+    print(f"filed: {url}")
     return 0
 
 

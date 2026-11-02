@@ -5,7 +5,7 @@ A repo can hold one board (at <root>/.tasks/) or several (a monorepo with
 <subdir>/.tasks/ per product). The script targets the nearest board at or
 above cwd, or an explicit --scope; there is no single-board fallback.
 Checkout-local state lives under the product root: <scope>/.dev/ (root board
-→ .dev/ at the primary clone root) — identity, boards cache, board worktree,
+→ .dev/ at the primary clone root) — boards cache, board worktree,
 and task worktrees. Paths resolve via the hub (git-common-dir, or the worktree
 that already owns .dev/board), not a linked task worktree's toplevel.
 Each board lives ONLY on its integration branch. Mutations go through a
@@ -38,6 +38,7 @@ import sys
 import tempfile
 import time
 import unicodedata
+import urllib.parse
 
 STATUSES = ["proposed", "backlog", "planned", "doing", "draft", "review",
             "done", "later", "shelved", "not-planned"]
@@ -155,7 +156,7 @@ GIT_TIMEOUT_RC = 124  # run_with_deadline's exit code for a timed-out call
 # Land never rewrites the task branch; a conflict is merged forward.
 LAND_RETRIES = 5
 # After a push, GitHub often leaves mergeable=UNKNOWN while recomputing.
-# Poll before gh pr merge so the first attempt is not a guaranteed failure.
+# Poll before the merge call so the first attempt is not a guaranteed failure.
 LAND_MERGEABLE_TIMEOUT_S = 30
 LAND_MERGEABLE_POLL_S = 1.0
 
@@ -490,11 +491,6 @@ def read_local(root, scope, name):
         with open(p) as f:
             return f.read().strip()
     return None
-
-
-def write_local(root, scope, name, value):
-    with open(os.path.join(dev_dir(root, scope), name), "w") as f:
-        f.write(value + "\n")
 
 
 def read_cache(root, scope):
@@ -1091,25 +1087,15 @@ def roster_join(entries, name, login, formers=None):
 
 def login_backfill(entries, handle, login):
     """Record `login` on `handle` when the roster has that handle with no
-    login yet. Pure: returns (entries, warning). Never registers a handle
-    and never replaces a recorded login. A login already held by another
-    handle changes nothing: only the user can tell which side is wrong, so
-    the warning asks them to settle it once."""
+    login yet. Pure: returns the roster. Never registers a handle, never
+    replaces a recorded login, and never records a login another handle
+    already holds (one login, one handle)."""
     if not login or (handle, "") not in entries:
-        return entries, None
-    held = next((h for h, l in entries if same_login(l, login)), None)
-    if held is not None:
-        return entries, (
-            f"GitHub login '{login}' (gh's active account) is already "
-            f"'{held}' on this board, so it was not recorded for this "
-            f"checkout's handle '{handle}'. Ask the user which is right and "
-            f"settle it once: this checkout is really '{held}' -> init "
-            f"(no --name) to switch to it; '{held}' is a stale entry -> "
-            f"contributor rm {held}, then whoami again; gh is signed in to "
-            f"the wrong account -> gh auth switch. Until then this repeats "
-            f"on every whoami")
+        return entries
+    if any(same_login(l, login) for _, l in entries):
+        return entries
     return [(h, login) if (h, l) == (handle, "") else (h, l)
-            for h, l in entries], None
+            for h, l in entries]
 
 
 def board_former_handles(cfg):
@@ -1185,91 +1171,106 @@ def roster_rename(entries, integrators, formers, old, new):
     return entries, integrators, formers
 
 
-def healed_identity(ident, entries, formers):
-    """The current handle when `ident` was renamed away from, else None."""
-    if not ident or ident in [h for h, _ in entries]:
-        return None
-    return formers.get(ident)
-
-
-def heal_renamed_identity(root, scope, ident):
-    """Follow a rename made elsewhere: when this checkout's identity is a
-    former handle in the last-synced roster, rewrite it to the current one.
-    No fetch and no gh call; a board not synced yet heals on a later run.
-    Notes go to stderr (whoami's stdout is the handle)."""
-    yml = board_yml_path(os.path.join(root, board_worktree_rel(scope)), scope)
-    if not ident or not os.path.exists(yml):
-        return ident
-    with open(yml) as f:
-        cfg = parse_kv(f.read())
-    new = healed_identity(ident, board_contributors(cfg),
-                          board_former_handles(cfg))
-    if new is None:
-        return ident
-    write_local(root, scope, "identity", new)
-    print(f"note: handle '{ident}' was renamed to '{new}'; this checkout's "
-          "identity now follows it", file=sys.stderr)
-    return new
-
-
-def record_missing_login(root, scope, handle):
-    """Fill this checkout's handle's missing GitHub login, best-effort.
-
-    Read the roster from the board worktree as last synced first, so a
-    handle whose login is on record costs no fetch and no gh call; only a
-    missing one syncs, reads gh (the active account, the one PRs are
-    opened as) and commits. Board or gh trouble skips silently — whoami
-    never fails over this. Output goes to stderr: whoami's stdout is the
-    handle callers read."""
-    yml = board_yml_path(os.path.join(root, board_worktree_rel(scope)), scope)
-    if os.path.exists(yml):
-        with open(yml) as f:
-            if (handle, "") not in board_contributors(parse_kv(f.read())):
-                return
-    try:
-        with contextlib.redirect_stdout(sys.stderr):
-            branch, bw = resolve_board(root, scope)
-            if missing_board_error(bw, scope, branch):
-                return
-            cfg = read_board_cfg(bw, scope)
-            old = board_contributors(cfg)
-            if (handle, "") not in old:
-                return
-            login, err = gh_login(root)
-            if err:
-                return
-            entries, warn = login_backfill(old, handle, login)
-            if warn:
-                print(f"warning: {warn}", file=sys.stderr)
-                return
-            cfg["contributors"] = format_contributors(entries)
-            write_board_cfg(bw, scope, cfg)
-            board_commit(root, branch, bw, scope,
-                         f"dev: record GitHub login for {handle}")
-    except (SystemExit, Exception):
-        # Best-effort by contract: nothing here may fail whoami.
-        return
+LOGIN_ENV = "DEVOPS_GITHUB_LOGIN"
+_LOGIN_MEMO = {}
 
 
 def gh_login(root):
-    """This machine's GitHub login via gh, as (login, None), or (None, why)
-    when gh is missing, signed out, or cannot reach GitHub. Identity hangs on
-    the login, so callers refuse rather than fall back to a bare handle."""
+    """This machine's GitHub login, as (login, None), or (None, why).
+
+    Read order: the DEVOPS_GITHUB_LOGIN env var (a login, not a handle, so a
+    rename never strands it; it overrides gh); with GH_TOKEN/GITHUB_TOKEN
+    set, `gh api user`, since gh then acts as the token's account and the
+    stored config may name another; else gh's stored config (no network),
+    falling back to `gh api user` when that is empty. Memoized per process.
+    Identity hangs on the login, so callers refuse rather than fall back to
+    a bare handle."""
+    if "v" not in _LOGIN_MEMO:
+        _LOGIN_MEMO["v"] = _read_login(root)
+    return _LOGIN_MEMO["v"]
+
+
+def _read_login(root):
+    env = (os.environ.get(LOGIN_ENV) or "").strip()
+    if env:
+        return env, None
     if not shutil.which("gh"):
         return None, ("gh (GitHub CLI) is not installed; install it and run "
-                      "gh auth login — a board handle is tied to your GitHub "
-                      "login")
+                      "gh auth login, or set " + LOGIN_ENV + " — a board "
+                      "handle is tied to your GitHub login")
+    if not (os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")):
+        r = sh(["gh", "config", "get", "user", "-h", "github.com"], cwd=root,
+               check=False, timeout=GIT_NETWORK_TIMEOUT_S)
+        login = r.stdout.strip() if r.returncode == 0 else ""
+        if login:
+            return login, None
     r = sh(["gh", "api", "user", "--jq", ".login"], cwd=root, check=False,
            timeout=GIT_NETWORK_TIMEOUT_S)
     login = r.stdout.strip() if r.returncode == 0 else ""
     if login:
         return login, None
     if r.returncode == 4:  # gh's exit code for "authentication required"
-        return None, "gh is not signed in; run gh auth login, then re-run"
+        return None, ("gh is not signed in; run gh auth login (or set "
+                      f"{LOGIN_ENV}), then re-run")
     detail = (r.stderr or r.stdout or "").strip().splitlines()
     return None, ("gh could not read your GitHub login"
                   + (f" ({detail[0]})" if detail else "")
                   + "; check the network and gh auth status, then re-run")
+
+
+def current_identity(root, scope):
+    """This session's handle, as (handle, None), or (None, why).
+
+    The GitHub login (gh_login) looked up on the roster as last synced — no
+    fetch unless this checkout has never synced the board — so a rename or
+    a gh account switch takes effect at once with nothing stored locally.
+    A login not on the roster gets one legacy chance (legacy_identity)."""
+    login, err = gh_login(root)
+    if err:
+        return None, err
+    yml = board_yml_path(os.path.join(root, board_worktree_rel(scope)), scope)
+    if not os.path.exists(yml):
+        with contextlib.redirect_stdout(sys.stderr):
+            resolve_board(root, scope)
+    if not os.path.exists(yml):
+        return None, f"no board.yml for '{scope}' yet; run init"
+    with open(yml) as f:
+        entries = board_contributors(parse_kv(f.read()))
+    _, handle, err = roster_join(entries, None, login)
+    if handle:
+        return handle, None
+    return legacy_identity(root, scope, login) or (None, err)
+
+
+def legacy_identity(root, scope, login):
+    """Migrate a checkout from before identity came from the login: when its
+    leftover .dev/identity names a roster handle with no login yet (or a
+    former handle of one), record `login` there and act as that handle.
+    Returns (handle, None) or None. Never registers anyone; after the
+    backfill the login is on the roster and the file is never read again.
+    Output goes to stderr (whoami's stdout is the handle)."""
+    old = read_local(root, scope, "identity")
+    if not old:
+        return None
+    with contextlib.redirect_stdout(sys.stderr):
+        branch, bw = resolve_board(root, scope)
+        if missing_board_error(bw, scope, branch):
+            return None
+        cfg = read_board_cfg(bw, scope)
+        entries = board_contributors(cfg)
+        handle = (old if old in [h for h, _ in entries]
+                  else former_holder(board_former_handles(cfg), old))
+        filled = login_backfill(entries, handle, login)
+        if filled == entries:
+            return None
+        cfg["contributors"] = format_contributors(filled)
+        write_board_cfg(bw, scope, cfg)
+        board_commit(root, branch, bw, scope,
+                     f"dev: record GitHub login for {handle}")
+    print(f"note: recorded GitHub login '{login}' for '{handle}'; identity "
+          "now comes from the login, and .dev/identity is no longer read",
+          file=sys.stderr)
+    return handle, None
 
 
 def write_board_cfg(bw, scope, cfg):
@@ -3066,6 +3067,17 @@ def title_prefix(idx, tid, scope="."):
     return f"[{ref}]" if scope == "." else f"[{scope} {ref}]"
 
 
+def with_title_prefix(text, prefix, tid):
+    """Lead `text` with `prefix`, replacing a leading tag for this same task
+    from another iteration or scope (`[1/T42] …` on a `[devops 3/T42]`
+    board) rather than stacking a second one in front of it. A tag naming
+    a different task id is left alone and gets the prefix in front."""
+    m = re.match(r"\[[^\[\]]*?\bT(\d+)\]\s*", text)
+    if m and int(m.group(1)) == int(tid):
+        text = text[m.end():]
+    return text if text.startswith(prefix) else f"{prefix} {text}"
+
+
 # Schema-3 dirs are `{n}` or `{n}-{slug}`. Pre-3 leftovers are
 # `YYYY-MM-DD` or `YYYY-MM-DD-slug` — those must not parse as year N.
 ARCHIVE_INDEX_RE = re.compile(r"^(\d+)(?:-.*)?$")
@@ -3169,7 +3181,7 @@ def ensure_task_branch(root, branch, start_ref):
     that has diverged is an error — recovery is in flows/implement.md
     (show unique commits and leftover dirty status, ask keep vs throw;
     do not write branch: first; keep: commit/stash if dirty; refuse
-    throw-away while dirty; throw-away: gh pr close then delete).
+    throw-away while dirty; throw-away: TASKS pr <id> close then delete).
     """
     if not ref_exists(root, start_ref):
         sys.exit(f"error: start ref '{start_ref}' not found; fetch origin first")
@@ -3801,8 +3813,7 @@ def retarget_children(root, parent_branch, integration):
     print(f"  retargeting {len(children)} stacked PR(s) to {integration}")
     for pr in children:
         url, head = pr["url"], pr["head"]
-        r = gh("pr", "edit", url, "--base", integration, cwd=root,
-               check=False)
+        r = pr_cmd("edit", url, "--base", integration, cwd=root)
         if r.returncode != 0:
             err = (r.stderr or r.stdout or "").strip()
             sys.exit(f"error: could not retarget {url} ({head}) from "
@@ -4037,6 +4048,329 @@ def draft_unsupported(err):
         "upgrade", "plan"))
 
 
+# ---------- PR transport: gh pr, or GitHub REST when GraphQL is blocked ----------
+#
+# Every PR call goes through pr_cmd, spelled as `gh pr` arguments. Locally
+# that is exactly `gh pr …`. `gh pr` speaks GraphQL, which some hosted agent
+# sandboxes block; the first call refused that way switches this process to
+# REST (`gh api`) for the rest of its run, and DEVOPS_PR_TRANSPORT=rest
+# starts there. rest_pr translates the same arguments and returns what
+# `gh pr` would have printed, so call sites never know which ran. The board
+# records a PR by its html URL.
+
+PR_URL_RE = re.compile(r"github\.com/([^/\s]+)/([^/\s]+)/pull/(\d+)")
+GRAPHQL_BLOCKED = "graphql is not available"
+_PR_TRANSPORT = []  # memo: [] until first use, then ["gh"] or ["rest"]
+
+
+def pr_transport_from_env(env):
+    """'rest' only when DEVOPS_PR_TRANSPORT says so; anything else is gh."""
+    v = (env.get("DEVOPS_PR_TRANSPORT") or "").strip().lower()
+    return "rest" if v == "rest" else "gh"
+
+
+def graphql_blocked(returncode, err):
+    """True when a failed gh pr call was refused for GraphQL itself."""
+    return returncode != 0 and GRAPHQL_BLOCKED in (err or "").lower()
+
+
+def pr_transport():
+    if not _PR_TRANSPORT:
+        _PR_TRANSPORT.append(pr_transport_from_env(os.environ))
+    return _PR_TRANSPORT[0]
+
+
+def switch_pr_transport_to_rest():
+    pr_transport()
+    _PR_TRANSPORT[0] = "rest"
+    print("note: GitHub GraphQL is not available here; PR calls use the "
+          "REST API (gh api) for the rest of this command", file=sys.stderr)
+
+
+def pr_cmd(*args, cwd=None):
+    """`gh pr <args>` (never exits), or its REST equivalent once REST is in
+    use. A GraphQL refusal switches and retries this same call over REST."""
+    if pr_transport() == "gh":
+        r = gh("pr", *args, cwd=cwd, check=False)
+        if not graphql_blocked(r.returncode, gh_err(r)):
+            return r
+        switch_pr_transport_to_rest()
+    return rest_pr(cwd, list(args))
+
+
+def pr_hint_retarget(url, base):
+    """The command a human runs to retarget a PR, for the transport in use."""
+    if pr_transport() == "rest":
+        return f"gh api --method PATCH {pr_api_path(url)} -f base={base}"
+    return f"gh pr edit {url} --base {base}"
+
+
+def pr_call_label(sub):
+    """How an error names a PR call: the transport that actually ran it."""
+    if pr_transport() == "rest":
+        return f"PR {sub} over the REST API (gh api)"
+    return f"gh pr {sub}"
+
+
+def pr_hint_create(base, head, title):
+    if pr_transport() == "rest":
+        return (f"gh api --method POST repos/{{owner}}/{{repo}}/pulls "
+                f"-f base={base} -f head={head} -f title={title!r}")
+    return f"gh pr create --base {base} --head {head} --title {title!r}"
+
+
+def pr_api_path(pr):
+    """REST path of a PR, from its URL (what the board records) or number."""
+    pr = (pr or "").strip()
+    m = PR_URL_RE.search(pr)
+    if m:
+        return f"repos/{m[1]}/{m[2]}/pulls/{m[3]}"
+    if pr.isdigit():
+        return f"repos/{{owner}}/{{repo}}/pulls/{pr}"
+    sys.exit(f"error: not a PR URL or number: {pr!r}")
+
+
+def pr_issue_path(pr):
+    """REST path of a PR's issue (where conversation comments live)."""
+    head, _, num = pr_api_path(pr).rpartition("/pulls/")
+    return f"{head}/issues/{num}"
+
+
+def gh_rest(root, method, path, fields=None, *, accept=None):
+    """One `gh api` call; never exits. Bools go typed (-F), the rest raw."""
+    argv = ["api", "--method", method, path]
+    if accept:
+        argv += ["-H", f"Accept: {accept}"]
+    for k, v in (fields or {}).items():
+        if isinstance(v, bool):
+            argv += ["-F", f"{k}={'true' if v else 'false'}"]
+        else:
+            argv += ["-f", f"{k}={v}"]
+    return gh(*argv, cwd=root, check=False)
+
+
+def gh_err(r):
+    """gh api puts 'gh: <message> (HTTP n)' on stderr and the JSON error
+    body (with any validation detail) on stdout; callers match on both."""
+    return "\n".join(s.strip() for s in (r.stderr, r.stdout)
+                     if s and s.strip())
+
+
+def rest_json(r):
+    try:
+        return json.loads(r.stdout or "null")
+    except json.JSONDecodeError:
+        return None
+
+
+def pr_from_rest(d):
+    """A REST pull object under `gh pr view --json` field names."""
+    merged = bool(d.get("merged_at") or d.get("merged"))
+    m = d.get("mergeable")
+    return {
+        "number": d.get("number"),
+        "url": d.get("html_url") or "",
+        "title": d.get("title") or "",
+        "body": d.get("body") or "",
+        "state": "MERGED" if merged else (d.get("state") or "").upper(),
+        "mergedAt": d.get("merged_at"),
+        "mergeable": ("UNKNOWN" if m is None
+                      else "MERGEABLE" if m else "CONFLICTING"),
+        "isDraft": bool(d.get("draft")),
+        "headRefName": ((d.get("head") or {}).get("ref") or ""),
+        "baseRefName": ((d.get("base") or {}).get("ref") or ""),
+        "author": {"login": (d.get("user") or {}).get("login") or ""},
+    }
+
+
+def review_decision(reviews):
+    """Latest APPROVED / CHANGES_REQUESTED per reviewer, rolled up.
+
+    REST has no reviewDecision (that is GraphQL, which also weighs branch
+    protection), so this only reports what reviewers said: any standing
+    change request wins, else any approval, else ''.
+    """
+    latest = {}
+    for rv in reviews or []:
+        st = (rv.get("state") or "").upper()
+        if st in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED"):
+            latest[(rv.get("user") or {}).get("login") or ""] = st
+    states = set(latest.values())
+    if "CHANGES_REQUESTED" in states:
+        return "CHANGES_REQUESTED"
+    return "APPROVED" if "APPROVED" in states else ""
+
+
+PR_VALUE_FLAGS = ("--base", "--head", "--title", "--body", "--json",
+                  "--state", "--limit")
+
+
+def parse_pr_args(args):
+    """gh pr argv → (subcommand, positional PR or '', {flag: value|True})."""
+    sub, pos, opts = args[0], "", {}
+    i = 1
+    while i < len(args):
+        a = args[i]
+        if a in PR_VALUE_FLAGS:
+            opts[a[2:]] = args[i + 1]
+            i += 2
+            continue
+        if a.startswith("--"):
+            opts[a[2:]] = True
+        elif not pos:
+            pos = a
+        i += 1
+    return sub, pos, opts
+
+
+def _rest_done(r, stdout=None):
+    """A REST result shaped like gh pr's: what it prints on success, the
+    whole error (message + JSON detail) on stderr on failure."""
+    if r.returncode != 0:
+        return subprocess.CompletedProcess(r.args, r.returncode, "",
+                                           gh_err(r))
+    out = r.stdout if stdout is None else stdout
+    return subprocess.CompletedProcess(r.args, 0, out, "")
+
+
+def _rest_fail(msg):
+    return subprocess.CompletedProcess(["gh", "api"], 1, "", msg)
+
+
+def rest_list_all(root, path):
+    r = gh_rest(root, "GET", f"{path}?per_page=100")
+    items = rest_json(r) if r.returncode == 0 else None
+    return items if isinstance(items, list) else None, r
+
+
+def _rest_pr_json(root, pr, fields):
+    """`gh pr view --json fields` over REST (dict) or a failed result."""
+    r = gh_rest(root, "GET", pr_api_path(pr))
+    d = rest_json(r) if r.returncode == 0 else None
+    if not isinstance(d, dict):
+        return _rest_done(r) if r.returncode else _rest_fail(
+            f"could not parse the REST reply for {pr}")
+    info = pr_from_rest(d)
+    if {"reviews", "reviewDecision"} & set(fields):
+        reviews, rr = rest_list_all(root, f"{pr_api_path(pr)}/reviews")
+        if reviews is None:
+            return _rest_done(rr)
+        info["reviewDecision"] = review_decision(reviews)
+        info["reviews"] = [{"author": {"login": (rv.get("user") or {})
+                                       .get("login") or ""},
+                            "state": rv.get("state"),
+                            "body": rv.get("body") or ""}
+                           for rv in reviews]
+    if "comments" in fields:
+        comments, rc = rest_list_all(root, f"{pr_issue_path(pr)}/comments")
+        inline, ri = rest_list_all(root, f"{pr_api_path(pr)}/comments")
+        if comments is None or inline is None:
+            return _rest_done(rc if comments is None else ri)
+        info["comments"] = [
+            {"author": {"login": (c.get("user") or {}).get("login") or ""},
+             "body": c.get("body") or "", "path": c.get("path"),
+             "line": c.get("line")}
+            for c in comments + inline]
+    return info
+
+
+def format_rest_pr_view(info):
+    """Plain `gh pr view`-like text for a REST-built view."""
+    draft = " draft" if info["isDraft"] else ""
+    lines = [info["title"], info["url"],
+             f"state: {info['state']}{draft}  {info['baseRefName']} ← "
+             f"{info['headRefName']}  reviews: "
+             f"{info['reviewDecision'] or 'none'}  "
+             f"author: {info['author']['login']}",
+             "", info["body"].strip()]
+    for rv in info["reviews"]:
+        body = rv["body"].strip()
+        lines += ["", f"— review {rv['state']} by {rv['author']['login']}"
+                  + (f":\n{body}" if body else "")]
+    for c in info["comments"]:
+        where = f" on {c['path']}:{c['line']}" if c.get("path") else ""
+        lines += ["", f"— {c['author']['login']}{where}:\n"
+                  f"{c['body'].strip()}"]
+    return "\n".join(lines) + "\n"
+
+
+def rest_pr(root, args):
+    """Run `gh pr <args>` over REST; returns what gh pr would have."""
+    sub, pr, o = parse_pr_args(args)
+    if sub == "view":
+        fields = (o.get("json") or "").split(",") if o.get("json") else \
+            ["reviews", "comments"]
+        info = _rest_pr_json(root, pr, fields)
+        if not isinstance(info, dict):
+            return info
+        if not o.get("json"):
+            return subprocess.CompletedProcess(
+                ["gh", "api"], 0, format_rest_pr_view(info), "")
+        return subprocess.CompletedProcess(
+            ["gh", "api"], 0,
+            json.dumps({k: info.get(k) for k in fields}), "")
+    if sub == "list":
+        state = o.get("state") or "open"
+        head = urllib.parse.quote(o.get("head") or "", safe="/")
+        r = gh_rest(root, "GET",
+                    f"repos/{{owner}}/{{repo}}/pulls?"
+                    f"state={'all' if state == 'all' else state}"
+                    f"&head={{owner}}:{head}&per_page=100")
+        items = rest_json(r) if r.returncode == 0 else None
+        if not isinstance(items, list):
+            return _rest_done(r) if r.returncode else _rest_fail(
+                "could not parse the REST PR list")
+        rows = [pr_from_rest(d) for d in items if isinstance(d, dict)]
+        if o.get("base"):
+            rows = [x for x in rows if x["baseRefName"] == o["base"]]
+        rows = rows[:int(o.get("limit") or 30)]
+        keys = (o.get("json") or "url").split(",")
+        return subprocess.CompletedProcess(
+            ["gh", "api"], 0, json.dumps([{k: x.get(k) for k in keys}
+                                          for x in rows]), "")
+    if sub == "create":
+        fields = {k: o[k] for k in ("base", "head", "title", "body")
+                  if k in o}
+        if o.get("draft"):
+            fields["draft"] = True
+        r = gh_rest(root, "POST", "repos/{owner}/{repo}/pulls", fields)
+        d = rest_json(r) if r.returncode == 0 else None
+        url = d.get("html_url") if isinstance(d, dict) else ""
+        return _rest_done(r, f"{url}\n")
+    path = pr_api_path(pr)
+    if sub == "edit":
+        fields = {k: o[k] for k in ("base", "body", "title") if k in o}
+        return _rest_done(gh_rest(root, "PATCH", path, fields), f"{pr}\n")
+    if sub == "close":
+        return _rest_done(gh_rest(root, "PATCH", path, {"state": "closed"}),
+                          f"closed {pr}\n")
+    if sub == "merge":
+        return _rest_done(gh_rest(root, "PUT", f"{path}/merge",
+                                  {"merge_method": "merge"}),
+                          f"merged {pr}\n")
+    if sub == "ready":
+        # Plain REST cannot flip the draft bit; the sandbox's GitHub proxy
+        # offers these routes for it, and its GraphQL refusal names them.
+        route = "convert_to_draft" if o.get("undo") else "ready_for_review"
+        return _rest_done(gh_rest(root, "POST", f"{path}/ccr/{route}"), "")
+    if sub == "diff":
+        return _rest_done(gh_rest(root, "GET", path,
+                                  accept="application/vnd.github.diff"))
+    if sub == "comment":
+        return _rest_done(gh_rest(root, "POST", f"{pr_issue_path(pr)}/comments",
+                                  {"body": o.get("body") or ""}),
+                          f"commented on {pr}\n")
+    if sub == "review":
+        event = ("APPROVE" if o.get("approve") else
+                 "REQUEST_CHANGES" if o.get("request-changes") else "COMMENT")
+        fields = {"event": event}
+        if o.get("body"):
+            fields["body"] = o["body"]
+        return _rest_done(gh_rest(root, "POST", f"{path}/reviews", fields),
+                          f"{event.lower().replace('_', ' ')} on {pr}\n")
+    return _rest_fail(f"no REST equivalent for gh pr {sub}")
+
+
 def sync_pr_draft_bit(root, pr, want_draft):
     """Mirror the board's draft/review state onto the PR's draft bit.
 
@@ -4048,8 +4382,8 @@ def sync_pr_draft_bit(root, pr, want_draft):
     info = pr_view(root, pr, soft=True) or {}
     if info.get("isDraft") is want_draft:
         return True
-    argv = ["pr", "ready", pr] + (["--undo"] if want_draft else [])
-    r = gh(*argv, cwd=root, check=False)
+    argv = ["ready", pr] + (["--undo"] if want_draft else [])
+    r = pr_cmd(*argv, cwd=root)
     if r.returncode == 0:
         return True
     err = (r.stderr or r.stdout or "").strip()
@@ -4062,21 +4396,22 @@ def sync_pr_draft_bit(root, pr, want_draft):
 
 def pr_view(root, pr, *, soft=False):
     """JSON fields for land/cleanup. soft=True returns None on failure."""
-    r = gh("pr", "view", pr,
+    r = pr_cmd("view", pr,
            "--json", "state,mergedAt,mergeable,headRefName,baseRefName,"
            "body,url,title,isDraft",
-           cwd=root, check=False)
+           cwd=root)
     if r.returncode != 0:
         err = (r.stderr or r.stdout or "").strip()
         if soft:
             return None
-        sys.exit(f"error: gh pr view failed for {pr}:\n{err}")
+        sys.exit(f"error: {pr_call_label('view')} failed for {pr}:\n{err}")
     try:
         return json.loads(r.stdout)
     except json.JSONDecodeError:
         if soft:
             return None
-        sys.exit(f"error: could not parse gh pr view output for {pr}")
+        sys.exit(f"error: could not parse {pr_call_label('view')} output "
+                 f"for {pr}")
 
 
 def pr_is_merged(info):
@@ -4440,8 +4775,9 @@ def cmd_land(args):
 
     if base and base != integration:
         sys.exit(f"error: T{tid} PR base is '{base}', board integration is "
-                 f"'{integration}'. Retarget the PR (gh pr edit --base "
-                 f"{integration}) or fix board config before land.")
+                 f"'{integration}'. Retarget the PR "
+                 f"({pr_hint_retarget(pr, integration)}) or fix board "
+                 f"config before land.")
 
     if not has_remote(root):
         sys.exit("error: no origin remote; cannot land")
@@ -4480,7 +4816,7 @@ def cmd_land(args):
         # Merge commit, never squash: the branch's commits must stay in
         # integration's history so stacked children need no rewrite.
         # cleanup handles branch/worktree deletion explicitly.
-        r = gh("pr", "merge", pr, "--merge", cwd=root, check=False)
+        r = pr_cmd("merge", pr, "--merge", cwd=root)
         out = ((r.stdout or "") + (r.stderr or "")).strip()
         if r.returncode == 0:
             merged = True
@@ -4536,14 +4872,10 @@ def cmd_land(args):
 # ---------- claim (implement setup) ----------
 
 def identity_or_exit(root, scope):
-    ident = read_local(root, scope, "identity")
-    if not ident:
-        id_path = os.path.join(product_root(root, scope), ".dev", "identity")
-        sys.exit(f"error: no identity set for this product ({id_path}). "
-                 "Run: init --name <handle> (or pass --assignee)")
-    # A rename made elsewhere must not let this checkout write its old
-    # handle as an assignee once the board has synced it.
-    return heal_renamed_identity(root, scope, ident)
+    ident, err = current_identity(root, scope)
+    if err:
+        sys.exit(f"error: {err}")
+    return ident
 
 
 def resolve_stack_start(root, bw, scope, tid, parent_id, integration):
@@ -4716,25 +5048,33 @@ def path_under_task_worktrees(root, scope, path):
         return False
 
 
-def find_open_pr_for_branch(root, branch, base=""):
+def find_open_pr_for_branch(root, branch, base="", *, strict=False):
     """Return PR url for an open PR with this head branch, or ''.
 
     A falsy ``base`` matches any base — the caller has not fixed one yet,
     and land retargets a stacked PR's base anyway, so the head branch is
-    the stable identity.
+    the stable identity. A failed lookup also returns '' unless
+    ``strict`` (any-base only), which exits instead: '' must then mean
+    nothing is open, not that nobody could tell.
     """
     if not base:
-        r = gh("pr", "list", "--head", branch, "--state", "open",
-               "--json", "url", "--limit", "5", cwd=root, check=False)
-        if r.returncode != 0:
-            return ""
+        r = pr_cmd("list", "--head", branch, "--state", "open",
+               "--json", "url", "--limit", "5", cwd=root)
         try:
-            items = json.loads(r.stdout or "[]")
+            items = json.loads(r.stdout or "[]") if r.returncode == 0 \
+                else None
         except json.JSONDecodeError:
+            items = None
+        if not isinstance(items, list):
+            if strict:
+                err = (r.stderr or r.stdout or "").strip()
+                sys.exit(f"error: could not look up the open PR on "
+                         f"'{branch}' ({pr_call_label('list')} failed):\n"
+                         f"{err}")
             return ""
         return (items[0].get("url") or "").strip() if items else ""
-    r = gh("pr", "list", "--head", branch, "--base", base, "--state", "open",
-           "--json", "url,number", "--limit", "5", cwd=root, check=False)
+    r = pr_cmd("list", "--head", branch, "--base", base, "--state", "open",
+           "--json", "url,number", "--limit", "5", cwd=root)
     if r.returncode != 0:
         return ""
     try:
@@ -4742,9 +5082,8 @@ def find_open_pr_for_branch(root, branch, base=""):
     except json.JSONDecodeError:
         return ""
     if not items:
-        r = gh("pr", "list", "--head", branch, "--state", "open",
-               "--json", "url,baseRefName", "--limit", "5", cwd=root,
-               check=False)
+        r = pr_cmd("list", "--head", branch, "--state", "open",
+               "--json", "url,baseRefName", "--limit", "5", cwd=root)
         if r.returncode != 0:
             return ""
         try:
@@ -5460,8 +5799,8 @@ def cmd_restack(args):
             push_task_branch(root, branch, force=False)
         if step.get("retarget") and step["pr"] and step["new_base"]:
             if step["old_base"] != step["new_base"]:
-                r = gh("pr", "edit", step["pr"], "--base", step["new_base"],
-                       cwd=root, check=False)
+                r = pr_cmd("edit", step["pr"], "--base", step["new_base"],
+                       cwd=root)
                 if r.returncode != 0:
                     err = (r.stderr or r.stdout or "").strip()
                     sys.exit(f"error: could not retarget T{tid} PR base to "
@@ -5594,8 +5933,7 @@ def cmd_ship(args):
 
     if worktree_is_dirty(work):
         msg = (args.message or "").strip() or f"{prefix} {meta['title']}"
-        if not msg.startswith(prefix):
-            msg = f"{prefix} {msg}"
+        msg = with_title_prefix(msg, prefix, tid)
         r = git("add", "-A", cwd=work, check=False)
         if r.returncode != 0:
             err = (r.stderr or r.stdout or "").strip()
@@ -5664,8 +6002,7 @@ def cmd_ship(args):
 
     if not pr_url:
         title = (args.title or "").strip() or f"{prefix} {meta['title']}"
-        if not title.startswith(prefix):
-            title = f"{prefix} {title}"
+        title = with_title_prefix(title, prefix, tid)
         body = (args.body or "").strip()
         if not body:
             body = (meta.get("body") or "").strip() or meta["title"]
@@ -5674,22 +6011,23 @@ def cmd_ship(args):
         if batch_line:
             body = ensure_dev_batch_in_text(body, batch_ids)
         body = ensure_shipped_in_text(body, shipped_records)
-        create = ["pr", "create", "--base", pr_base, "--head", branch,
+        create = ["create", "--base", pr_base, "--head", branch,
                   "--title", title, "--body", body]
         argv = create + ["--draft"] if target == "draft" else create
-        r = gh(*argv, cwd=root, check=False)
+        r = pr_cmd(*argv, cwd=root)
         if r.returncode != 0 and draft_unsupported(r.stderr or r.stdout or ""):
             # The board owns `draft`; the PR's draft bit only mirrors it
             # where GitHub offers one. Never block a ship over the mirror.
             print(f"warning: this repo cannot open draft PRs; opening a "
                   f"normal PR — T{tid} is still draft on the board",
                   file=sys.stderr)
-            r = gh(*create, cwd=root, check=False)
+            r = pr_cmd(*create, cwd=root)
         if r.returncode != 0:
             err = (r.stderr or r.stdout or "").strip()
             pr_url = find_open_pr_for_branch(root, branch, pr_base)
             if not pr_url:
-                sys.exit(f"error: gh pr create failed:\n{err}")
+                sys.exit(f"error: {pr_call_label('create')} failed:\n"
+                         f"{err}")
             print(f"  PR appeared during create: {pr_url}")
         else:
             pr_url = (r.stdout or "").strip().splitlines()[-1].strip()
@@ -5719,8 +6057,7 @@ def cmd_ship(args):
                                                       args.version_intent)
             new_body = ensure_shipped_in_text(new_body, shipped_records)
             if new_body.strip() != body.strip():
-                r = gh("pr", "edit", pr_url, "--body", new_body, cwd=root,
-                       check=False)
+                r = pr_cmd("edit", pr_url, "--body", new_body, cwd=root)
                 if r.returncode != 0:
                     err = (r.stderr or r.stdout or "").strip()
                     print(f"  warning: could not update PR body: {err}",
@@ -5813,6 +6150,57 @@ def cmd_unready(args):
     sync_pr_draft_bit(root, pr, True)
     set_task_status(root, scope, integration, bw, meta, "draft")
     print(f"T{tid}: back to draft → {pr}")
+
+
+PR_VIEW_JSON = ("state,mergedAt,reviewDecision,isDraft,url,title,"
+                "baseRefName,headRefName,mergeable,author,body,reviews,"
+                "comments")
+
+
+def cmd_pr(args):
+    """Read or act on a task's PR: a thin `gh pr` wrapper (pr_cmd), so it
+    also works where GraphQL is blocked — flows use this, never gh pr.
+
+    The PR is the open one on --head when given (implement's throw-away of
+    a leftover branch the task no longer records), else the task's recorded
+    one, else the open PR on its branch. `close` with nothing open is a
+    no-op, so the throw-away can run it unconditionally.
+    """
+    root, scope, integration, bw = ctx()
+    meta = find_task(bw, scope, args.id)
+    tid = meta["id"]
+    require_gh(root)
+    head = (args.head or "").strip()
+    pr = "" if head else (meta.get("pr") or "").strip()
+    if not pr:
+        branch = head or task_branch_name(meta)
+        pr = (find_open_pr_for_branch(root, branch, strict=True)
+              if branch else "")
+    if not pr and args.action == "close":
+        print(f"T{tid}: no open PR to close")
+        return
+    if not pr:
+        sys.exit(f"error: T{tid} has no PR (none recorded, none open on its "
+                 f"branch)")
+    argv = [args.action, pr]
+    if args.action == "view" and args.json:
+        argv += ["--json", PR_VIEW_JSON]
+    if args.action == "review":
+        flag = next((f for f in ("approve", "request-changes", "comment")
+                     if getattr(args, f.replace("-", "_"))), None)
+        if not flag:
+            sys.exit("error: pr review needs --approve, --request-changes "
+                     "or --comment")
+        argv.append(f"--{flag}")
+    if args.action == "comment" and not (args.body or "").strip():
+        sys.exit("error: pr comment needs --body")
+    if args.action in ("comment", "review") and args.body:
+        argv += ["--body", args.body]
+    r = pr_cmd(*argv, cwd=root)
+    if r.returncode != 0:
+        sys.exit(f"error: pr {args.action} failed for {pr}:\n"
+                 f"{(r.stderr or r.stdout or '').strip()}")
+    sys.stdout.write(r.stdout or "")
 
 
 def scope_path_is_in_scope(scope, path):
@@ -5969,14 +6357,15 @@ def cmd_preflight(args):
     pr_err = ""
     pr_url = ""
     for attempt in range(1, 4):
-        r = gh("pr", "create", "--base", integration, "--head", park_branch,
-               "--title", title, "--body", body, cwd=root, check=False)
+        r = pr_cmd("create", "--base", integration, "--head", park_branch,
+               "--title", title, "--body", body, cwd=root)
         if r.returncode == 0:
             pr_url = (r.stdout or "").strip().splitlines()[-1].strip()
             break
         pr_err = (r.stderr or r.stdout or "").strip()
         if attempt < 3:
-            print(f"preflight: gh pr create failed (attempt {attempt}/3); "
+            print(f"preflight: {pr_call_label('create')} failed (attempt "
+                  f"{attempt}/3); "
                   f"retrying…", flush=True)
             time.sleep(1)
     if pr_url:
@@ -5986,12 +6375,13 @@ def cmd_preflight(args):
     # the happy path but must not block implement — exit 0 and yell so the
     # agent surfaces the failure to the user.
     print(
-        "WARNING: preflight: gh pr create failed after retries — "
+        f"WARNING: preflight: {pr_call_label('create')} failed after "
+        "retries — "
         "SURFACE THIS TO THE USER.\n"
         f"  park branch is safe — do not delete '{park_branch}' "
         f"(local or origin) until reviewed.\n"
-        f"  finish PR: gh pr create --base {integration} "
-        f"--head {park_branch} --title {title!r}\n"
+        f"  finish PR: "
+        f"{pr_hint_create(integration, park_branch, title)}\n"
         f"  local '{integration}' already reset; implement may proceed.\n"
         f"{pr_err}",
         flush=True,
@@ -6068,9 +6458,9 @@ def cmd_iteration_land(args):
     # advanced after that land and still need a new PR.
     open_url = ""
     merged_url = ""
-    r = gh("pr", "list", "--head", integration, "--base", parent,
+    r = pr_cmd("list", "--head", integration, "--base", parent,
            "--state", "all", "--json", "url,state,mergedAt,number",
-           "--limit", "10", cwd=root, check=False)
+           "--limit", "10", cwd=root)
     if r.returncode == 0:
         try:
             items = json.loads(r.stdout or "[]")
@@ -6099,11 +6489,11 @@ def cmd_iteration_land(args):
         body = (args.body or "").strip() or (
             f"Land iteration {label} (`{integration}` → `{parent}`) "
             f"with a merge commit (not squash).\n")
-        r = gh("pr", "create", "--base", parent, "--head", integration,
-               "--title", title, "--body", body, cwd=root, check=False)
+        r = pr_cmd("create", "--base", parent, "--head", integration,
+               "--title", title, "--body", body, cwd=root)
         if r.returncode != 0:
             err = (r.stderr or r.stdout or "").strip()
-            sys.exit(f"error: gh pr create failed:\n{err}")
+            sys.exit(f"error: {pr_call_label('create')} failed:\n{err}")
         pr_url = (r.stdout or "").strip().splitlines()[-1].strip()
         print(f"iteration-land: opened {pr_url}")
     else:
@@ -6123,7 +6513,7 @@ def cmd_iteration_land(args):
         if readiness == "CONFLICTING":
             sys.exit(f"error: iteration PR is CONFLICTING; resolve and "
                      f"re-run iteration-land:\n{pr_url}")
-        r = gh("pr", "merge", pr_url, "--merge", cwd=root, check=False)
+        r = pr_cmd("merge", pr_url, "--merge", cwd=root)
         out = ((r.stdout or "") + (r.stderr or "")).strip()
         if r.returncode == 0:
             print(f"iteration-land: merged (merge commit) attempt {attempt}")
@@ -6195,7 +6585,6 @@ def cmd_init(args):
         entries, name, err = roster_join([], args.name, login)
         if err:
             sys.exit(f"error: {err}")
-        write_local(root, scope, "identity", name)
         os.makedirs(os.path.join(bw, tdir(scope)), exist_ok=True)
         idx = parse_positive_int(
             args.iteration if args.iteration is not None else 1, "iteration")
@@ -6231,7 +6620,6 @@ def cmd_init(args):
                                          board_former_handles(cfg))
         if err:
             sys.exit(f"error: {err}")
-        write_local(root, scope, "identity", name)
         if entries != old:
             cfg["contributors"] = format_contributors(entries)
             write_board_cfg(bw, scope, cfg)
@@ -6261,40 +6649,8 @@ def cmd_whoami(args):
     if scope is None:
         sys.exit(f"error: no board found (no {TASKS_DIR}/board.yml from cwd up "
                  "to repo root). Run: tasks.py init --name <you>")
-    if args.github:
-        # Auto's identity: the human who owns this machine's gh login, read
-        # from the roster rather than the checkout, so agent work always
-        # traces to a registered person. Never registers anyone.
-        login, err = gh_login(root)
-        if err:
-            sys.exit(f"error: {err}")
-        branch, bw = resolve_board(root, scope)
-        cfg = read_board_cfg(bw, scope)
-        entries = board_contributors(cfg)
-        _, handle, err = roster_join(entries, None, login)
-        if err:
-            # The checkout's own handle may be on the roster without its
-            # login (joined before logins were recorded): record it there
-            # and act as that handle. Never registers anyone new.
-            ident = read_local(root, scope, "identity")
-            filled, warn = login_backfill(entries, ident, login)
-            if warn or filled == entries:
-                sys.exit(f"error: {warn or err}")
-            cfg["contributors"] = format_contributors(filled)
-            write_board_cfg(bw, scope, cfg)
-            with contextlib.redirect_stdout(sys.stderr):
-                board_commit(root, branch, bw, scope,
-                             f"dev: record GitHub login for {ident}")
-            handle = ident
-        print(handle)
-        return
-    ident = read_local(root, scope, "identity")
-    if ident is None:
-        id_path = os.path.join(product_root(root, scope), ".dev", "identity")
-        sys.exit(f"error: no identity set for this product "
-                 f"({id_path}). Run: init --name <handle>")
-    ident = heal_renamed_identity(root, scope, ident)
-    record_missing_login(root, scope, ident)
+    # --github is kept as an alias: identity always comes from the login.
+    ident = identity_or_exit(root, scope)
     if args.role:
         # The board answers "am I an integrator?" so callers never have to
         # compare identities themselves — and so the roster's shape stays
@@ -6378,7 +6734,7 @@ def cmd_integrator(args):
     cfg = read_board_cfg(bw, scope)
     roster = board_integrators(cfg)
     if args.action == "list":
-        ident = read_local(root, scope, "identity")
+        ident, _ = current_identity(root, scope)
         for name in roster:
             print(f"{name}{'  (you)' if name == ident else ''}")
         if not roster:
@@ -6451,7 +6807,7 @@ def cmd_contributor(args):
     cfg = read_board_cfg(bw, scope)
     entries = board_contributors(cfg)
     integrators = board_integrators(cfg)
-    ident = read_local(root, scope, "identity")
+    ident, _ = current_identity(root, scope)
     formers = board_former_handles(cfg)
     if args.action == "list":
         for h, l in entries:
@@ -6502,8 +6858,8 @@ def cmd_contributor(args):
     if dropped:
         print(f"  dropped as accessor of: {', '.join(dropped)}")
     if name == ident:
-        print("note: this checkout's identity is still that handle; re-run "
-              "init to join as someone on the roster")
+        print("note: your GitHub login is no longer on this board's roster; "
+              "re-run init to join again")
 
 
 def contributor_rename(root, scope, branch, bw, cfg, ident, old, new,
@@ -6548,10 +6904,6 @@ def contributor_rename(root, scope, branch, bw, cfg, ident, old, new,
         print(f"  assignee on: {', '.join(reassigned)}")
     if accessed:
         print(f"  accessor of: {', '.join(accessed)}")
-    if ident == old:
-        write_local(root, scope, "identity", new)
-        print(f"  this checkout's identity is now '{new}'; other checkouts "
-              "follow on their next whoami")
 
 
 def cmd_area(args):
@@ -6613,6 +6965,8 @@ def cmd_add(args):
     validate_recurring(meta)
     validate_type(meta, new=True)
     validate_rehearsal(meta)
+    umbrellas = add_umbrella_targets(parse_id_list(args.umbrella), meta["deps"],
+                                     tasks)
     known = {t["id"] for t in tasks}
     for d in meta["deps"]:
         if d not in known:
@@ -6625,8 +6979,38 @@ def cmd_add(args):
     path = os.path.join(bw, tdir(scope), f"{tid:03d}.md")
     with open(path, "w") as f:
         f.write(render_task(meta))
-    board_commit(root, branch, bw, scope, f"dev: add T{tid} {args.title}")
+    for u in umbrellas:
+        u["deps"] = u["deps"] + [tid]
+        with open(u["path"], "w") as f:
+            f.write(render_task(u))
+    under = "".join(f" under T{u['id']}" for u in umbrellas)
+    board_commit(root, branch, bw, scope, f"dev: add T{tid} {args.title}{under}")
     print(render_task(meta).rstrip())
+    for u in umbrellas:
+        print(f"T{u['id']} updated: deps={u['deps']}")
+
+
+def add_umbrella_targets(ids, deps, tasks):
+    """The umbrella tasks `add --umbrella` files the new task under; exits on
+    an id that is not an umbrella, a closed one (done or not-planned, which
+    `related --deps` never offers either), or one the new task also depends
+    on (the umbrella would then wait on its own child)."""
+    by_id = {t["id"]: t for t in tasks}
+    out = []
+    for i in ids:
+        t = by_id.get(i)
+        if t is None:
+            sys.exit(f"error: --umbrella: no task with id {i}")
+        if not is_umbrella(t):
+            sys.exit(f"error: --umbrella: T{i} is not an umbrella")
+        if t.get("status") in ("done", "not-planned"):
+            sys.exit(f"error: --umbrella: T{i} is {t['status']}; a closed "
+                     "umbrella takes no new children")
+        if i in deps:
+            sys.exit(f"error: --umbrella: T{i} is also in --deps; a task "
+                     "cannot both wait on an umbrella and sit under it")
+        out.append(t)
+    return out
 
 
 def cmd_update(args):
@@ -6733,9 +7117,28 @@ def cmd_related(args):
     hits = related_hits(args.text, tasks)
     if not hits:
         print("(nothing related)")
-        return
     for score, t in hits[:8]:
         print(f"{score:.2f} {fmt_line(t, tasks)}")
+    for u, under in dep_umbrellas(parse_id_list(args.deps), tasks):
+        held = ", ".join(f"T{d}" for d in under)
+        print(f"umbrella of {held}: {fmt_line(u, tasks)}")
+
+
+def dep_umbrellas(dep_ids, tasks):
+    """Open umbrellas holding any of `dep_ids` as a direct child, with the
+    deps each holds: (umbrella, [ids]) in umbrella-id order. An umbrella that
+    is itself one of the deps is left out — the new task waits on it, so it
+    cannot also sit under it."""
+    want = set(dep_ids)
+    out = []
+    for t in sorted(tasks, key=lambda t: t["id"]):
+        if (not is_umbrella(t) or t["id"] in want
+                or t.get("status") in ("done", "not-planned")):
+            continue
+        under = sorted(d for d in t.get("deps", []) if d in want)
+        if under:
+            out.append((t, under))
+    return out
 
 
 def related_hits(text, items, fields=("title", "body")):
@@ -8594,7 +8997,7 @@ def retarget_carried_prs(root, carried, old_branch, new_branch):
         info = pr_view(root, url, soft=True)
         if not info:
             print(f"warning: could not read {url}; if it is based on "
-                  f"'{old_branch}', run: gh pr edit {url} --base {new_branch}",
+                  f"'{old_branch}', run: {pr_hint_retarget(url, new_branch)}",
                   file=sys.stderr)
             continue
         state = (info.get("state") or "").upper()
@@ -8604,16 +9007,16 @@ def retarget_carried_prs(root, carried, old_branch, new_branch):
             print(f"warning: {url} is closed — probably when '{old_branch}' "
                   f"was deleted after the iteration landed. Restore that "
                   f"branch, reopen the PR, then run: "
-                  f"gh pr edit {url} --base {new_branch}", file=sys.stderr)
+                  f"{pr_hint_retarget(url, new_branch)}", file=sys.stderr)
             continue
         if state != "OPEN":
             continue
         if info.get("baseRefName") != old_branch:
             continue
-        r = gh("pr", "edit", url, "--base", new_branch, cwd=root, check=False)
+        r = pr_cmd("edit", url, "--base", new_branch, cwd=root)
         if r.returncode != 0:
             print(f"warning: could not retarget {url} to '{new_branch}'; "
-                  f"run: gh pr edit {url} --base {new_branch}\n"
+                  f"run: {pr_hint_retarget(url, new_branch)}\n"
                   f"{(r.stderr or r.stdout or '').strip()}", file=sys.stderr)
             continue
         print(f"retarget {url}: {old_branch} → {new_branch}")
@@ -8732,7 +9135,7 @@ def main():
                    help="target the board at this subdir (relative to repo root)")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    s = sub.add_parser("init", help="set identity; create or join a board")
+    s = sub.add_parser("init", help="create or join a board")
     s.add_argument("--name",
                    help="your handle; omit to join an existing board as the "
                         "handle your GitHub login (gh) is registered under")
@@ -8749,14 +9152,14 @@ def main():
                    help="start date YYYY-MM-DD (default: today)")
     s.set_defaults(fn=cmd_init)
 
-    s = sub.add_parser("whoami", help="print this checkout's identity")
+    s = sub.add_parser("whoami", help="print your handle: the roster handle "
+                       "your GitHub login holds")
     g = s.add_mutually_exclusive_group()
     g.add_argument("--role", action="store_true",
                    help="print this identity's board role instead: "
                         "'integrator' or 'contributor'")
     g.add_argument("--github", action="store_true",
-                   help="print the roster handle this machine's GitHub login "
-                        "(gh) holds; error if unreadable or not registered")
+                   help="same as plain whoami (kept for compatibility)")
     s.set_defaults(fn=cmd_whoami)
 
     s = sub.add_parser("config", help="show or set board settings")
@@ -8895,6 +9298,9 @@ def main():
     s.add_argument("--status",
                    choices=["proposed", "backlog", "planned", "later"],
                    default="backlog")
+    s.add_argument("--umbrella", help="comma-separated umbrella ids to file "
+                                      "the new task under (adds it to their "
+                                      "deps in the same board commit)")
     s.set_defaults(fn=cmd_add)
 
     s = sub.add_parser("update", help="update task fields")
@@ -8922,6 +9328,8 @@ def main():
 
     s = sub.add_parser("related", help="existing tasks similar to some text")
     s.add_argument("text", help="proposed title (+ description)")
+    s.add_argument("--deps", help="the new task's planned deps: also list "
+                                  "the umbrellas they sit under")
     s.set_defaults(fn=cmd_related)
 
     s = sub.add_parser("delete", help="delete a task")
@@ -9084,7 +9492,7 @@ def main():
                        help="implement setup: branch + linked worktree, status=doing")
     s.add_argument("id", type=int)
     s.add_argument("--assignee",
-                   help="assignee (default: product identity)")
+                   help="assignee (default: your handle)")
     s.add_argument("--branch",
                    help="task branch (default: recorded or dev/<scope?>-<id>-<slug>)")
     s.add_argument("--stack-on", type=int, metavar="ID",
@@ -9147,6 +9555,27 @@ def main():
     s.add_argument("id", type=int)
     s.set_defaults(fn=cmd_unready)
 
+    s = sub.add_parser("pr",
+                       help="read or act on a task's PR (gh pr, or REST "
+                            "where GraphQL is blocked); flows use this")
+    s.add_argument("id", type=int)
+    s.add_argument("action",
+                   choices=("view", "diff", "comment", "review", "close"))
+    s.add_argument("--body", help="comment / review text")
+    s.add_argument("--head", metavar="BRANCH",
+                   help="act on the open PR from this branch instead of "
+                        "the task's recorded one (a leftover branch)")
+    s.add_argument("--json", action="store_true",
+                   help="view: JSON (state, mergedAt, reviewDecision, "
+                        "isDraft, author, reviews, comments, …)")
+    g = s.add_mutually_exclusive_group()
+    g.add_argument("--approve", action="store_true", help="review: approve")
+    g.add_argument("--request-changes", action="store_true",
+                   help="review: request changes (needs --body)")
+    g.add_argument("--comment", action="store_true",
+                   help="review: comment only (needs --body)")
+    s.set_defaults(fn=cmd_pr)
+
     s = sub.add_parser("batch-gate",
                        help="exit 2 if --ids omits an open stack parent "
                             "(a partial Dev-batch only warns)")
@@ -9167,7 +9596,7 @@ def main():
                         "--onto preserves in-set stack parents); implies "
                         "PR base retarget unless base already matches")
     s.add_argument("--retarget", action="store_true",
-                   help="gh pr edit --base to the new stack parent / --onto")
+                   help="retarget the PR base to the new stack parent / --onto")
     s.add_argument("--dry-run", action="store_true",
                    help="print plan only (also land order for the set); "
                         "do not rebase or push")

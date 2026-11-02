@@ -30,10 +30,10 @@ When a Dev-batch (or stack component) applies, this **supersedes** the single-re
 
 For each member (any order for reading; prefer stack bottom→top for context):
 
-1. Plain sentence of purpose, then `gh pr diff` / review seriously.
+1. Plain sentence of purpose, then `TASKS pr <id> diff` / review seriously.
 2. Present findings + recommendation (approve / request changes) **for the whole set together** when possible (one sitting), numbered in **one sequence across the set** — never restarting per member, which would give two findings the same bare number — each naming the member it belongs to (`3. (T27) …`). One proposal line closes the set (flows/review.md), carrying every disposition and, under the sugar below, the ready + land wave. Include the UI visual-inspect ask in flows/review.md for any members that touch UI — one ask for the set, not per member mid-read.
 3. On **request changes** for member Tᵢ: do **not** land anyone. The author fixes on the branch and re-pushes with `TASKS ship <i> --shipped "<what changed>"`. Then propagate: `TASKS restack --ids <full open set> --after <i>` (fail-closed — a conflict leaves that rebase in the failed member's worktree and stops). Earlier plan steps may already be force-pushed; that is expected, not a half-open rebase. Resolve the conflicts there (`git add`), then **re-run the same restack** (it continues that rebase; already-up-to-date members no-op). Do not hand-roll multi-branch rebase or try to roll back successful steps. Surface restack output verbatim.
-4. On **approve** for a member: record the conversational go-ahead for that id; **do not** `TASKS land` yet. The self-approve skip for `gh pr review --approve` still applies (flows/review.md).
+4. On **approve** for a member: record the conversational go-ahead for that id; **do not** `TASKS land` yet. The self-approve skip for `TASKS pr <id> review --approve` still applies (flows/review.md).
 5. On **approve** for a `draft` member: it also has to be promoted before phase 2 can reach it — `TASKS ready <id>` on the user's go-ahead (flows/review.md). Never ready a draft the user did not approve; a member left in draft simply holds the set out of phase 2.
 
 Repeat until every open member is approved or the user abandons the batch.

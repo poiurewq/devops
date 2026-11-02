@@ -33,8 +33,9 @@ Say which you did, once ("filed as one task" / "filed three, the third waits on 
    - Substantially the same task already exists → say so and propose amending it (`TASKS update <id> …`) rather than filing a duplicate. The user decides.
    - A near-identical task that is already `done` is usually not a duplicate — recurring work legitimately comes round again. Check whether it should be `--kind recurring` instead (SKILL.md *Recurring*): offer, and let the user choose the cadence. Never set one on your own.
    - Otherwise judge the neighbours for **dependencies in both directions** — must something else happen first (`--deps`), or does an existing task now wait on this one (update *its* deps)?
-   - A neighbour marked `☂` is an umbrella that may already cover this: propose the new task as its child (`TASKS update <umbrella> --deps <existing+new>`).
-3. `TASKS add --title "…" --type ops [--deps 1,2] [--desc "…"]`, then show the task as recorded (the script prints it). `--type ops` is not optional — without it the task is filed as code work.
+   - A neighbour marked `☂` is an umbrella that may already cover this: propose the new task as its child (`--umbrella <id>` on the add).
+   - **Once deps are picked**, run `TASKS related "<title + description>" --deps <ids>` again: each `umbrella of T…:` line it adds names an umbrella those deps sit under. Ask whether the new task belongs under it too; on yes, file with `--umbrella <id>`. Skip an umbrella already settled by the bullet above.
+3. `TASKS add --title "…" --type ops [--deps 1,2] [--umbrella <id>] [--desc "…"]`, then show the task as recorded (the script prints it). `--type ops` is not optional — without it the task is filed as code work.
 4. Offer the obvious next step: `/ops run <id>` if it is ready to do now, nothing if it is future work.
 
 Coming from `/ops run <description>` (no matching task): file exactly as above, then continue straight into the run — the user already said to do it, so don't ask again.

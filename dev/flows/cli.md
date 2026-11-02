@@ -8,26 +8,28 @@ TASKS --scope <subdir> <subcommand> ...   # target another board in the repo
 TASKS init [--name <handle>] [--scope <subdir>] [--integration <branch>]
            [--parent <branch>] [--iteration N] [--iteration-name <name>]
            [--iteration-started YYYY-MM-DD]
-                                        # reads the GitHub login from gh. No
+                                        # reads the GitHub login
+                                        # (DEVOPS_GITHUB_LOGIN, else gh). No
                                         # --name: join as the handle that login
                                         # holds (error if none). --name:
                                         # register it, or fill its missing
                                         # login; refused if the login is
                                         # another handle or the handle another
                                         # login's. Required to create a board.
-                                        # Refused when gh is missing, signed
-                                        # out or offline: no handle without a
-                                        # login
-TASKS whoami [--role | --github]        # this checkout's identity (exits
-                                        # nonzero if not set); --role prints
-                                        # this identity's board role instead,
-                                        # 'integrator' or 'contributor' — the
-                                        # only way to ask, never compare
-                                        # identities against board config;
-                                        # --github prints the roster handle
-                                        # this machine's gh login holds (auto's
-                                        # identity), nonzero if gh is
-                                        # unreadable or the login unregistered
+                                        # Refused when no login can be read:
+                                        # no handle without a login. Writes
+                                        # nothing about identity locally
+TASKS whoami [--role]                   # the roster handle your GitHub login
+                                        # holds (DEVOPS_GITHUB_LOGIN, else
+                                        # gh's account), looked up on the
+                                        # last-synced roster; nonzero if no
+                                        # login or it is not on the roster.
+                                        # --role prints its board role
+                                        # instead, 'integrator' or
+                                        # 'contributor' — the only way to
+                                        # ask, never compare identities
+                                        # against board config. --github is
+                                        # an alias of plain whoami
 TASKS config [<key> [<value>]]          # settable: parent_branch,
                                         # iteration (renumber live index;
                                         # refused if that n is archived),
@@ -57,9 +59,7 @@ TASKS contributor rename <name> <new>   # yourself, or anyone as integrator.
                                         # roster, live task assignees and
                                         # agent/env accessors (not archives
                                         # or run records); the old handle
-                                        # stays reserved. A checkout whose
-                                        # identity is an old handle follows
-                                        # on whoami (last-synced roster)
+                                        # stays reserved
 TASKS area list
 TASKS area set <name> [--desc "<one-line scope>"]
 TASKS area rm <name> [--force]
@@ -133,6 +133,11 @@ TASKS add --title "<title>" [--area <m>] [--deps <id,id>]
                                                 # a dry run of its flow
                                                 # (rehearsal: true)
           [--status proposed|backlog|planned|later]  # default backlog
+          [--umbrella <id[,id]>]                # add the new task to these
+                                                # umbrellas' deps, same board
+                                                # commit; refuses a
+                                                # non-umbrella or one also
+                                                # in --deps
 TASKS update <id> [--title "<t>"] [--area <m>] [--status <s>]
           [--kind umbrella|recurring|""] [--assignee <who>|""]
           [--branch <b>|""] [--pr <url>] [--needs decision|""]
@@ -217,8 +222,11 @@ TASKS collisions <id[,id…]>             # area occupancy vs doing/draft/review
                                         # implement offers proceed / stack /
                                         # wait, auto skips
                                         # (batch peers excluded from that check)
-TASKS related "<text>"                  # existing tasks similar to <text>;
-                                        # run before every add
+TASKS related "<text>" [--deps <id,id>] # existing tasks similar to <text>;
+                                        # run before every add; --deps (the
+                                        # new task's planned deps) adds an
+                                        # `umbrella of T…:` line per open
+                                        # umbrella directly holding one
 TASKS list [--assignee <who>] [--status <s>] [--needs decision]
            [--type ops|dev] [--json]    # --type dev also matches untyped
                                         # tasks
@@ -285,7 +293,7 @@ TASKS ship <id> --shipped "<what actually shipped>"
                 [--version-intent <intent>] [--base <branch>]
                 [--batch <id,id,…>]     # commit if dirty ([n/T<id>] prefix;
                                         # [<scope> n/T<id>] on a scoped board),
-                                        # push, gh pr create --draft if none
+                                        # push, open a draft PR if none
                                         # open, status=draft + pr URL (a first
                                         # ship always lands in draft; only
                                         # ready promotes it). Re-ship
@@ -343,4 +351,21 @@ TASKS land <id>                         # integrator-only (any name on the
                                         # (recurring: re-arms to backlog
                                         # with last_run stamped, not done)
 TASKS cleanup <id>                      # worktree + branch prune (branch only if PR MERGED)
+TASKS pr <id> view [--json]             # the task's PR: gh pr view, or REST
+                                        # once GraphQL is refused (or with
+                                        # DEVOPS_PR_TRANSPORT=rest); --json:
+                                        # state, mergedAt, reviewDecision
+                                        # (REST: latest approve / request-
+                                        # changes per reviewer), isDraft,
+                                        # base/head, mergeable, author, body,
+                                        # reviews, comments
+TASKS pr <id> diff                      # the PR's unified diff
+TASKS pr <id> comment --body B          # conversation comment
+TASKS pr <id> review --approve [--body B]
+      | --request-changes --body B | --comment --body B
+TASKS pr <id> close [--head <branch>]   # close it; --head acts on the open PR
+                                        # from that branch instead (a leftover
+                                        # the task no longer records); nothing
+                                        # open is a no-op, a failed lookup an
+                                        # error
 ```

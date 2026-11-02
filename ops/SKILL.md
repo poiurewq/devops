@@ -45,6 +45,7 @@ TASKS add --title "<title>" --type ops [--deps <id,id>]
           [--kind umbrella|recurring] [--cadence <N><unit>]
           [--next-due <date>] [--status proposed|backlog|planned|later]
           [--rehearsal]                 # a dry run of its flow (rehearse.md)
+          [--umbrella <id[,id]>]        # file under it: adds to its deps
 TASKS update <id> [--title] [--status] [--assignee <who>|""] [--deps]
           [--needs decision|""] [--flow <name[,name]>|""] [--append "<paragraph>"]
                                         # --append repeats, one paragraph each, in order
@@ -66,7 +67,8 @@ TASKS ran <id> [--flow <name[,name]>] --record "<inputs; deviations>"
                [--date YYYY-MM-DD]   # close an ops task with its run record
                [--rehearsal]         # a dry run: Rehearsed (<date>): …
 TASKS verify <id> "<how the children met the goal>"   # close an umbrella
-TASKS related "<text>"                  # run before every add
+TASKS related "<text>" [--deps <id,id>] # run before every add; --deps
+                                        # also lists their umbrellas
 TASKS list [--type ops] [--assignee <who>] [--status <s>] [--needs decision]
            [--json]
 TASKS recur list [--due]
@@ -83,7 +85,7 @@ TASKS config [<key> [<value>]]          # iteration, iteration_name,
                                         # iteration_started, parent_branch
 ```
 
-Caveats: `--append` adds to a body (no prior `show` needed, can't truncate); `--desc` **replaces** it — only for genuine rewrites. Flags combine in one call; an empty string (`--assignee ""`, `--flow ""`) clears a field; multi-word values need quoting. When no board is found the error lists known boards — cd in, or pass `--scope`. **Whenever a `TASKS` command exits non-zero or prints `error: …`, surface that output to the user verbatim and stop** — never hide it, paraphrase it away, or paper over it with hand-run git. When `whoami` warns that a GitHub login is already another handle's, surface it and ask the user which of its fixes to run.
+Caveats: `--append` adds to a body (no prior `show` needed, can't truncate); `--desc` **replaces** it — only for genuine rewrites. Flags combine in one call; an empty string (`--assignee ""`, `--flow ""`) clears a field; multi-word values need quoting. When no board is found the error lists known boards — cd in, or pass `--scope`. **Whenever a `TASKS` command exits non-zero or prints `error: …`, surface that output to the user verbatim and stop** — never hide it, paraphrase it away, or paper over it with hand-run git.
 
 ## Ground rules
 
@@ -102,7 +104,7 @@ Caveats: `--append` adds to a body (no prior `show` needed, can't truncate); `--
 
 - `<scope>/.tasks/` — tracked, lives only on the board's integration branch: `NNN.md` (one file per task), `board.yml` (settings, iteration, who holds the board), `areas.md` (a dev concern — ops tasks carry no area), `log.md` (past-iteration index), `archive/<n>-<slug>/NNN.md` (every closed task, verbatim — the run records of past iterations live here and stay searchable; written by `/ops iteration close`).
 - `<scope>/.flows/` — tracked, same home as `.tasks/`, written only through `TASKS flow …`. One file per flow, `<name>.md`: frontmatter `id` (numeric, fixed at create), `name`, `description` (one line), `inputs`, `uses` (flows it follows), `status` (`active`/`retired`), `formerly` (past names, a matching hint), `created`; body = the procedure. Flows outlive iterations — nothing archives them. `<scope>/.flows/agents/<name>.md` and `<scope>/.flows/environments/<name>.md` are the **registries** flows point at (written through `TASKS agent …` / `TASKS env …`, never read as flows): an agent is `name`, `accessors`, `description` (one line, who it is); an environment is `name`, `accessors`, optional `machine`, body = prose expectations; both carry `formerly` (past names). There are no ids: a run record names an entry by the name it had then, so `rename` keeps the old name in `formerly`, where it stays **reserved** (add and rename refuse it) and still resolves — `show`, `update`, `rename` and `rm` accept a former name and print what it matched. `rm` frees all of an entry's names. Every accessor is a board contributor and each entry keeps at least one, so every name leads to a human who can reach it; `project`, `runner`, `any` and `inline` are reserved. Accessors are a routing aid — who can reach it now — not history: who ran an agent for a given run lives in that run's record.
-- `<scope>/.dev/` — local to this checkout, gitignored: `identity` and the hidden worktree the script commits board changes through. Shared with `/dev` if it is installed; one identity per project either way.
+- `<scope>/.dev/` — local to this checkout, gitignored: the hidden worktree the script commits board changes through. Shared with `/dev` if it is installed. Identity is not stored here: it is the roster handle your GitHub login holds, on whichever board you are working.
 - `<scope>/board` — local live viewer (`r` refresh, `a` toggle by-area, `e` toggle expand, `l` toggle a flat list of every task in this iteration, done included, latest board commit first (`a`/`e` do not apply while it is up), `c` check (an id, or `id,id…` for a group), `s` search (words + Enter ranks live tasks as `TASKS related` does, `e` widens it to done/later/shelved/not-planned (dimmed); while the `s>` prompt is open every letter is query text, Esc cancels, Ctrl-D still quits), `f` flows pane, `q` (or Esc) back one level — a typed id, then a task or flow opened from search hits back to the hits, then the shown output, then an open `c>` prompt, then the flows pane or latest list back to the board — and `q` quits from the plain board (Esc never quits; Ctrl-D quits from anywhere); the help line says `q back` while anything is open and `q quit` on a clean board (`r` is always refresh), arrows scroll, space/b page, type an id + Enter to show it). In the flows pane a typed number is the flow's id (its page ends with its run history; `h` opens an `h>` prompt where each flow id + Enter opens that flow scrolled there and the prompt stays open, a bare `h` on an open flow jumps there and opens it, and `h` again or `q` closes it), and `s` searches flows by name, description and procedure (retired ones tagged and dimmed); in the tasks pane a number is a task id.
 
 An **ops task** carries `type: ops` in its frontmatter. It has no area (areas lock regions of a codebase; ops touches none), gets no branch and no PR, and closes with its run record rather than a merge. It may also be `kind: recurring` (perpetual work on a cadence) or `kind: umbrella` (a goal whose `deps` are its children). Tasks without `type: ops` on the same board are dev tasks — see The boundary.
@@ -148,7 +150,7 @@ Statuses for an ops task: `proposed` (filed for approval) → `backlog` → `pla
 | `/ops meta` | Read `flows/meta.md` (pressure the playbook and the board). |
 | `/ops skill …` | Read `flows/skill.md` (status, update, auto on/off, feedback). |
 
-Anything not in the table maps onto the closest verb: read the intent, do it, and name the verb once. Before any board operation, check identity with `TASKS whoami` — never probe the filesystem for it. Identity is per project (`<scope>/.dev/identity`), so run from the project directory or pass `--scope`. If `whoami` errors, run the init flow. A handle is renamed with `TASKS contributor rename <name> <new-name>` (yourself, or anyone as integrator), never by re-joining: the old handle stays reserved and other checkouts follow on their next `whoami`. Given a description instead of an id, run `TASKS list`, match, and confirm if it is not obvious.
+Anything not in the table maps onto the closest verb: read the intent, do it, and name the verb once. Before any board operation, check identity with `TASKS whoami` — never probe the filesystem for it. Identity is not stored: it is the roster handle your GitHub login holds — `DEVOPS_GITHUB_LOGIN` if set (a login, not a handle; for cloud or CI), else the account `gh` is signed in as. Rosters are per board, so run from the project directory or pass `--scope`. If `whoami` errors, run the init flow. A handle is renamed with `TASKS contributor rename <name> <new-name>` (yourself, or anyone as integrator), never by re-joining: the old handle stays reserved, and nothing else needs updating, since identity is looked up by login. Given a description instead of an id, run `TASKS list`, match, and confirm if it is not obvious.
 
 ## Skill check
 
