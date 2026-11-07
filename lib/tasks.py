@@ -1215,7 +1215,7 @@ def _read_login(root):
     detail = (r.stderr or r.stdout or "").strip().splitlines()
     return None, ("gh could not read your GitHub login"
                   + (f" ({detail[0]})" if detail else "")
-                  + "; check the network and gh auth status, then re-run")
+                  + "; check the network and gh sign-in, then re-run")
 
 
 def current_identity(root, scope):
@@ -3304,12 +3304,42 @@ def resolve_task_ready_path(root, scope, tid, title, branch, integration):
 
 # ---------- land / cleanup (task PR merge path) ----------
 
+def gh_sign_in_failure(status, api):
+    """None when gh counts as signed in, else the detail to show.
+
+    status is the `gh auth status` result, api the `gh api user --jq .login`
+    one (None when status passed and it was not run). A working api call
+    wins over a failed status: Claude cloud's proxy token is reported
+    invalid by `gh auth status` while every API call through it works."""
+    if status.returncode == 0:
+        return None
+    if api is not None and api.returncode == 0 and api.stdout.strip():
+        return None
+    return (status.stderr or status.stdout or "").strip()
+
+
+GH_MISSING = "gh is not installed; see https://cli.github.com"
+
+
+def gh_sign_in_error(root):
+    """None when gh is signed in (gh_sign_in_failure), else the detail."""
+    if not shutil.which("gh"):
+        return GH_MISSING
+    status = sh(["gh", "auth", "status"], cwd=root, check=False)
+    api = None
+    if status.returncode != 0:
+        api = sh(["gh", "api", "user", "--jq", ".login"], cwd=root,
+                 check=False, timeout=GIT_NETWORK_TIMEOUT_S)
+    return gh_sign_in_failure(status, api)
+
+
 def require_gh(root):
-    """Exit unless gh is available and authenticated."""
-    r = sh(["gh", "auth", "status"], cwd=root, check=False)
-    if r.returncode != 0:
-        err = (r.stderr or r.stdout or "").strip()
-        sys.exit("error: gh not authenticated (needed for land). "
+    """Exit unless gh is available and signed in (gh_sign_in_error)."""
+    err = gh_sign_in_error(root)
+    if err == GH_MISSING:
+        sys.exit(f"error: {err}")
+    if err is not None:
+        sys.exit("error: gh not authenticated. "
                  f"Run: gh auth login\n{err}")
 
 
@@ -3798,7 +3828,7 @@ def open_prs_based_on(root, base_branch):
     return out
 
 
-def retarget_children(root, parent_branch, integration):
+def retarget_children(root, parent_branch, integration, *, fail_closed=True):
     """Point PRs stacked on parent_branch at integration. Fail-closed.
 
     GitHub does not auto-retarget: deleting a branch that open PRs are
@@ -3806,21 +3836,26 @@ def retarget_children(root, parent_branch, integration):
     the merge and before cleanup deletes the branch. Only the PR base
     moves — the parent's commits are already ancestors of integration
     after a merge commit, so no child branch is rewritten at any depth.
+    With fail_closed=False a failed retarget returns its error instead of
+    exiting (the caller must then not delete parent_branch); else None.
     """
     children = open_prs_based_on(root, parent_branch)
     if not children:
-        return
+        return None
     print(f"  retargeting {len(children)} stacked PR(s) to {integration}")
     for pr in children:
         url, head = pr["url"], pr["head"]
         r = pr_cmd("edit", url, "--base", integration, cwd=root)
         if r.returncode != 0:
             err = (r.stderr or r.stdout or "").strip()
+            if not fail_closed:
+                return f"could not retarget {url} ({head}):\n  {indent_err(err)}"
             sys.exit(f"error: could not retarget {url} ({head}) from "
                      f"'{parent_branch}' to '{integration}'; not deleting "
                      f"'{parent_branch}' (that would close this PR). "
                      f"Retarget it, then re-run land.\n{err}")
         print(f"  retarget {head}: {parent_branch} → {integration}")
+    return None
 
 
 def merge_forward_task_branch(root, branch, integration):
@@ -4178,6 +4213,7 @@ def pr_from_rest(d):
                       else "MERGEABLE" if m else "CONFLICTING"),
         "isDraft": bool(d.get("draft")),
         "headRefName": ((d.get("head") or {}).get("ref") or ""),
+        "headRefOid": ((d.get("head") or {}).get("sha") or ""),
         "baseRefName": ((d.get("base") or {}).get("ref") or ""),
         "author": {"login": (d.get("user") or {}).get("login") or ""},
     }
@@ -4314,13 +4350,15 @@ def rest_pr(root, args):
         head = urllib.parse.quote(o.get("head") or "", safe="/")
         r = gh_rest(root, "GET",
                     f"repos/{{owner}}/{{repo}}/pulls?"
-                    f"state={'all' if state == 'all' else state}"
+                    f"state={'closed' if state == 'merged' else state}"
                     f"&head={{owner}}:{head}&per_page=100")
         items = rest_json(r) if r.returncode == 0 else None
         if not isinstance(items, list):
             return _rest_done(r) if r.returncode else _rest_fail(
                 "could not parse the REST PR list")
         rows = [pr_from_rest(d) for d in items if isinstance(d, dict)]
+        if state == "merged":
+            rows = [x for x in rows if x["state"] == "MERGED"]
         if o.get("base"):
             rows = [x for x in rows if x["baseRefName"] == o["base"]]
         rows = rows[:int(o.get("limit") or 30)]
@@ -4433,8 +4471,7 @@ def task_branch_safe_to_drop(root, meta, branch):
     if not pr:
         return False, "no PR URL to verify merge; refusing to delete branch"
     # Prefer soft view so cleanup never aborts the whole command on gh flake.
-    r = sh(["gh", "auth", "status"], cwd=root, check=False)
-    if r.returncode != 0:
+    if gh_sign_in_error(root) is not None:
         return False, "gh not authenticated; refusing to delete branch"
     info = pr_view(root, pr, soft=True)
     if info is None:
@@ -4557,7 +4594,83 @@ def sweep_worktree_husks(root, scope, cwd, actions):
             actions.append(f"could not remove leftovers {path}: {e}")
 
 
-def cleanup_task_artifacts(root, scope, meta, branch=None, *, verbose=True):
+def indent_err(err):
+    return "\n  ".join(err.splitlines())
+
+
+def task_branch_re(scope):
+    """This board's conventional task branch names (default_task_branch)."""
+    prefix = default_task_branch(scope, 0, "")[:-len("0-task")]
+    return re.compile(rf"{re.escape(prefix)}\d+-")
+
+
+def sweep_candidates(tips, scope, keep):
+    """Remote task branches the sweep may look at: this board's naming,
+    minus `keep` (the task's own branch and every in-flight task's)."""
+    pat = task_branch_re(scope)
+    return [b for b in sorted(tips) if pat.match(b) and b not in keep]
+
+
+def sweep_merged_task_branches(root, scope, bw, own, actions):
+    """Delete merged task branches left on origin (a cloud session's land
+    cannot delete them). Reads the remote, not the board, so recurring and
+    archived tasks are covered. A branch goes only when its tip is in
+    origin/<integration>, no in-flight task holds it, and a merged PR has
+    it as head at that exact tip. Candidates are found with local git;
+    gh is called only for one. Stops at the first refused delete or failed
+    lookup, so a session that cannot delete pays for one candidate."""
+    integration = integration_branch(root, scope)
+    up = f"origin/{integration}"
+    if not ref_exists(root, up):
+        return
+    r = git("for-each-ref", "--format=%(refname) %(objectname)",
+            "refs/remotes/origin/", cwd=root, check=False)
+    tips = {}
+    for line in (r.stdout or "").splitlines():
+        ref, _, sha = line.partition(" ")
+        tips[ref[len("refs/remotes/origin/"):]] = sha
+    keep = {own} | {t["branch"] for t in all_tasks(bw, scope)
+                    if t["status"] in IN_FLIGHT and t.get("branch")}
+    for b in sweep_candidates(tips, scope, keep):
+        tip = tips[b]
+        if not is_ancestor(root, tip, up):
+            continue
+        r = pr_cmd("list", "--head", b, "--state", "merged",
+                   "--json", "headRefOid,url", cwd=root)
+        try:
+            rows = json.loads(r.stdout) if r.returncode == 0 else None
+        except json.JSONDecodeError:
+            rows = None
+        if not isinstance(rows, list):
+            err = (r.stderr or r.stdout or "").strip()
+            actions.append(f"stopped the merged-branch sweep: could not look "
+                           f"up PRs for '{b}':\n  {indent_err(err)}")
+            return
+        merged = [x for x in rows if x.get("headRefOid") == tip]
+        if not merged:
+            continue
+        # An unrelated branch's retarget must not fail this land/cleanup.
+        err = retarget_children(root, b, integration, fail_closed=False)
+        if err:
+            actions.append(f"stopped the merged-branch sweep: kept origin/{b} "
+                           f"(deleting it would close a stacked PR); {err}")
+            return
+        r = git("push", "origin", "--delete", b, cwd=root, check=False)
+        if r.returncode == 0:
+            actions.append(f"swept origin/{b} "
+                           f"(merged in {merged[0].get('url')})")
+            continue
+        err = (r.stderr or r.stdout or "").strip()
+        if "does not exist" in err.lower():
+            git("branch", "-d", "-r", f"origin/{b}", cwd=root, check=False)
+            continue
+        actions.append(f"stopped the merged-branch sweep: the remote refused "
+                       f"deleting origin/{b}; the next local land or cleanup "
+                       f"removes it:\n  {indent_err(err)}")
+        return
+
+
+def cleanup_task_artifacts(root, scope, bw, meta, branch=None, *, verbose=True):
     """Idempotent cleanup: clean worktrees; branches only after PR merge proof.
 
     Never deletes origin/<branch> or the local task branch unless the task's
@@ -4565,6 +4678,8 @@ def cleanup_task_artifacts(root, scope, meta, branch=None, *, verbose=True):
     branch to integration first (deleting it would close them) and fails
     closed if that retarget fails. Dirty worktrees are left alone (no
     --force wipe of uncommitted work). Safe to re-run; safe on open PRs.
+    Then sweeps other merged task branches a cloud session left behind,
+    unless the remote just refused this branch's own delete.
     """
     tid = meta["id"]
     branch = branch if branch is not None else task_branch_name(meta)
@@ -4607,9 +4722,13 @@ def cleanup_task_artifacts(root, scope, meta, branch=None, *, verbose=True):
     if branch and not drop_ok:
         actions.append(f"kept branch '{branch}': {drop_reason}")
 
+    remote = has_remote(root)
+    if remote:
+        # Also brings in the task branches the sweep below looks at.
+        git("fetch", "origin", "--prune", cwd=root, check=False)
+    refused = False
     if branch and drop_ok:
-        if has_remote(root):
-            git("fetch", "origin", "--prune", cwd=root, check=False)
+        if remote:
             # Deleting a branch open PRs are based on closes them, so the
             # retarget lives with the delete, not only in land.
             retarget_children(root, branch, integration_branch(root, scope))
@@ -4624,7 +4743,11 @@ def cleanup_task_artifacts(root, scope, meta, branch=None, *, verbose=True):
                        "does not exist" in err.lower():
                         actions.append(f"origin/{branch} already gone")
                     else:
-                        actions.append(f"could not delete origin/{branch}: {err}")
+                        refused = True
+                        actions.append(f"left origin/{branch} on the remote "
+                                       f"(it refused the delete); the next "
+                                       f"local land or cleanup removes it:\n"
+                                       f"  {indent_err(err)}")
             else:
                 actions.append(f"origin/{branch} already absent")
 
@@ -4652,6 +4775,9 @@ def cleanup_task_artifacts(root, scope, meta, branch=None, *, verbose=True):
             git("branch", "-d", "-r", f"origin/{branch}", cwd=root, check=False)
             actions.append(f"pruned origin/{branch} remote-tracking ref")
 
+    if remote and not refused:
+        sweep_merged_task_branches(root, scope, bw, branch, actions)
+
     if not actions:
         actions.append("already clean")
     if verbose:
@@ -4666,10 +4792,12 @@ def cmd_cleanup(args):
     meta = find_task(bw, scope, args.id)
     branch = task_branch_name(meta)
     if not branch and not find_task_worktree_paths(root, scope, meta["id"], ""):
-        print(f"T{meta['id']}: nothing to clean (no branch / worktree recorded)")
+        print(f"T{meta['id']}: nothing to clean (no branch / worktree "
+              f"recorded); sweeping merged task branches")
+        cleanup_task_artifacts(root, scope, bw, meta, "")
         return
     print(f"T{meta['id']}: cleaning branch={branch or '(none)'} …")
-    cleanup_task_artifacts(root, scope, meta, branch)
+    cleanup_task_artifacts(root, scope, bw, meta, branch)
 
 
 def note_version_intent(intent, integration, product):
@@ -4710,7 +4838,7 @@ def cmd_land(args):
     if meta["status"] == "done":
         print(f"T{tid}: already done — running cleanup only")
         branch = task_branch_name(meta)
-        cleanup_task_artifacts(root, scope, meta, branch)
+        cleanup_task_artifacts(root, scope, bw, meta, branch)
         return
 
     if meta["status"] == "draft":
@@ -4725,7 +4853,7 @@ def cmd_land(args):
         if is_recurring(meta) and (meta.get("last_run") or "").strip():
             print(f"T{tid}: recurring, last run {meta['last_run']} — "
                   f"{land_outcome(meta)}; nothing to land, cleanup only")
-            cleanup_task_artifacts(root, scope, meta, task_branch_name(meta))
+            cleanup_task_artifacts(root, scope, bw, meta, task_branch_name(meta))
             return
         sys.exit(f"error: T{tid} has no pr URL; open a PR before land")
 
@@ -4754,7 +4882,7 @@ def cmd_land(args):
         # Cleanup keys off the PR URL as merge evidence and ignores status,
         # so hand it the pre-land record: re-arming a recurring task clears
         # pr, which would otherwise leave the branch undeleted.
-        cleanup_task_artifacts(root, scope, meta, branch)
+        cleanup_task_artifacts(root, scope, bw, meta, branch)
         meta = find_task(bw, scope, tid)
         note_version_intent(intent, integration,
                             os.path.abspath(product_root(root, scope)))
@@ -4862,7 +4990,7 @@ def cmd_land(args):
     integration, bw = resolve_board(root, scope)
     mark_task_done(root, scope, integration, bw, meta)
     # Pre-land record: see the cleanup note on the already-merged path above.
-    cleanup_task_artifacts(root, scope, meta, branch)
+    cleanup_task_artifacts(root, scope, bw, meta, branch)
     meta = find_task(bw, scope, tid)
     note_version_intent(intent, integration,
                         os.path.abspath(product_root(root, scope)))
@@ -6259,6 +6387,9 @@ def cmd_preflight(args):
     Park/discard require a clean working tree checked out on integration.
     """
     root, scope, integration, bw = ctx()
+    # The sign-in gate for implement and auto: their flows run no gh check
+    # of their own, so it holds in check mode too, not only for --park.
+    require_gh(root)
     mode = "check"
     if args.park:
         mode = "park"
@@ -6326,7 +6457,6 @@ def cmd_preflight(args):
               f"origin/{integration}")
         return
 
-    require_gh(root)
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime(
         "%Y%m%d-%H%M%S")
     park_branch = f"park/{integration}-{stamp}"

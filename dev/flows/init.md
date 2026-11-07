@@ -44,8 +44,8 @@ Prerequisites: at least one commit (the script pins its board worktree to the in
    - *Existing task lists* (TODO.md, ROADMAP.md, issues dump): offer `/dev absorb <file>` (flows/absorb.md).
 
 5. **gh setup** (PR is the only merge flow):
-   - `gh` missing → point at https://cli.github.com (`brew install gh` on macOS); `gh auth status` failing → walk them through `gh auth login`.
-   - Init still completes without it, but say plainly: implement and review stay unavailable until `gh auth status` succeeds.
+   - Go by what the script reports, never a gh check of your own: init reads the login through gh (step 1) and refuses when gh is missing or not signed in. Only then: `gh` missing → point at https://cli.github.com (`brew install gh` on macOS); not signed in → walk them through `gh auth login`.
+   - Init stops until gh is signed in (or `DEVOPS_GITHUB_LOGIN` is set); re-run it after setup.
    - **The agent harness can gate the merge too.** `land`, `cleanup` and `iteration-land` merge a pull request or delete a branch, which a permission or safety layer may refuse even when `gh` is fine. They are agent-run by design, so a refusal strands reviewed work at the last step. Say it once here: if any of them is ever refused, allow those commands wherever this harness configures permissions.
 
 6. **Happy path for product code** (say once, briefly): land work via a task branch and PR into the integration branch — don't pile long-lived feature commits only on local integration. Implement starts task branches from `origin/<integration>`, so unpushed local-main commits get in the way (flows/implement.md will ask to park them as a PR or discard). Board state still goes only through `TASKS`, never hand-edited.

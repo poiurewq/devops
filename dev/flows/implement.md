@@ -4,11 +4,9 @@
 
 **Several tasks** (explicit multi-id, or "all under umbrella …"): read `flows/implement-batch.md` and follow it — do not load that file for a single id. `/dev auto` stays one task per cycle.
 
-**An umbrella** (the resolved task is `kind: umbrella`): it is a goal, not a unit of code. Do the resolve in step 0 — the `gh` gate does not apply, nothing ships — then jump to **Umbrella: the verification pass** at the bottom; skip the pre-claim checks and steps 1–7 entirely.
+**An umbrella** (the resolved task is `kind: umbrella`): it is a goal, not a unit of code. Do the resolve in step 0 — nothing ships — then jump to **Umbrella: the verification pass** at the bottom; skip the pre-claim checks and steps 1–7 entirely.
 
-0. **Gate**: `gh auth status` must succeed — otherwise stop and point at setup (flows/init.md step 5). Don't start work that can't be shipped.
-
-   **Resolve** the argument to a task id (or a batch — then `flows/implement-batch.md`) before preflight:
+0. **Resolve** the argument to a task id (or a batch — then `flows/implement-batch.md`) before preflight:
    - **Explicit id** (digits, or multi-id list): `TASKS show` / load each. Unknown id → stop and say so; do **not** treat a bare number as a freeform goal to add.
    - **Goal**: `TASKS list`, match on title/body; confirm if not obvious. Clear match → that task. Ambiguous → ask. **No match** → **file first**: run the full `/dev add` path on that text (`flows/add.md`), and mention once that implement filed new work. Direct add → continue resolve/preflight on the new id, with no second confirmation to start building (the user already asked to implement). Plan or shape flow → after the user approves and tasks are filed, continue implement on them (several → `flows/implement-batch.md`); if that path stops without filing, stop.
 
@@ -45,7 +43,7 @@
      - **Wait** — stop; resume once the blocker lands. Weigh how long that is: a `review` blocker is about to land, a `draft` one may sit for days, so proceed or stack usually beats waiting on a draft.
 
      Record stack or proceed with `--append "Decision: …"`. Auto never negotiates: it skips on 2 and 3 alike (flows/auto.md). Resume of the same id is clear (self is excluded). Resume of a `Dev-batch:` member must pass the whole set (resume path below) — a single id false-aborts on same-area siblings whose PRs are already out. An `all` task additionally requires an otherwise-quiet board **and** the user's explicit confirmation that other contributors are paused; the board can't see teammates' terminals, so the user vouches. Multi-id / batch: use `TASKS collisions <id,id,…>` for the whole set (see `flows/implement-batch.md`) — never the single id, or an in-set draft after an earlier ship would false-abort.
-   - **Local integration ahead**: `TASKS preflight` (fetches and reports). Exit 0 = clear, or ahead only on out-of-scope paths (soft note already printed). Exit 2 = in-scope ahead: stop. The working tree on integration must be clean before acting. Offer only: **(1) Park as PR** — `TASKS preflight --park`; **(2) Discard** — confirm first, then `TASKS preflight --discard`. Re-run `TASKS preflight`; continue only once it exits 0. If `--park` prints a WARNING that PR create failed, surface it (exit is still 0; local integration is already clear). Do not hand-roll fetch/log/reset/park git, and do not offer a loud "proceed anyway." Behind-only is fine — task branches use `origin/<integration>`.
+   - **Local integration ahead**: `TASKS preflight` (fetches and reports). It first checks that gh is signed in, since work that can't be shipped should not start: an `error:` there is a stop — surface it verbatim and point at setup (flows/init.md step 5). Exit 0 = clear, or ahead only on out-of-scope paths (soft note already printed). Exit 2 = in-scope ahead: stop. The working tree on integration must be clean before acting. Offer only: **(1) Park as PR** — `TASKS preflight --park`; **(2) Discard** — confirm first, then `TASKS preflight --discard`. Re-run `TASKS preflight`; continue only once it exits 0. If `--park` prints a WARNING that PR create failed, surface it (exit is still 0; local integration is already clear). Do not hand-roll fetch/log/reset/park git, and do not offer a loud "proceed anyway." Behind-only is fine — task branches use `origin/<integration>`.
 
 1. **Triage scope** before touching code:
    - **Right-sized** (≈ one focused PR): proceed to step 2.
