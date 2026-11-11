@@ -29,7 +29,7 @@ Prerequisites: a git repository with at least one commit, and a remote named `or
 
 2. **Scope**: if the repo holds several projects and the user wants a board for a subdir, confirm which and pass `--scope <subdir>`. Default is the nearest board at or above cwd, else the repo root. Don't create scoped boards unprompted — one board is the norm.
 
-3. **Board already exists** (`.tasks/board.yml` present for that scope — including one `/dev` created): the step 1 init joins it, registering the contributor or recording the login on a handle registered before logins were kept. Say that the board is shared: their ops tasks and any dev tasks live side by side, marked. Offer the tour (step 7). Done.
+3. **Board already exists** (`.tasks/board.yml` present for that scope — including one `/dev` created): the step 1 init joins it, registering the contributor or recording the login on a handle registered before logins were kept. Say that the board is shared: their ops tasks and any dev tasks live side by side, marked. Run *AGENTS.md pointers* (below), then offer the tour (step 7). Done.
 
 4. **No board yet**: propose the current branch as the board's home (`--integration <branch>`; `main` is the usual answer, and a board that lives on `main` never has to be closed or landed). Then `TASKS init --name <handle> [--scope s] [--integration b]`. This also writes a gitignored `./board` viewer at the project root (`r` refresh, `f` flows pane, `q` back one level (quits from the plain board), arrows scroll, type an id + Enter).
 
@@ -37,6 +37,18 @@ Prerequisites: a git repository with at least one commit, and a remote named `or
 
 5. **First flow — offer, don't build.** A new playbook is empty, and that is the normal state: flows are written from runs, not up front. Say so, and offer the two ways in: `/ops add <task-or-goal>` then `/ops run <id>` (the run writes itself down as it goes, and at the end you can keep it as a flow), or `/ops flow create` now if they already have a procedure written down somewhere. A list of things to do that already lives in a document is `/ops absorb <source>` (`flows/absorb.md`).
 
-6. Report what was set up: project, board branch, identity, whether a remote is syncing it, and the `./board` viewer.
+6. Run *AGENTS.md pointers* (below), then report what was set up: project, board branch, identity, whether a remote is syncing it, and the `./board` viewer.
 
 7. **Offer the tour**, once, as the last line: `/ops tour` walks through how ops works, a card at a time. Offer only — never start it unasked.
+
+## AGENTS.md pointers
+
+Runs on every init, joining or creating, so an agent opening this project cold learns the board exists and where the skill comes from, and reaches for an existing flow instead of improvising one. Both pointers live in the product's own `AGENTS.md` (the `--scope` dir, else the repo root); a `CLAUDE.md` there stays a symlink to it.
+
+- **Custody line**: this repo's work is managed with devops (`/dev`, `/ops`; board in `.tasks/`), with https://github.com/poiurewq/devops for agents without the skill.
+- **Flows clause**: when no skill covers what the user asks, check `/ops flow list` for an existing flow and suggest `/ops run`-ing it.
+
+1. Read that `AGENTS.md`, or a lone `CLAUDE.md` when there is no `AGENTS.md`, and note which pointers are missing. No file means both are.
+2. **A gitignored file is the user's private copy**: `git check-ignore -q <file>` on the file just read (`AGENTS.md` when neither exists) exits 0 → skip the board entirely and offer to add the missing pointers to that file directly, worded as above. Nothing is filed and no PR is needed; on no, nothing is recorded and the next init asks again. Otherwise go on.
+3. `TASKS related "AGENTS.md devops pointer flows"`: drop any pointer a task already on the board covers, shelved ones included, so several people initing one board do not each file it and a declined offer is not asked again. Nothing left ends the check.
+4. Offer to file **one** task covering what is left — never edit a tracked `AGENTS.md` here: the change goes through a PR like any change, and whether the user's agent instructions get it is their call. On yes, file it with `TASKS add --title "Add devops pointers to AGENTS.md" --desc "<desc>"`: the description asks for the pointers left, worded as above, and ends with an `Intent:` line — an agent opening this repo cold knows the board exists and where to get the skill, and points the user at a matching ops flow instead of improvising one (keep only the halves that apply). No area yet; implement asks for one. It is a dev task: it changes a file, so `/dev` builds it and this skill leaves it alone (SKILL.md *The boundary*). If `/dev` is not installed here, say so — the task waits for it, or the user makes the edit themselves. On no, file it anyway and shelve it with their reason — `TASKS update <id> --status shelved --reason "<why, in their words>"` — so the next init's board check finds it and stays quiet; `--status backlog` revives it.

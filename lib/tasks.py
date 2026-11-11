@@ -3137,6 +3137,17 @@ def default_task_branch(scope, tid, title):
     return f"dev/{scope_slug}-{int(tid)}-{slug}"
 
 
+def recurring_run_branch(base, day, taken):
+    """A recurring task's branch for one run: <base>-<YYYY-MM-DD>, then -2,
+    -3… while `taken` (existing branch names) holds it. Each run gets its
+    own name, so a leftover from an earlier run is never picked up."""
+    name = f"{base}-{day.isoformat()}"
+    n = 1
+    while (f"{name}-{n}" if n > 1 else name) in taken:
+        n += 1
+    return f"{name}-{n}" if n > 1 else name
+
+
 def current_branch_name(cwd):
     r = git("rev-parse", "--abbrev-ref", "HEAD", cwd=cwd, check=False)
     if r.returncode != 0:
@@ -4298,15 +4309,15 @@ def _rest_pr_json(root, pr, fields):
                             "body": rv.get("body") or ""}
                            for rv in reviews]
     if "comments" in fields:
+        # Conversation comments only, as gh pr view lists them: inline
+        # review comments (pulls/{n}/comments) are not part of it.
         comments, rc = rest_list_all(root, f"{pr_issue_path(pr)}/comments")
-        inline, ri = rest_list_all(root, f"{pr_api_path(pr)}/comments")
-        if comments is None or inline is None:
-            return _rest_done(rc if comments is None else ri)
+        if comments is None:
+            return _rest_done(rc)
         info["comments"] = [
             {"author": {"login": (c.get("user") or {}).get("login") or ""},
-             "body": c.get("body") or "", "path": c.get("path"),
-             "line": c.get("line")}
-            for c in comments + inline]
+             "body": c.get("body") or ""}
+            for c in comments]
     return info
 
 
@@ -4324,9 +4335,7 @@ def format_rest_pr_view(info):
         lines += ["", f"— review {rv['state']} by {rv['author']['login']}"
                   + (f":\n{body}" if body else "")]
     for c in info["comments"]:
-        where = f" on {c['path']}:{c['line']}" if c.get("path") else ""
-        lines += ["", f"— {c['author']['login']}{where}:\n"
-                  f"{c['body'].strip()}"]
+        lines += ["", f"— {c['author']['login']}:\n{c['body'].strip()}"]
     return "\n".join(lines) + "\n"
 
 
@@ -4598,6 +4607,25 @@ def indent_err(err):
     return "\n  ".join(err.splitlines())
 
 
+_HTTP_403 = re.compile(r"HTTP(?:/[\d.]+)?\s+403\b|returned error:\s*403\b",
+                       re.IGNORECASE)
+
+
+def remote_delete_refused_msg(err, what, env=None):
+    """Action line for a remote branch delete the remote refused. In a
+    Claude cloud session (CLAUDE_CODE_REMOTE set) an HTTP 403 is expected
+    (its proxy refuses every branch delete), so it gets one calm line
+    without git's output. Any other refusal, and a 403 anywhere else (a
+    token without push rights, SSO not authorized), keeps the git error.
+    `what` names what was left, e.g. 'left origin/<b> on the remote'."""
+    env = os.environ if env is None else env
+    later = "a later local land or cleanup removes it"
+    if env.get("CLAUDE_CODE_REMOTE") and _HTTP_403.search(err or ""):
+        return (f"{what} (this session may not delete remote branches); "
+                f"{later}, nothing to do now")
+    return f"{what} (the remote refused the delete); {later}:\n  {indent_err(err)}"
+
+
 def task_branch_re(scope):
     """This board's conventional task branch names (default_task_branch)."""
     prefix = default_task_branch(scope, 0, "")[:-len("0-task")]
@@ -4664,9 +4692,8 @@ def sweep_merged_task_branches(root, scope, bw, own, actions):
         if "does not exist" in err.lower():
             git("branch", "-d", "-r", f"origin/{b}", cwd=root, check=False)
             continue
-        actions.append(f"stopped the merged-branch sweep: the remote refused "
-                       f"deleting origin/{b}; the next local land or cleanup "
-                       f"removes it:\n  {indent_err(err)}")
+        actions.append(remote_delete_refused_msg(
+            err, f"stopped the merged-branch sweep at origin/{b}"))
         return
 
 
@@ -4744,10 +4771,8 @@ def cleanup_task_artifacts(root, scope, bw, meta, branch=None, *, verbose=True):
                         actions.append(f"origin/{branch} already gone")
                     else:
                         refused = True
-                        actions.append(f"left origin/{branch} on the remote "
-                                       f"(it refused the delete); the next "
-                                       f"local land or cleanup removes it:\n"
-                                       f"  {indent_err(err)}")
+                        actions.append(remote_delete_refused_msg(
+                            err, f"left origin/{branch} on the remote"))
             else:
                 actions.append(f"origin/{branch} already absent")
 
@@ -5095,6 +5120,15 @@ def cmd_claim(args):
     branch = (args.branch or "").strip() or (meta.get("branch") or "").strip()
     if not branch:
         branch = default_task_branch(scope, tid, meta["title"])
+        if is_recurring(meta):
+            local = git("for-each-ref", "--format=%(refname)",
+                        f"refs/heads/{branch}-*", cwd=root, check=False)
+            remote = git("ls-remote", "--heads", "origin",
+                         f"refs/heads/{branch}-*", cwd=root, check=False)
+            taken = {w[len("refs/heads/"):]
+                     for w in (local.stdout + remote.stdout).split()
+                     if w.startswith("refs/heads/")}
+            branch = recurring_run_branch(branch, datetime.date.today(), taken)
 
     undone = [d for d in meta.get("deps", [])
               if find_task(bw, scope, d)["status"] != "done"]

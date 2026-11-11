@@ -29,7 +29,7 @@ Prerequisites: at least one commit (the script pins its board worktree to the in
 
 2. **Scope** (monorepo support): if the repo hosts multiple products and the user wants a board for a subdir, confirm which one and pass `--scope <subdir>`. Default (no `--scope`) is the nearest board at/above cwd, else the repo root (create path only). Day-to-day commands require cwd under the product or `--scope`. Don't create scoped boards unprompted — one root board is the norm for single-product repos.
 
-3. **Existing board** (`.tasks/board.yml` present for that scope): the step 1 init joins it — registering a new contributor, or recording the login on a handle registered before logins were kept. Then check gh (step 5) and offer the tour (step 8). Done.
+3. **Existing board** (`.tasks/board.yml` present for that scope): the step 1 init joins it — registering a new contributor, or recording the login on a handle registered before logins were kept. Then check gh (step 5), run *AGENTS.md pointer* (below), and offer the tour (step 8). Done.
 
 4. **No board — adoption**:
    - *Integration branch*: propose the current or default branch; if the repo already uses iteration branches, ask which. Pass `--integration` (and `--parent`, `--iteration N`, `--iteration-name`, `--iteration-started` when applicable).
@@ -50,6 +50,15 @@ Prerequisites: at least one commit (the script pins its board worktree to the in
 
 6. **Happy path for product code** (say once, briefly): land work via a task branch and PR into the integration branch — don't pile long-lived feature commits only on local integration. Implement starts task branches from `origin/<integration>`, so unpushed local-main commits get in the way (flows/implement.md will ask to park them as a PR or discard). Board state still goes only through `TASKS`, never hand-edited.
 
-7. Report what was set up: scope, integration branch, integrator, areas, gh status, and the `./board` viewer (`r` refresh, `a` toggle by-area, `e` toggle expand, `l` toggle a list of this iteration's tasks, most recently changed first, `c` check (an id, or `id,id…` for a group), `s` search tasks by words (flows, in the flows pane), `f` flows pane, `q` back one level (quits from the plain board), arrows scroll, space/b page, type id↵ to show a task).
+7. Run *AGENTS.md pointer* (below), then report what was set up: scope, integration branch, integrator, areas, gh status, and the `./board` viewer (`r` refresh, `a` toggle by-area, `e` toggle expand, `l` toggle a list of this iteration's tasks, most recently changed first, `c` check (an id, or `id,id…` for a group), `s` search tasks by words (flows, in the flows pane), `f` flows pane, `q` back one level (quits from the plain board), arrows scroll, space/b page, type id↵ to show a task).
 
 8. **Offer the tour**, once, as the last line: `/dev tour` walks through how dev works, a card at a time. Offer only — never start it unasked.
+
+## AGENTS.md pointer
+
+Runs on every init, joining or creating, so an agent opening this repo cold learns the board exists and where the skill comes from. The pointer lives in the product's own `AGENTS.md` (the `--scope` dir, else the repo root); a `CLAUDE.md` follows SKILL.md *Vendor-neutral*.
+
+1. Read that `AGENTS.md`, or a lone `CLAUDE.md` when there is no `AGENTS.md`. A line already saying this repo's work is managed with devops ends the check. No file counts as no line.
+2. **A gitignored file is the user's private copy**: `git check-ignore -q <file>` on the file just read (`AGENTS.md` when neither exists) exits 0 → skip the board entirely and offer to add the line to that file directly, worded as in step 4. Nothing is filed and no PR is needed; on no, nothing is recorded and the next init asks again. Otherwise go on.
+3. `TASKS related "AGENTS.md devops pointer"`: a task already on the board for it ends the check, shelved ones included, so several people initing one board do not each file it and a declined offer is not asked again.
+4. Offer to file a task for it — never edit a tracked `AGENTS.md` here: the line goes through a PR like any change, and whether the user's agent instructions get it is their call. On yes, file it with `TASKS add --title "Add a devops pointer to AGENTS.md" --desc "<desc>"`: the description asks for a line saying this repo's work is managed with devops (`/dev`, `/ops`; board in `.tasks/`), with https://github.com/poiurewq/devops for agents without the skill, and ends with `Intent: an agent opening this repo cold knows the board exists and where to get the skill.` No area yet; implement asks for one. On no, file it anyway and shelve it with their reason — `TASKS update <id> --status shelved --reason "<why, in their words>"` — so the next init's board check finds it and stays quiet; `--status backlog` revives it.
