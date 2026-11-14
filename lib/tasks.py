@@ -2253,11 +2253,13 @@ def cmd_routine_wake(bw, scope, entries, name):
             f"T{t['id']} ({t['status']})" for t in busy))
 
 
-def wake_partition(mine):
-    """A routine's tasks as the wake sees them: (due at rest, in due order;
-    due at rest but with an open needs, which a human must answer before a
-    re-fire may hand it out again; in flight). Pure."""
-    ready = sorted((t for t in mine if recur_at_rest(t) and task_is_due(t)),
+def wake_partition(mine, now=None):
+    """A routine's tasks as the wake sees them: (due at rest, in due order,
+    a scheduled task within its time's early window counted as due; due at
+    rest but with an open needs, which a human must answer before a re-fire
+    may hand it out again; in flight). Pure given `now`."""
+    ready = sorted((t for t in mine if recur_at_rest(t)
+                    and task_is_due(t, now, early=True)),
                    key=recur_due_sort)
     due = [t for t in ready if not t.get("needs")]
     waiting = [t for t in ready if t.get("needs")]
@@ -2737,7 +2739,9 @@ def validate_type(meta, set_type=False, set_area=False, new=False):
 # last_run. Any recorded run clears it, so it governs exactly one run and the
 # clock takes over again after.
 #
-# last_run is stamped as a timestamp with offset (2026-11-11T12:04-05:00). A
+# last_run is stamped as a timestamp with offset (2026-11-11T12:04-05:00): the
+# run time on a cadence, the scheduled time the run covered on a schedule
+# (`run_stamp`), so the next due is simply the time after it. A
 # bare date (older boards, or `--date YYYY-MM-DD`) still reads: a cadence uses
 # its date either way, and a schedule reads it as the end of that day in the
 # schedule's timezone.
@@ -2970,13 +2974,91 @@ def schedule_counts_from(t, sched):
             - datetime.timedelta(microseconds=1))
 
 
-def task_is_due(t, now=None):
-    """Due now (or at `now`, a date or aware datetime)."""
+# Schedulers fire triggers early (a noon trigger around 11:06), so each
+# scheduled time has an early window: routine wake hands a task out inside
+# it, and a run recorded inside it covers that time (`slot_covered`). The
+# window is capped at half the gap from the scheduled time before, so a run
+# covers the nearer time and a short schedule never skips one. Cadence tasks
+# and a pinned next_due have no window.
+SCHEDULE_EARLY = datetime.timedelta(hours=3)
+
+
+def in_early_window(sched, slot, when):
+    """Whether instant `when` falls in scheduled time `slot`'s early window:
+    before it by at most SCHEDULE_EARLY, and nearer to it than to the
+    scheduled time before it (no time in [when - lead, slot)). Pure."""
+    utc = datetime.timezone.utc
+    slot, when = slot.astimezone(utc), when.astimezone(utc)
+    lead = slot - when
+    if not datetime.timedelta(0) < lead <= SCHEDULE_EARLY:
+        return False
+    first = cron_next(sched, when - lead - datetime.timedelta(microseconds=1))
+    return first is not None and first.astimezone(utc) == slot
+
+
+def cron_prev(sched, at):
+    """Latest scheduled time at or before `at` (aware), in the schedule's
+    timezone, or None if there is none within CRON_HORIZON_DAYS."""
+    tz, utc = sched["tz"], datetime.timezone.utc
+    at = at.astimezone(utc)
+    day = at.astimezone(tz).date()
+    for _ in range(CRON_HORIZON_DAYS):
+        if _cron_day(sched, day):
+            hits = [datetime.datetime(day.year, day.month, day.day, h, m,
+                                      tzinfo=tz).astimezone(utc)
+                    for h in sched["hour"] for m in sched["minute"]]
+            hits = [h for h in hits if h <= at]
+            if hits:
+                return max(hits).astimezone(tz)
+        day -= datetime.timedelta(days=1)
+    return None
+
+
+def slot_covered(sched, when):
+    """The scheduled time a run recorded at `when` covers: the next one when
+    `when` is in its early window, else the latest at or before `when` (a
+    catch-up run before today's window covers yesterday's). Falls back to `when`
+    when the schedule has no such time. Pure."""
+    nxt = cron_next(sched, when)
+    if nxt is not None and in_early_window(sched, nxt, when):
+        return nxt
+    return cron_prev(sched, when) or when
+
+
+def run_stamp(meta, ran):
+    """The last_run a run recorded at `ran` (date or aware datetime) leaves:
+    on a scheduled task, the scheduled time it covered, so the next due is
+    the time after it; otherwise (a cadence task, or a bare date, which has
+    no time of day to judge) the run time itself."""
+    schedule = (meta.get("schedule") or "").strip()
+    if schedule and isinstance(ran, datetime.datetime):
+        ran = slot_covered(parse_schedule(schedule), ran)
+    return format_run_time(ran)
+
+
+def last_run_label(meta):
+    """last_run as shown to a reader: on a scheduled task it is the scheduled
+    time the run covered, not when it ran, so it is labelled that way."""
+    last = (meta.get("last_run") or "").strip()
+    schedule = (meta.get("schedule") or "").strip()
+    if schedule and "T" in last:
+        slot = parse_run_time(last).astimezone(parse_schedule(schedule)["tz"])
+        return f"covered the {format_due(slot)} run"
+    return f"last run {last}"
+
+
+def task_is_due(t, now=None, early=False):
+    """Due now (or at `now`, a date or aware datetime). `early` (routine
+    wake only) also counts a scheduled time's early window as due."""
     if not on_the_clock(t):
         return False
     due = task_due_date(t)
     now = due_instant(now) if now else datetime.datetime.now().astimezone()
-    return due is None or due_instant(due) <= now
+    if due is None or due_instant(due) <= now:
+        return True
+    # Only a schedule derives a datetime due; next_due is a date.
+    return (early and isinstance(due, datetime.datetime)
+            and in_early_window(parse_schedule(t["schedule"]), due, now))
 
 
 def recur_sort_rank(t):
@@ -3084,7 +3166,8 @@ def rearm_recurring(root, scope, branch, bw, meta, ran_on=None, record=None):
     """Record a run: stamp last_run and re-arm instead of going terminal.
 
     Callers pass a freshly read record. `ran_on` is a date or an aware
-    datetime (default: now, stamped to the minute with its offset). Clears
+    datetime (default: now, stamped to the minute with its offset; a
+    scheduled task stamps the time it covered, `run_stamp`). Clears
     the per-run fields (assignee, branch, pr) and any next_due override (it
     governed this run) so the next cycle starts clean; the run itself is
     recorded in the body — a bare `Ran (<date>).` for a landed or `recur
@@ -3093,7 +3176,7 @@ def rearm_recurring(root, scope, branch, bw, meta, ran_on=None, record=None):
     """
     ran = ran_on or datetime.datetime.now().astimezone()
     day = run_day(ran).isoformat()
-    meta["last_run"] = format_run_time(ran)
+    meta["last_run"] = run_stamp(meta, ran)
     meta["next_due"] = ""
     meta["status"] = "backlog"
     meta["assignee"] = meta["branch"] = meta["pr"] = ""
@@ -5434,7 +5517,7 @@ def cmd_land(args):
         # idempotent re-run, not a missing PR — say so instead of asking for
         # one. Never run = a real error (nothing was ever shipped).
         if is_recurring(meta) and (meta.get("last_run") or "").strip():
-            print(f"T{tid}: recurring, last run {meta['last_run']} — "
+            print(f"T{tid}: recurring, {last_run_label(meta)} — "
                   f"{land_outcome(meta)}; nothing to land, cleanup only")
             cleanup_task_artifacts(root, scope, bw, meta, task_branch_name(meta))
             return
@@ -8024,8 +8107,8 @@ def cmd_recur(args):
         ran = parse_run_time(args.date, "date") if args.date else None
         meta = rearm_recurring(root, scope, branch, bw, meta, ran_on=ran)
         due = task_due_date(meta)
-        print(f"T{meta['id']} ran {meta['last_run']}, re-armed to backlog; "
-              f"next due {format_due(due)}")
+        print(f"T{meta['id']} ran ({last_run_label(meta)}), re-armed to "
+              f"backlog; next due {format_due(due)}")
         return
     sel = [t for t in tasks if on_the_clock(t)]
     if args.due:
@@ -8113,7 +8196,7 @@ def cmd_ran(args):
         meta = rearm_recurring(root, scope, branch, bw, meta, ran_on=ran,
                                record=record)
         due = task_due_date(meta)
-        print(f"T{tid} ran {meta['last_run']}, re-armed to backlog; "
+        print(f"T{tid} ran ({last_run_label(meta)}), re-armed to backlog; "
               f"next due {format_due(due)}")
     else:
         meta["status"] = "done"
@@ -10149,7 +10232,8 @@ def main():
         s.add_argument(f"--{f}")
     s.add_argument("--last-run", dest="last_run",
                    help="recurring tasks only: YYYY-MM-DD or a timestamp with "
-                        "offset (2026-11-11T12:04-05:00) of the last run "
+                        "offset (2026-11-11T12:04-05:00) of the last run, "
+                        "on a schedule the scheduled time it covered "
                         "(empty string clears; due is derived from it)")
     s.add_argument("--next-due", dest="next_due",
                    help="recurring tasks only: YYYY-MM-DD the next run is due, "
