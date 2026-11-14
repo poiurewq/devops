@@ -83,7 +83,7 @@ TASKS verify <id> "<how the children met the goal>"   # close an umbrella
 TASKS related "<text>" [--deps <id,id>] # run before every add; --deps
                                         # also lists their umbrellas
 TASKS list [--type ops] [--assignee <who>] [--status <s>] [--needs decision]
-           [--json]
+           [--flow <name>] [--json]
 TASKS recur list [--due]
 TASKS show <id>
 TASKS delete <id>
@@ -135,7 +135,7 @@ Statuses for an ops task: `proposed` (filed for approval) → `backlog` → `pla
 | `/ops add <task-or-goal>` | Read `flows/add.md`. |
 | Freeform new work | Same as `/ops add`. |
 | `/ops run <id[, id…]>` | Read `flows/run.md` (preflight, flow choice, inputs, run, record). Several ids run one after another. |
-| `/ops run <flow-name> [inputs]` | Read `flows/run.md` — files a task for that flow first. |
+| `/ops run <flow-name> [inputs]` | Read `flows/run.md` — runs the one ops task clearly on that flow, asks when there is a real choice, else files one first. |
 | `/ops run <description>` | Read `flows/run.md` — files via `flows/add.md` first, then runs it. |
 | `/ops next` | *Next* below — pick the top task for me, then run it on a yes. |
 | `/ops run <id> unattended` / `/ops next unattended` | Read `flows/unattended.md` (a run with nobody there: goes to its first stop, parks every decision on the board). Only on the trailing word — never assumed. |

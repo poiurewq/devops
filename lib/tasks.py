@@ -1425,6 +1425,15 @@ def warn_duplicate_flow_ids(flows):
               file=sys.stderr)
 
 
+def flow_ref_tokens(flow):
+    """The `<id> <name>` refs that record this flow: its fixed id paired with
+    every name it has held. The one id+name rule behind run history, reid's
+    holders and list --flow — the name is what tells apart two flows sharing
+    an id."""
+    names = {flow["name"]} | set(split_names(flow.get("formerly")))
+    return {f"{flow['id']} {n}" for n in names}
+
+
 def flow_ref_holders(bw, scope, flow):
     """Task files recording a run of this flow: its id paired with a name the
     flow has held. Live tasks and archived ones — an archive is verbatim and
@@ -1432,8 +1441,7 @@ def flow_ref_holders(bw, scope, flow):
     purpose: when two flows share an id, the name in the record is what says
     whose run it was.
     """
-    names = {flow["name"]} | set(split_names(flow.get("formerly")))
-    want = {f"{flow['id']} {n}" for n in names}
+    want = flow_ref_tokens(flow)
     d = os.path.join(bw, tdir(scope))
     paths = sorted(glob.glob(os.path.join(d, "[0-9]*.md")))
     paths += sorted(glob.glob(os.path.join(d, "archive", "*", "[0-9]*.md")))
@@ -1470,9 +1478,9 @@ def flow_run_entries(bw, scope, flow):
     per run. A `Rehearsed (<date>)` record is listed too, flagged
     `rehearsal`, so a dry run is visible but never passes for a real one.
     Records are matched on their refs tag, which pairs the flow's
-    fixed id with a name it held — the same id+name rule flow_ref_holders
-    uses, so a rename never loses history and two flows sharing an id are
-    still told apart. A tagless record (a landed recurring run) counts when
+    fixed id with a name it held — the same id+name rule (flow_ref_tokens)
+    as reid's holders, so a rename never loses history and two flows
+    sharing an id are still told apart. A tagless record (a landed recurring run) counts when
     the task's own `flow` field points here. A task that points here with no
     record of its own is labelled by status: in flight (listed first, no
     date) only while doing/draft/review on the live board; a done task — a
@@ -1492,8 +1500,7 @@ def flow_run_entries(bw, scope, flow):
     history. A recurring task reseeded without --carry and not shelved is
     trimmed instead (trim_run_records), so it holds no inherited records.
     """
-    names = {flow["name"]} | set(split_names(flow.get("formerly")))
-    want = {f"{flow['id']} {n}" for n in names}
+    want = flow_ref_tokens(flow)
     d = os.path.join(bw, tdir(scope))
     paths = [(p, None) for p in sorted(glob.glob(os.path.join(d, "[0-9]*.md")))]
     for p in sorted(glob.glob(os.path.join(d, "archive", "*", "[0-9]*.md"))):
@@ -1716,6 +1723,12 @@ def resolve_flow_refs(bw, scope, text, flows=None):
         if ref not in refs:
             refs.append(ref)
     return refs
+
+
+def task_follows_flow(t, flow):
+    """True when the task's `flow` field records this flow (flow_ref_tokens),
+    so a rename keeps matching and a flow sharing the id does not."""
+    return bool(set(split_names(t.get("flow") or "")) & flow_ref_tokens(flow))
 
 
 def parse_flow_refs(text):
@@ -8053,8 +8066,10 @@ def cmd_show(args):
 def cmd_list(args):
     root, scope, branch, bw = ctx()
     tasks = all_tasks(bw, scope)
+    flow = find_flow(bw, scope, args.flow) if args.flow else None
     sel = [t for t in tasks
            if (not args.assignee or t.get("assignee") == args.assignee)
+           and (flow is None or task_follows_flow(t, flow))
            and (not args.status or t.get("status") == args.status)
            and (not args.needs or t.get("needs") == args.needs)
            and (args.type is None
@@ -10277,6 +10292,8 @@ def main():
     s.add_argument("--needs")
     s.add_argument("--type", help="ops, or dev for dev tasks only (untyped "
                                   "tasks count as dev)")
+    s.add_argument("--flow", help="tasks whose flow field records this flow "
+                                  "(closest name, as flow show)")
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_list)
 

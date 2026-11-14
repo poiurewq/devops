@@ -289,8 +289,10 @@ TASKS related "<text>" [--deps <id,id>] # existing tasks similar to <text>;
                                         # `umbrella of T…:` line per open
                                         # umbrella directly holding one
 TASKS list [--assignee <who>] [--status <s>] [--needs decision]
-           [--type ops|dev] [--json]    # --type dev also matches untyped
-                                        # tasks
+           [--type ops|dev] [--flow <name>] [--json]
+                                        # --type dev also matches untyped
+                                        # tasks; --flow: tasks whose flow
+                                        # field records that flow
 TASKS recur list [--due]                # recurring tasks + derived due dates
                                         # (overdue and never-run first);
                                         # --due limits to due/overdue now;

@@ -80,7 +80,7 @@ TASKS collisions <id[,id…]>             # 2 doing-blocked, 3 PR open
 TASKS related "<text>" [--deps <id,id>] # run before every add; --deps
                                         # also lists their umbrellas
 TASKS list [--assignee <who>] [--status <s>] [--needs decision]
-           [--type ops|dev] [--json]
+           [--type ops|dev] [--flow <name>] [--json]
 TASKS recur list [--due] | recur ran <id> [--date <date|timestamp>]
 TASKS board [--expand] [--by-area] [--watch]
 TASKS iteration
