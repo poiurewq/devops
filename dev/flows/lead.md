@@ -4,14 +4,25 @@ One sitting, one interface: this session is the **lead** for the task. It spawns
 
 **No subagents on this host** → say so once and run `/dev implement <id>` (`flows/implement.md`) instead.
 
+**`unattended` after the ids** → not the lead: nobody is there to stand in for and there is no reviewer pass. Read `flows/unattended.md` instead.
+
 ## Spawning
 
-- **Implementer**: `/dev implement <id[, id…]>`.
+- **Implementer**: `/dev implement <id[, id…]>` — several ids: *Several ids* below.
 - **Reviewer**: `/dev review <id[, id…]>`, always a **fresh** subagent with no implement context.
 
 Both run on the lead's model tier (the tier, not an exact model version). When the lead knows the host spawns subagents on its own model, leave the default. Otherwise set the tier in the spawn call's model option, not in the prompt: a host default or an agent type's pinned model can quietly drop the work to a lower tier.
 
 Add one line to each prompt and nothing else: *ask any question in your reply, not with a question tool* — otherwise its questions reach the user directly and skip the lead. Never tell a subagent it is working for a lead, and never brief it to skip, reorder, or stop short of its flow. Ignore the implementer's new-session hint for review: the fresh reviewer is that new session.
+
+## Several ids
+
+Before any implementer starts, the lead runs `flows/implement-batch.md` steps 1–5 once for the whole set — eligibility, outside deps, order, preflight, `TASKS collisions <id,id,…>` — with their questions going to the user. A proceed on collisions exit 3 is recorded as a `Decision:` on every member, so no implementer asks it again. Then it picks one of two shapes:
+
+- **Parallel**, only when both hold: collisions prints `parallel: ok`, and nothing in the task descriptions suggests a member could grow into another's files (predicted areas often widen at implement). One implementer per member, all spawned at once: `/dev implement <id>`.
+- **One batch implementer** otherwise — any risk, even slight: `/dev implement <id, id, …>`.
+
+Review waits until every member has shipped, then one reviewer takes the whole set: `/dev review <id, id, …>`. Parallel members carry no `Dev-batch:` stamp, and each keeps its own version bump: they are independent changes, only built at the same time.
 
 ## Answering as the user
 
@@ -22,10 +33,18 @@ A subagent's question arrives as its reply; the lead's answer continues it. The 
 ## The sitting
 
 1. **Route.** `TASKS show <id>`. `kind: umbrella` → the lead runs the verification pass in `flows/implement.md` itself, no subagents. `type: ops` → `/ops run <id>`. `draft` or `review` → step 3. Anything else → step 2. Routing is by status only: who may touch the task, and which states stop work, are `flows/implement.md`'s and `flows/review.md`'s to judge — when a subagent stops, relay its reason to the user as given.
-2. **Premise, then implement.** For a `backlog` or `planned` task that adds behavior, spans several files, or opens design surface, the lead first reads the code it touches and says in a few lines whether the premise holds — already solved, superseded, wrong layer, or a clearly better path to the intent. The user decides proceed, reshape, or drop, and the check ends `Reply "go" to proceed, or say how to reshape or drop it.` — the same `go` as every other lead checkpoint. Mechanical tasks skip this. Then spawn the implementer. It runs the whole implement flow — gates, claim, build, ship to `draft` — so the work is pushed before review.
+2. **Premise, then implement.** For a `backlog` or `planned` task that adds behavior, spans several files, or opens design surface, the lead first reads the code it touches and says in a few lines whether the premise holds — already solved, superseded, wrong layer, or a clearly better path to the intent. The user decides proceed, reshape, or drop, and the check ends `Reply "go" to proceed, or say how to reshape or drop it.` — the same `go` as every other lead checkpoint. Mechanical tasks skip this. Then spawn the implementer (several ids: *Several ids*). It runs the whole implement flow — gates, claim, build, ship to `draft` — so the work is pushed before review.
 3. **Review.** Spawn the reviewer. It checks intent first (`flows/review.md`), then the rest, and ends with numbered findings and a proposal line. The lead relays them to the user with any `decided` forks, keeping the numbering and adding the labels below; plain bug fixes it may approve itself, saying so. The user's reply goes back to the reviewer as given, except the wave (step 5). On the user's own draft the reviewer makes the fixes and re-ships (`flows/review.md`).
 4. **Another round?** The lead's judgment, stated in one line with its reason. The intent: a fresh reviewer earns its cost when the fixes carry real risk. Size is one sign (structural changes, new or reworked logic), but a small change in a sensitive spot counts too. Low-risk fixes, such as doc or wording edits, skip it. Cases in between are the lead's call. The user can always ask for one.
 5. **Hand-off.** The reviewer's proposal line carries whatever wave `flows/review.md` proposes — `ready`, `land`, or an approve. Relay it, and act on it only when the user said `go`. **A wave with `ready` or `land` the lead runs itself**: the user approved it in the lead's own session, and a subagent cannot take that approval from another agent, so a relayed `go` stalls there. Pass the reviewer the rest of the reply with the wave held back in plain English (`fix 1, 3 · leave 4 · don't ready or land yet`); once its fixes are re-shipped and step 4's round, if one is run, comes back clean — or at once when there are no fixes — the lead runs the wave from the proposal line, following `flows/review.md`'s land steps, or `flows/review-batch.md`'s for several ids. New findings from that round go back to the user first. An approve or anything else in the wave goes back to the reviewer as given. Report what shipped, the PR, and where it stands.
+
+## A scheduled sitting
+
+A sitting an attended routine's wake starts (SKILL.md *Routines*) begins with nobody at the keyboard, but with someone the routine can reach. It runs as above up to the first thing that needs the user — the premise check's `go`, a question the lead cannot answer itself, the review findings or a wave.
+
+- **Before ship** (the premise check, a fork) → park it on the task, adding the session's link when the harness gives one: `TASKS update <id> --needs decision --append "Question: … — live: <session link>"`.
+- **After ship** (findings, a wave) → nothing is parked: the user's own draft already shows in their `/dev review` inbox.
+- Either way, **notify the user** through the harness — the task, the question in a line, the link — and wait in the session. Answered there → clear a parked question (`TASKS update <id> --needs "" --append "Decision: …"`) and go on; the user is there now, so later questions are asked as usual. A session that ends first leaves it on the board: `/dev review <id>` decides a parked question (`flows/review.md` *Deciding a design fork*), and `/dev <id>` picks the task back up (*Cut off partway*).
 
 ## Labels the lead adds
 

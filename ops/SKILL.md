@@ -1,6 +1,6 @@
 ---
 name: ops
-description: Playbook of flows plus the runs that follow them, on a shared task board inside the user's repo. Use for /ops and subcommands (init, tour, add, run, rehearse, flow list/show/create/edit/retire, agent, env, status, board, show, change, drop, delete, meta), and whenever the user asks to run a procedure or checklist, follow or write a flow, record what a run did, dry-run (rehearse) a flow, or work a task that is not code.
+description: Playbook of flows plus the runs that follow them, on a shared task board inside the user's repo. Use for /ops and subcommands (init, tour, add, run, next, wake, schedule, rehearse, flow list/show/create/edit/retire, agent, env, status, board, show, change, drop, delete, meta), and whenever the user asks to run a procedure or checklist, follow or write a flow, record what a run did, dry-run (rehearse) a flow, or work a task that is not code.
 ---
 
 # ops — procedures that run, recorded where they ran
@@ -40,17 +40,30 @@ TASKS env list [--json] | show <name> | rm <name>
       | add <name> --accessors "<handle, handle>" [--machine M]
            [--expects "<prose>"]
       | update <name> [--accessors] [--machine M|""] [--expects]
+TASKS routine list [--json] | show <name> | rm <name>
+      | rename <name> <new-name>
+      | add <name> --accessors "<handle, handle>"
+           --mode attended|unattended --environment <env>
+           --schedule "<cron> <timezone>"|<timestamp> --trigger "<what, where>"
+           --manage "<how to change or remove it there>"
+      | update <name> [--accessors] [--mode] [--environment] [--schedule]
+           [--trigger] [--manage] [--status active|paused]
+      | wake <name>                  # exit 2 + reason, else its due tasks
 TASKS add --title "<title>" --type ops [--deps <id,id>]
           [--desc "<1–3 sentences>"] [--assignee <who>]
           [--kind umbrella|recurring] [--cadence <N><unit>]
+          [--schedule "<cron> <timezone>"]
           [--next-due <date>] [--status proposed|backlog|planned|later]
           [--rehearsal]                 # a dry run of its flow (rehearse.md)
+          [--routine <name>]            # the routine that starts it
           [--umbrella <id[,id]>]        # file under it: adds to its deps
 TASKS update <id> [--title] [--status] [--assignee <who>|""] [--deps]
           [--needs decision|""] [--flow <name[,name]>|""] [--append "<paragraph>"]
                                         # --append repeats, one paragraph each, in order
           [--desc "<new body>"] [--kind umbrella|recurring|""]
-          [--cadence <N><unit>] [--next-due <date>|""] [--status later]
+          [--cadence <N><unit>|""] [--schedule "<cron> <timezone>"|""]
+          [--next-due <date>|""] [--routine <name>|""] [--status later]
+          [--unattended <model-id>|""]  # an unattended run's marker (flows/unattended.md)
           [--status not-planned|shelved --reason "<why>"]
 TASKS pause <id> --at "<step>" --record "<what exists so far>"
             [--flow <name[,name]>] [--date YYYY-MM-DD]
@@ -64,7 +77,7 @@ TASKS note <id> [--at "<step>"] "<what the flow did not predict>"
             [--date YYYY-MM-DD]         # Note (<date>): …; any status but
                                         # proposed/not-planned, done included
 TASKS ran <id> [--flow <name[,name]>] --record "<inputs; deviations>"
-               [--date YYYY-MM-DD]   # close an ops task with its run record
+               [--date <date|timestamp>]   # close an ops task with its run record
                [--rehearsal]         # a dry run: Rehearsed (<date>): …
 TASKS verify <id> "<how the children met the goal>"   # close an umbrella
 TASKS related "<text>" [--deps <id,id>] # run before every add; --deps
@@ -103,7 +116,7 @@ Caveats: `--append` adds to a body (no prior `show` needed, can't truncate); `--
 ## State layout
 
 - `<scope>/.tasks/` — tracked, lives only on the board's integration branch: `NNN.md` (one file per task), `board.yml` (settings, iteration, who holds the board), `areas.md` (a dev concern — ops tasks carry no area), `log.md` (past-iteration index), `archive/<n>-<slug>/NNN.md` (every closed task, verbatim — the run records of past iterations live here and stay searchable; written by `/ops iteration close`).
-- `<scope>/.flows/` — tracked, same home as `.tasks/`, written only through `TASKS flow …`. One file per flow, `<name>.md`: frontmatter `id` (numeric, fixed at create), `name`, `description` (one line), `inputs`, `uses` (flows it follows), `status` (`active`/`retired`), `formerly` (past names, a matching hint), `created`; body = the procedure. Flows outlive iterations — nothing archives them. `<scope>/.flows/agents/<name>.md` and `<scope>/.flows/environments/<name>.md` are the **registries** flows point at (written through `TASKS agent …` / `TASKS env …`, never read as flows): an agent is `name`, `accessors`, `description` (one line, who it is); an environment is `name`, `accessors`, optional `machine`, body = prose expectations; both carry `formerly` (past names). There are no ids: a run record names an entry by the name it had then, so `rename` keeps the old name in `formerly`, where it stays **reserved** (add and rename refuse it) and still resolves — `show`, `update`, `rename` and `rm` accept a former name and print what it matched. `rm` frees all of an entry's names. Every accessor is a board contributor and each entry keeps at least one, so every name leads to a human who can reach it; `project`, `runner`, `any` and `inline` are reserved. Accessors are a routing aid — who can reach it now — not history: who ran an agent for a given run lives in that run's record.
+- `<scope>/.flows/` — tracked, same home as `.tasks/`, written only through `TASKS flow …`. One file per flow, `<name>.md`: frontmatter `id` (numeric, fixed at create), `name`, `description` (one line), `inputs`, `uses` (flows it follows), `status` (`active`/`retired`), `formerly` (past names, a matching hint), `created`; body = the procedure. Flows outlive iterations — nothing archives them. `<scope>/.flows/agents/<name>.md` and `<scope>/.flows/environments/<name>.md` are the **registries** flows point at (written through `TASKS agent …` / `TASKS env …`, never read as flows): an agent is `name`, `accessors`, `description` (one line, who it is); an environment is `name`, `accessors`, optional `machine`, body = prose expectations; both carry `formerly` (past names). `<scope>/.flows/routines/<name>.md` is the third registry, the scheduled triggers that start recurring tasks (see Routines below), under the same name and accessor rules. There are no ids: a run record names an entry by the name it had then, so `rename` keeps the old name in `formerly`, where it stays **reserved** (add and rename refuse it) and still resolves — `show`, `update`, `rename` and `rm` accept a former name and print what it matched. `rm` frees all of an entry's names. Every accessor is a board contributor and each entry keeps at least one, so every name leads to a human who can reach it; `project`, `runner`, `any` and `inline` are reserved. Accessors are a routing aid — who can reach it now — not history: who ran an agent for a given run lives in that run's record.
 - `<scope>/.dev/` — local to this checkout, gitignored: the hidden worktree the script commits board changes through. Shared with `/dev` if it is installed. Identity is not stored here: it is the roster handle your GitHub login holds, on whichever board you are working.
 - `<scope>/board` — local live viewer (`r` refresh, `a` toggle by-area, `e` toggle expand, `l` toggle a flat list of every task in this iteration, done included, latest board commit first (`a`/`e` do not apply while it is up), `c` check (an id, or `id,id…` for a group), `s` search (words + Enter ranks live tasks as `TASKS related` does, `e` widens it to done/later/shelved/not-planned (dimmed); while the `s>` prompt is open every letter is query text, Esc cancels, Ctrl-D still quits), `f` flows pane, `q` (or Esc) back one level — a typed id, then a task or flow opened from search hits back to the hits, then the shown output, then an open `c>` prompt, then the flows pane or latest list back to the board — and `q` quits from the plain board (Esc never quits; Ctrl-D quits from anywhere); the help line says `q back` while anything is open and `q quit` on a clean board (`r` is always refresh), arrows scroll, space/b page, type an id + Enter to show it). In the flows pane a typed number is the flow's id (its page ends with its run history; `h` opens an `h>` prompt where each flow id + Enter opens that flow scrolled there and the prompt stays open, a bare `h` on an open flow jumps there and opens it, and `h` again or `q` closes it), and `s` searches flows by name, description and procedure (retired ones tagged and dimmed); in the tasks pane a number is a task id.
 
@@ -124,6 +137,10 @@ Statuses for an ops task: `proposed` (filed for approval) → `backlog` → `pla
 | `/ops run <id[, id…]>` | Read `flows/run.md` (preflight, flow choice, inputs, run, record). Several ids run one after another. |
 | `/ops run <flow-name> [inputs]` | Read `flows/run.md` — files a task for that flow first. |
 | `/ops run <description>` | Read `flows/run.md` — files via `flows/add.md` first, then runs it. |
+| `/ops next` | *Next* below — pick the top task for me, then run it on a yes. |
+| `/ops run <id> unattended` / `/ops next unattended` | Read `flows/unattended.md` (a run with nobody there: goes to its first stop, parks every decision on the board). Only on the trailing word — never assumed. |
+| `/ops wake <routine>` | Read `flows/wake.md` (a routine's run: the skill check, the gate, then its due tasks — attended or unattended by the routine's mode — and, on a one-time trigger, re-pointing it). The whole prompt a trigger at its source carries. |
+| `/ops schedule <id> [<routine>]` | Read `flows/schedule.md` (set up a routine so a recurring task starts on its own: pick or create the routine and its runner environment, the trigger proposed from this harness and created at its source on `go`, the task pointed at it, a watched first run; also moves a task between routines). Also where the offer after add and status leads. |
 | `/ops rehearse [<flow-name>]` / "dry run <flow-name>" | Read `flows/rehearse.md` (no flow named → it asks which, offering likely candidates) — go through a new or changed flow once, with the user present, holding back its outward steps, then sharpen the flow from what it found. Its own task (`add --rehearsal`), closed with `ran --rehearsal`; while it is `doing`, the script refuses starting a real run of that flow, and the reverse. |
 | `/ops flow` / `/ops flow list` | `TASKS flow list` (`--all` includes retired). |
 | `/ops flow show <name>` | `TASKS flow show <name>`. |
@@ -135,6 +152,7 @@ Statuses for an ops task: `proposed` (filed for approval) → `backlog` → `pla
 | `/ops flow retire <name>` | Confirm, then `TASKS flow retire <name>`. Kept for the record; never delete a flow that runs point at. |
 | `/ops agent [list \| show \| add \| update \| rename \| rm] …` | `TASKS agent …` — the agents flows hand sequences to. `add` asks for the accessors (board contributors who can reach it) and a one-line description; `rm` confirms first. |
 | `/ops env [list \| show \| add \| update \| rename \| rm] …` | `TASKS env …` — the places sequences run. `add` asks for the accessors, the machine if there is one, and what the place must provide (`--expects`); `rm` confirms first. |
+| `/ops routine [list \| show \| add \| update \| rename \| rm] …` | `TASKS routine …` — the scheduled triggers that start recurring tasks (*Routines* below). `add` asks for the accessors, the mode, the environment, what the trigger is set to and where it lives, and how to change or remove it there; `rm` confirms first. |
 | `/ops note <id> <text>` | `TASKS note <id> "<text>"`, with `--at <step>` when a run is under way (you know the step; the user need not say it). Mid-run the id can be left off, and "note: …" in chat means the same. Runs (inline) says what earns a note. |
 | `/ops board` | `TASKS board`, then report. One board: dev tasks show alongside, marked. |
 | `/ops status` | Your plate — see "Status" below. |
@@ -154,7 +172,7 @@ Anything not in the table maps onto the closest verb: read the intent, do it, an
 
 ## Skill check
 
-Run `SKILL_CMD check` once at the start of bare `/ops`, `/ops help`, `/ops init`, `/ops add`, `/ops run`, `/ops board`, and `/ops meta`. It runs at most every 24h and stays silent when the local version is current or the network fails. Show any line it prints and continue the command — never block work on it.
+Run `SKILL_CMD check` once at the start of bare `/ops`, `/ops help`, `/ops init`, `/ops add`, `/ops run`, `/ops next`, `/ops board`, `/ops meta`, `/ops wake`, and `/ops schedule`. It runs at most every 24h and stays silent when the local version is current or the network fails. Show any line it prints and continue the command — never block work on it.
 
 ## Runs (inline)
 
@@ -166,7 +184,13 @@ A run is one execution against one task, and it ends inside the same session it 
 - **Only the runner writes the board.** Before the first step the runner checks itself against every sequence's `Needs:` and `Environment:` and says which need a handoff. One it cannot do passes the run to a capable agent (a pause it resumes from), goes to another agent as a self-contained brief (every agent gets the brief, this skill or not) whose report comes back to the runner (a `wait` on `<agent> via <contributor>` when it comes later), or, with nobody capable reachable, to the user by hand. Each handoff is noted as it happens, naming the agent and the contributor it was reached through (`direct` when none — the assignee is accountable), and the closing record names them (`flows/run.md` *Handoffs*).
 - **Closing is `TASKS ran <id> --flow <names> --record "<inputs; deviations>"`** — one call that stamps which flows ran, appends `Ran (<date>): …` to the task body, and closes the task (a recurring one re-arms to `backlog` with its next due date instead). A rehearsal closes with `--rehearsal`, which writes `Rehearsed (<date>): …` instead, so it never passes for a real run: `flow runs` lists it marked `[rehearsal]`, and it is refused on a recurring task.
 - **Then improve the flow.** After the task is closed, re-read each flow that ran against what actually happened and offer small fixes on the spot (`flows/run.md`). Runs are where a flow's rough edges show. Tweaks come after closing so they never hold up the user's task.
+- **Unattended is a mode, chosen explicitly** — `unattended` after `/ops run <id>` or `/ops next`, or an unattended routine's wake. Such a run goes to its first stop and puts every decision on the board as a question instead of asking (`flows/unattended.md`); without the word, a run is attended.
+- **A scheduled attended run** — one an attended routine's wake starts — goes to its first step that needs the user, parks it on the board with the session's link on the `Question:` line, notifies them and waits in the session; they answer there, or later through `/ops decide` (`flows/run.md` *A scheduled run*).
 - **No flow yet?** The run is still a run: it proceeds in chunks the user verifies, each noted on the task as it is verified. At the end, offer to turn it into a flow (`/ops flow create from <id>`).
+
+## Next (inline)
+
+`/ops next` picks for you: due recurring ops work first (`TASKS recur list --due`), then your own `planned` ops tasks, then the rest of `backlog` and `planned` — each unassigned or yours, no open `needs`, every dep `done`, never an umbrella. Propose the top one in a line (title, and why it is first), with the runner-up; on a yes, continue as `/ops run <id>`. Nothing eligible → say so and point at `/ops add <task-or-goal>`. Runs already in flight are `/ops status`'s. `/ops next unattended` is a different choice — `flows/unattended.md`.
 
 ## Flows (inline)
 
@@ -195,9 +219,21 @@ A `kind: umbrella` task is a goal whose `deps` are its children. Children all be
 
 ## Recurring (inline)
 
-`kind: recurring` + `cadence: <N><unit>` (`d`/`w`/`m`, e.g. `2w`, `1m`) is perpetual work on a clock — the monthly close, the weekly review — not a task that finishes. `ran` stamps `last_run` and re-arms it to `backlog` rather than closing it; the next due date is derived (`last_run + cadence`), so changing the cadence re-dates it at once. `--next-due <date>` (on `add` or `update`) sets the next due date directly — a first run on a chosen future day, or one run moved — without faking a `last_run`; the next recorded run clears it and the cadence takes over (`""` clears it sooner). Use a date the user named; never invent one. `TASKS recur list --due` is the due view, and `board` marks each recurring id on its index row — `↻`, or a red `⏰` when due and its due state on its line. Status alone decides whether the clock runs: a proposed one is not approved yet, a later one is not this iteration, a shelved one is paused and a not-planned one retired. None is ever due, and recording a run on one is refused until it is revived; its cadence and dates are kept, so the clock resumes when it returns to an active status.
+`kind: recurring` + `cadence: <N><unit>` (`d`/`w`/`m`, e.g. `2w`, `1m`) or `schedule: <cron> <timezone>` (a 5-field cron expression and an IANA zone, e.g. `0 12 * * 3 America/New_York`; one or the other, never both) is perpetual work on a clock — the monthly close, the weekly review — not a task that finishes. `ran` stamps `last_run` (a timestamp with offset) and re-arms it to `backlog` rather than closing it; the next due is derived (`last_run + cadence`, or the first scheduled time after `last_run`), so changing the clock re-dates it at once. A missed scheduled time stays due until a run is recorded; a scheduled task never run counts from the start of its created day (that day's scheduled time counts), and a bare `--date` is read as the end of that day in the schedule's timezone. `--next-due <date>` (on `add` or `update`) sets the next due date directly — a first run on a chosen future day, or one run moved — without faking a `last_run`; the next recorded run clears it and the cadence or schedule takes over (`""` clears it sooner). Today's date makes a scheduled task due now, so its first run can be fired by hand. Use a date the user named; never invent one. `TASKS recur list --due` is the due view, and `board` marks each recurring id on its index row — `↻`, or a red `⏰` when due and its due state on its line. Status alone decides whether the clock runs: a proposed one is not approved yet, a later one is not this iteration, a shelved one is paused and a not-planned one retired. None is ever due, and recording a run on one is refused until it is revived; its clock and dates are kept, so the clock resumes when it returns to an active status.
 
 **Never invent a recurring task.** Whether work recurs, and how often, is the user's call: offer and wait.
+
+## Routines (inline)
+
+A **routine** mirrors a scheduled trigger that lives at its source — a harness's scheduler, cron, a cloud routine — so the board knows which recurring tasks start on their own, where and how. One file per routine, `<scope>/.flows/routines/<name>.md`, written through `TASKS routine …`: `name`, `accessors` (contributors who can reach the trigger's source), `mode` (`attended`: exactly one task, and the user is reached when it needs them; `unattended`: its tasks run in one session and share its context), `environment` (the registered environment it runs in), `schedule` (what the trigger is set to: a cron expression and an IANA zone in the recurring syntax, or one fire time as a timestamp with offset), `trigger` (one line: what it is and where, with its identifier), `status` (`active`/`paused`), `formerly`, `created`; body = how to change or remove the trigger at its source. Former names stay reserved and keep resolving, as for agents and environments; `rm` is refused while a task points at the routine, and `env rm` while a routine runs there. `paused` is the board-side off switch for anyone who cannot reach the source: the trigger still fires, and the wake stops on it. Setting one up for a task, or moving a task to another, is `/ops schedule <id> [<routine>]` (`flows/schedule.md`).
+
+A recurring task points at a routine with its `routine` field (`add` / `update --routine <name>`, `""` clears). A routine's tasks share one type, so `/dev` and `/ops` each wake only their own; a second task on an attended routine is refused; pointing a task at an unattended routine notes the shared session, and warns when the task's flow has `[user]` steps nobody will be there to do. Changing its kind away from `recurring` is refused while the routine is set — clear the routine first. Editing a covered task's cadence, schedule or `next_due` prints a reminder that its trigger lives at the source and may need the same change there.
+
+**Not started.** A covered task that is due, at rest (`backlog`/`planned`) and has no open `needs`, whose routine's schedule says it should have fired for it more than an hour ago, reads `🚨routine <name> did not start` on its line, and its index id carries `🚨` in place of `⏰` — `routine <name> paused` (plain `⏰` on the id) when the routine is paused. It is derived whenever the board is read, never stored; `TASKS routine list` shows the same under each routine with the time it should have fired. A schedule this machine cannot read (say, a zone its timezone data lacks) is listed as `schedule unreadable (<why>)` and skipped by the check rather than stopping the board.
+
+**Wake.** `TASKS routine wake <name>` is the gate a routine's run passes first: exit 2 with the reason when the routine is paused, no longer on the board, or runs the other skill's tasks; otherwise its due tasks at rest (`backlog`/`planned`), in due order, then any due one with an open `needs` on a `skipped, waiting on a decision:` line and any still in flight on a `skipped, in flight:` line — a re-fire never hands out a parked question again, nor a run that is still going. A trigger's prompt is only `/ops wake <name>` (`flows/wake.md`): every rule a scheduled run follows lives in the skill and on the board, so the prompt at the source never goes stale.
+
+**Runner environment.** The environment a routine runs in must give a session everything a run needs with no one at the keyboard: a checkout of this repo that can push to the integration branch; this skill at a version the board accepts; `gh` signed in as a login on the board's roster (`TASKS whoami` checks it at the wake); for dev tasks, the right to open PRs; every tool call the run makes either allowed or refused up front, never left waiting on a permission prompt; and, for an attended routine, a way to notify the user. These are judged when the routine is set up and by watching its first run — the script does not check them.
 
 ## Not planned, later, and shelved (inline)
 
@@ -211,7 +247,7 @@ A task with a live branch or PR cannot move to `later`, `shelved` or `not-planne
 
 ## Status (`/ops status`)
 
-`TASKS list --assignee <me>`, then report in order: runs in flight you can act on (`doing` with no `waiting:` marker — each is yours to finish and close), then runs waiting on a third party or a handed-off agent (who and by when, overdue ones called out — nothing to do until the reply is in), what is due (`TASKS recur list --due`), and anything waiting on you (`TASKS list --needs decision`, `--status proposed`).
+`TASKS list --assignee <me>`, then report in order: runs in flight you can act on (`doing` with no `waiting:` marker — each is yours to finish and close), then runs waiting on a third party or a handed-off agent (who and by when, overdue ones called out — nothing to do until the reply is in), what is due (`TASKS recur list --due`; only when there is one, a line reading `routine … did not start` or `paused`, with who can reach that routine's source; and, only when there is one, an ops recurring task not stopped (`proposed`, `later`, `shelved`, `not-planned`) with no `routine` and no `Decision: no routine` line (`TASKS list --type ops --json`), with the offer to start it on its own — `flows/schedule.md` *The offer*), and anything waiting on you (`TASKS list --needs decision`, `--status proposed`).
 
 Anything waiting on a decision is resolved in `flows/decide.md` (`/ops decide`), not here — status only surfaces it.
 

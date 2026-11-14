@@ -36,6 +36,6 @@ Say which you did, once ("filed as one task" / "filed three, the third waits on 
    - A neighbour marked `☂` is an umbrella that may already cover this: propose the new task as its child (`--umbrella <id>` on the add).
    - **Once deps are picked**, run `TASKS related "<title + description>" --deps <ids>` again: each `umbrella of T…:` line it adds names an umbrella those deps sit under. Ask whether the new task belongs under it too; on yes, file with `--umbrella <id>`. Skip an umbrella already settled by the bullet above.
 3. `TASKS add --title "…" --type ops [--deps 1,2] [--umbrella <id>] [--desc "…"]`, then show the task as recorded (the script prints it). `--type ops` is not optional — without it the task is filed as code work.
-4. Offer the obvious next step: `/ops run <id>` if it is ready to do now, nothing if it is future work.
+4. Offer the obvious next step: `/ops run <id>` if it is ready to do now, nothing if it is future work. A recurring task also gets the offer to start it on its own (`flows/schedule.md` *The offer*).
 
 Coming from `/ops run <description>` (no matching task): file exactly as above, then continue straight into the run — the user already said to do it, so don't ask again.

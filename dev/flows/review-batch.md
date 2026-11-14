@@ -9,7 +9,7 @@ Loaded only from `flows/review.md` when the user asked for several task ids at o
 - Single-id whose open **stack parent** is not selected: `batch-gate` exit 2 — **hard refuse**, list the missing parents; do not review or expand.
 - Single-id that is part of a still-open Dev-batch: `batch-gate` **advises** (exit 0). Relay it and offer the full set; the user decides.
 
-Non-goals: auto multi-review; auto-expand after a gate refuse or advisory; pairwise sibling `merge-tree`.
+Non-goals: unattended multi-review; auto-expand after a gate refuse or advisory; pairwise sibling `merge-tree`.
 
 ## Philosophy (two phases)
 
@@ -54,7 +54,7 @@ Stack edges often dominate (implement-batch stacks may share only done deps). To
 For each id in order:
 
 1. `TASKS land <id>` only — never hand-roll merge. Land merges the parent (merge commit) and retargets its immediate children to integration; their branches are untouched, at any stack depth. Surface full output; on `error:` stop the land wave (the rest stay in `review`).
-2. Version intent: for a **Dev-batch**, after the last member of the set lands, apply **one** bump sized for the whole set (greatest of the stated intents) — not one per PR. If the wave stops early, wait — do not bump twice later. A set that is **only** a stack (PR base edges, no shared `Dev-batch:`) is not one change set: those tasks merely share a branch lineage, so each keeps its own intent and gets its own bump as it lands.
+2. Version intent: for a **Dev-batch**, after the last member of the set lands, apply **one** bump sized for the whole set (greatest of the stated intents) — not one per PR. If the wave stops early, wait — do not bump twice later. A set with no shared `Dev-batch:` — only a stack (PR base edges), or members built in parallel — is not one change set, so each keeps its own intent and gets its own bump as it lands.
 
 ### 3. Report
 

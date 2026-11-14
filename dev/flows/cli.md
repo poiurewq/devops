@@ -51,13 +51,13 @@ TASKS contributor rm <name>             # yourself, or anyone as integrator;
                                         # refused for the last integrator and
                                         # for anyone assigned a task not done
                                         # or not-planned, and for the last
-                                        # accessor of an agent or environment.
+                                        # accessor of a registry entry.
                                         # Also drops them from the integrator
                                         # roster and every accessor list
 TASKS contributor rename <name> <new>   # yourself, or anyone as integrator.
                                         # Renames on the roster, integrator
                                         # roster, live task assignees and
-                                        # agent/env accessors (not archives
+                                        # registry accessors (not archives
                                         # or run records); the old handle
                                         # stays reserved
 TASKS area list
@@ -119,19 +119,59 @@ TASKS env add <new-name> --accessors "<handle, handle>"
                                         # same name and accessor rules as agent
 TASKS env update <name> [--accessors] [--machine <m>|""] [--expects]
 TASKS env rename <name> <new-name>
-TASKS env rm <name>
+TASKS env rm <name>                     # refused while a routine runs there
+TASKS routine list [--json]             # name — mode, status, environment,
+                                        # schedule (accessors); then each
+                                        # one's tasks, and a task it should
+                                        # have started and did not (or that
+                                        # waits on it paused)
+TASKS routine show <name>               # print the entry file
+TASKS routine add <new-name> --accessors "<handle, handle>"
+           --mode attended|unattended   # attended: exactly one task
+           --environment <env>          # a registered environment
+           --schedule "<cron> <timezone>" | <timestamp with offset>
+                                        # what the trigger is set to: a
+                                        # cron + IANA zone, or one fire time
+           --trigger "<what and where, with its identifier>"
+           --manage "<prose>"           # how to change or remove the
+                                        # trigger at its source (the body)
+                                        # same name and accessor rules as agent
+TASKS routine update <name> [--accessors] [--mode] [--environment]
+           [--schedule] [--trigger] [--manage]
+           [--status active|paused]     # paused: the board-side off switch
+                                        # for anyone who cannot reach the
+                                        # source; wake stops on it
+TASKS routine rename <name> <new-name>  # tasks keep resolving the old name
+TASKS routine rm <name>                 # refused while a task points at it
+TASKS routine wake <name>               # the entry gate a trigger runs:
+                                        # exit 2 + reason when the routine is
+                                        # paused, gone, or of the other
+                                        # skill's tasks; else its due tasks
+                                        # at rest, in due order, then
+                                        # `skipped, waiting on a decision:`
+                                        # (open needs) and `skipped, in
+                                        # flight:` lines
 TASKS add --title "<title>" [--area <m>] [--deps <id,id>]
           [--desc "<1–3 sentences>"] [--assignee <who>]
           [--kind umbrella|recurring]           # empty = normal
           [--cadence <N><unit>]                 # recurring only, unit d/w/m
+          [--schedule "<cron> <timezone>"]      # recurring only, instead of
+                                                # --cadence: 5-field cron +
+                                                # IANA zone ("0 12 * * 3
+                                                # America/New_York")
           [--next-due YYYY-MM-DD]               # recurring only: first run
-                                                # date (default: due now)
+                                                # date (default: due now on a
+                                                # cadence, first scheduled
+                                                # time from the start of
+                                                # today on a schedule)
           [--type ops|dev]                      # default dev; ops = run
                                                 # through /ops flows, and
                                                 # refuses --area
           [--rehearsal]                         # ops only, never recurring:
                                                 # a dry run of its flow
                                                 # (rehearsal: true)
+          [--routine <name>]                    # recurring only: the routine
+                                                # whose trigger starts it
           [--status proposed|backlog|planned|later]  # default backlog
           [--umbrella <id[,id]>]                # add the new task to these
                                                 # umbrellas' deps, same board
@@ -155,16 +195,36 @@ TASKS update <id> [--title "<t>"] [--area <m>] [--status <s>]
                                                 # opposite kind (run vs
                                                 # rehearsal) of the same
                                                 # flow id is doing
+          [--unattended <model-id>|""]          # an unattended ops run's
+                                                # (or audit's) marker, same
+                                                # field claim sets: only on a
+                                                # doing task; refused (as is
+                                                # --status doing) while any
+                                                # run's marker is set, same
+                                                # model id too; "" clears
           [--append "<paragraph>"]              # add to body, keeping it;
                                                 # repeatable, one paragraph
                                                 # each, in order
           [--desc "<new body>"]                 # REPLACE whole body
-          [--cadence <N><unit>] [--last-run YYYY-MM-DD|""]
-                                                # recurring only; the due date
-                                                # is derived from these
+          [--cadence <N><unit>|""] [--schedule "<cron> <timezone>"|""]
+          [--last-run <date|timestamp>|""]     # recurring only; the due is
+                                                # derived from these. One of
+                                                # cadence/schedule; a
+                                                # timestamp carries its offset
+                                                # (2026-11-11T12:04-05:00)
           [--next-due YYYY-MM-DD|""]            # recurring only: overrides
                                                 # the derived date until a
                                                 # run is recorded
+          [--routine <name>|""]                 # recurring only. Refused: a
+                                                # second task on an attended
+                                                # routine, or a task of the
+                                                # other type; changing the
+                                                # kind while it is set. Notes
+                                                # a shared unattended session
+                                                # and a flow with [user] steps;
+                                                # editing a covered task's
+                                                # clock reminds you of the
+                                                # trigger at its source
           [--status later]                      # park for a later iteration
           [--status not-planned --reason "<why>"]   # reason is required
           [--status shelved --reason "<why>"]       # not needed for now;
@@ -177,7 +237,7 @@ TASKS verify <id> "<how the children met the goal>"
                                         # required, and --status done on one
                                         # is refused in favour of this
 TASKS ran <id> --record "<inputs; deviations>"
-               [--flow <name[,name]>] [--date YYYY-MM-DD] [--rehearsal]
+               [--flow <name[,name]>] [--date <date|timestamp>] [--rehearsal]
                                         # close an ops task with its run
                                         # record (Ran (<date>): …); --flow
                                         # omitted keeps the task's flow
@@ -208,19 +268,20 @@ TASKS wait <id> --on "<who>" --by YYYY-MM-DD --at "<step>"
                                         # leaves doing
 TASKS wait <id> --clear                 # the reply is in; stays doing
 TASKS note <id> "<text>" [--at "<step>"] [--date YYYY-MM-DD]
-                                        # ops only: appends Note (<date>):
+                                        # ops or dev: appends Note (<date>):
                                         # [<flow> <step>] …; any status but
                                         # proposed/not-planned (done too);
                                         # moves nothing
 TASKS delete <id>
 TASKS show <id>
 TASKS collisions <id[,id…]>             # area occupancy vs doing/draft/review;
-                                        # multi-id also prints in-set overlap;
+                                        # multi-id also prints in-set overlap
+                                        # and a parallel: ok|no verdict;
                                         # exit 2 if any blocker is doing;
                                         # exit 3 if every blocker's PR is open
                                         # (draft or review, any assignee) —
                                         # implement offers proceed / stack /
-                                        # wait, auto skips
+                                        # wait, an unattended run skips
                                         # (batch peers excluded from that check)
 TASKS related "<text>" [--deps <id,id>] # existing tasks similar to <text>;
                                         # run before every add; --deps (the
@@ -236,9 +297,9 @@ TASKS recur list [--due]                # recurring tasks + derived due dates
                                         # proposed/later/shelved/
                                         # not-planned (clock stopped) are
                                         # left out
-TASKS recur ran <id> [--date YYYY-MM-DD]
+TASKS recur ran <id> [--date <date|timestamp>]
                                         # record a run with no PR: stamp
-                                        # last_run (default today), re-arm to
+                                        # last_run (default now), re-arm to
                                         # backlog. Refused if branch or pr is
                                         # set — land owns that run — or
                                         # while the clock is stopped
@@ -280,8 +341,9 @@ TASKS claim <id> [--assignee <who>] [--branch <b>] [--stack-on <id>]
                                         # (primary stays hub), status=doing;
                                         # prints workdir + product + verified
                                         # base (edit + compile/test/run in product)
-                                        # --auto <model-id>: auto only; marks
-                                        # the task auto:<model-id> while doing
+                                        # --unattended <model-id>: unattended
+                                        # runs only; marks the task
+                                        # unattended:<model-id> while doing
                                         # and refuses any other claim of it
 TASKS diff <id>                         # location + review diff from the
                                         # task worktree (not session cwd);

@@ -48,6 +48,6 @@ TASKS add --title "Recurring audit: <scope>" --kind recurring \
           --cadence <N><unit> --desc "<scope + emphasis>"
 ```
 
-Whole-board and per-area audits are separate recurring tasks; a board may hold several. Declined → drop it, and do not re-offer on every pass.
+Whole-board and per-area audits are separate recurring tasks; a board may hold several. Declined → drop it, and do not re-offer on every pass. Filed → offer to start it on its own (`flows/schedule.md` *The offer*).
 
 Rescheduling runs through this same command: when the user asks to change the schedule, `TASKS update <id> --cadence <N><unit>` — the due date re-derives immediately. `--status not-planned` stops one for good.

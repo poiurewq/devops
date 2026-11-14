@@ -1,6 +1,6 @@
 # Multi-task implement batch
 
-Loaded only from `flows/implement.md` when the user asked for several tasks at once. Do **not** read this file for a single-id implement.
+Loaded from `flows/implement.md` when the user asked for several tasks at once, and by the lead for steps 1–5 (`flows/lead.md` *Several ids*). Do **not** read this file for a single-id implement.
 
 ## When this applies
 
@@ -8,7 +8,7 @@ Loaded only from `flows/implement.md` when the user asked for several tasks at o
 - **All tasks under an umbrella:** expand that umbrella's `deps` — nested umbrellas expand recursively to leaves; the umbrella itself is not a batch member unless the user named it as a normal id.
 - Multiple freeform description matches, only when the user clearly asked for a batch.
 
-`/dev auto` stays one task per cycle — no auto multi-pick.
+An unattended run (`flows/unattended.md`) never batches: several ids run one after another, each its own run.
 
 Run the steps below **before claiming anything**, then run `flows/implement.md` steps 0–7 for each id in the planned order.
 
@@ -25,4 +25,4 @@ Run the steps below **before claiming anything**, then run `flows/implement.md` 
    - **Within-set deps:** when claim warns about unfinished deps that are earlier members of this batch (typically now `draft` after their ship), proceed. Still stop if an unfinished dep is outside the set (shouldn't happen after step 3 unless the board moved).
    - **Area collision** for a later member: re-check with `TASKS collisions <id,id,…>` for the **whole set**, not the single id — an in-set `draft` after an earlier ship is expected. Exit 2 (an outside `doing` blocker) → stop; leave already-shipped members in `draft` and report the rest. Exit 3 (every outside blocker's PR open) → the user's proceed-or-wait call, same as step 5.
    - If a later member becomes unstartable mid-batch (board moved), stop; leave already-shipped members in `draft` and report the rest.
-7. **Out of scope for this path:** parallel worktrees or parallel agents for the batch, unless the user later asks. Each task still gets its own branch and PR. Prefer `origin/<integration>` as the base; if a later task truly needs unmerged code from an earlier one, stack on it: `TASKS claim <id> --stack-on <earlier-id>`, then ship as usual — the PR base is derived from the branch it was started on, so `--base` is only for overriding that. Note the dependency in the PR body. Stacking is cheap: `land` merges the parent without rewriting it, so a stacked child is only retargeted, never rebased — at any depth.
+7. **Out of scope for this path:** parallel agents for the batch — the lead decides that before this file runs (`flows/lead.md` *Several ids*). Each task still gets its own branch and PR. Prefer `origin/<integration>` as the base; if a later task truly needs unmerged code from an earlier one, stack on it: `TASKS claim <id> --stack-on <earlier-id>`, then ship as usual — the PR base is derived from the branch it was started on, so `--base` is only for overriding that. Note the dependency in the PR body. Stacking is cheap: `land` merges the parent without rewriting it, so a stacked child is only retargeted, never rebased — at any depth.

@@ -39,6 +39,7 @@ import tempfile
 import time
 import unicodedata
 import urllib.parse
+import zoneinfo
 
 STATUSES = ["proposed", "backlog", "planned", "doing", "draft", "review",
             "done", "later", "shelved", "not-planned"]
@@ -96,7 +97,15 @@ VIEWER_NAME = "board"
 # 10: each `contributors` entry may carry its GitHub login, `handle (login)`
 #    (bare `handle` = login not recorded yet). An older script compares whole
 #    entries, so its init would re-register `Q` beside `Q (login)`.
-SCHEMA_VERSION = 10
+# 11: optional `schedule` (cron expression + IANA timezone) as the clock of a
+#    recurring task instead of `cadence`, and `last_run` is stamped as a
+#    timestamp with offset on every run. An older script reads last_run as a
+#    bare date and errors on any recurring task once it has run (and on one
+#    with no cadence).
+# 12: optional `routine` on a recurring task, pointing at an entry in
+#    .flows/routines/. An older script drops the field on rewrite, which
+#    silently takes the task off its routine.
+SCHEMA_VERSION = 12
 CONFIG_KEYS = ["schema_version", "integration_branch", "parent_branch",
                "iteration", "iteration_name", "iteration_started",
                "integrator", "contributors"]
@@ -128,18 +137,25 @@ OPS = "ops"
 # (dev or ops) carries it, and render_task drops it the moment the task
 # leaves doing, so every path out of doing clears it without knowing it
 # exists.
-# auto: optional, the model id of an auto run that claimed the task (`claim
-# --auto`). Same lifetime as waiting — only a doing task carries it — so
-# auto's fork un-claim, its ship to draft and a manual move to backlog all
-# clear it. While it is set, claim refuses anyone else's resume.
+# routine: optional, on a recurring task: the name of the routine (in
+# .flows/routines/) whose trigger starts it. A pointer that resolves through
+# the routine's former names; the board derives whether that routine should
+# already have started a due task (routine_stall), and stores nothing.
+# unattended: optional, the model id of an unattended run that claimed the
+# task (`claim --unattended`). Same lifetime as waiting — only a doing task
+# carries it — so the run's fork un-claim, its ship to draft and a manual
+# move to backlog all clear it. While it is set, claim refuses anyone else's
+# resume.
 FIELDS = ["id", "title", "area", "status", "kind", "type", "assignee", "branch",
-          "deps", "pr", "needs", "waiting", "auto", "flow", "rehearsal",
-          "created", "cadence", "last_run", "next_due"]
+          "deps", "pr", "needs", "waiting", "unattended", "flow", "rehearsal",
+          "created", "cadence", "schedule", "last_run", "next_due",
+          "routine"]
 # Written only when non-empty, so an ordinary task file is byte-identical to
 # what a pre-schema-4 script produced. Older readers ignore them either way.
 # `type` is not among them: render always writes it (schema 8).
-OPTIONAL_FIELDS = ("waiting", "auto", "flow", "rehearsal", "cadence",
-                   "last_run", "next_due")
+OPTIONAL_FIELDS = ("waiting", "unattended", "flow", "rehearsal",
+                   "cadence", "schedule", "last_run", "next_due",
+                   "routine")
 # Board push races on a shared integration branch: rebase onto origin and
 # retry this many times before queueing locally.
 PUSH_RETRIES = 3
@@ -1874,7 +1890,7 @@ def cmd_flow(args):
         return
 
 
-# ---------- agent and environment registries ----------
+# ---------- agent, environment and routine registries ----------
 # <scope>/.flows/agents/<name>.md and <scope>/.flows/environments/<name>.md,
 # one entry per file. They sit under .flows/ because flows name them and,
 # like flows, they outlive iterations; board_commit stages them and the ship
@@ -1891,6 +1907,17 @@ def cmd_flow(args):
 #   ---
 #   prose expectations                          (environment only)
 #
+# <scope>/.flows/routines/<name>.md is the third registry: a routine mirrors
+# a scheduled trigger that lives at its source (a harness's scheduler, cron,
+# a cloud routine), so the board knows which recurring tasks start on their
+# own. Beside name, accessors (who can reach the source), formerly and
+# created it carries mode (attended | unattended), environment (a registered
+# environment), schedule (what the trigger is set to: cron + IANA zone, or
+# one fire time), trigger (free text: what and where, with its identifier)
+# and status (active | paused — the board-side off switch); its body says
+# how to change or remove the trigger at its source. Tasks point at one
+# through their `routine` field.
+#
 # Accessors are a routing aid, not history: who ran an agent for a given run
 # lives in that run's record. There is no id: run records name an entry by
 # the name it had then, so unlike a flow's, a former name stays reserved
@@ -1904,6 +1931,10 @@ REGISTRIES = {
     "env": {"dir": "environments", "label": "environment",
             "fields": ["name", "accessors", "machine", "formerly",
                        "created"]},
+    "routine": {"dir": "routines", "label": "routine",
+                "fields": ["name", "accessors", "mode", "environment",
+                           "schedule", "trigger", "status", "formerly",
+                           "created"]},
 }
 # Words a flow uses for "whoever is running it" / "this repo" / "no
 # preference" / "described right here in the sequence", so no entry may
@@ -1940,7 +1971,7 @@ def write_registry(meta):
 
 
 def registry_name_error(name):
-    """Why `name` cannot name an agent or environment, or None. Pure."""
+    """Why `name` cannot name a registry entry, or None. Pure."""
     if not FLOW_NAME_RE.match(name or "") or name.isdigit():
         return (f"name '{name}' must be a slug: lowercase letters, digits, "
                 "hyphens (grok-bot), not a bare number")
@@ -1992,6 +2023,12 @@ def registry_line(e):
     kind = e["kind"]
     if kind == "agent":
         what = e.get("description") or "(no description)"
+    elif kind == "routine":
+        _, why = read_routine_schedule(e)
+        sched = (f"schedule unreadable ({why})" if why
+                 else f"schedule {e['schedule']}")
+        what = (f"{e.get('mode')}, {e.get('status')}, environment "
+                f"{e.get('environment')}, {sched}")
     else:
         what = (f"machine: {e['machine']}" if e.get("machine")
                 else "(no machine)")
@@ -2000,12 +2037,301 @@ def registry_line(e):
             f"(accessors: {e.get('accessors') or 'none'}{was})")
 
 
+ROUTINE_MODES = ("attended", "unattended")
+ROUTINE_STATUSES = ("active", "paused")
+ROUTINE_SCHEDULE_HELP = ("a routine's schedule is a 5-field cron expression "
+                         "and an IANA timezone (\"0 12 * * 3 "
+                         "America/New_York\"), or one fire time as a "
+                         "timestamp with offset (2026-11-12T09:00-05:00)")
+# How long past the time a routine should have fired for a due task before
+# the board says it did not start.
+ROUTINE_GRACE = datetime.timedelta(hours=1)
+
+
+def parse_routine_schedule(value):
+    """A routine's schedule: a cron expression + zone (parsed as a task's
+    schedule) or one fire time (an aware datetime). Exits on a bad value."""
+    raw = " ".join((value or "").split())
+    if raw and " " not in raw:
+        try:
+            when = datetime.datetime.fromisoformat(raw)
+        except ValueError:
+            when = None
+        if when is None or when.tzinfo is None:
+            sys.exit(f"error: bad routine schedule '{value}'; "
+                     f"{ROUTINE_SCHEDULE_HELP}")
+        return when
+    sched = parse_schedule(raw, "routine schedule")
+    if cron_next(sched, datetime.datetime.now().astimezone()) is None:
+        sys.exit(f"error: routine schedule '{raw}' never fires")
+    return sched
+
+
+def read_routine_schedule(r):
+    """(parsed schedule, None), or (None, why it cannot be read). Never
+    exits: every board read derives stalls from it, and a zone this
+    machine's tz database lacks must not stop the board, only that check."""
+    raw = " ".join((r.get("schedule") or "").split())
+    if not raw:
+        return None, "none set"
+    try:
+        return parse_routine_schedule(raw), None
+    except (SystemExit, ValueError, OSError):
+        toks = raw.split()
+        if len(toks) == 6:
+            try:
+                zoneinfo.ZoneInfo(toks[5])
+            except (ValueError, OSError, zoneinfo.ZoneInfoNotFoundError):
+                return None, f"unknown zone {toks[5]}"
+        return None, f"bad value '{raw}'"
+
+
+def routine_expected_fire(sched, since):
+    """When a routine with this parsed schedule should fire for a task due
+    at `since`: its first cron time at or after it. A one-time trigger set
+    earlier than `since` fired for an earlier run and was never re-pointed,
+    so the task counts as expected at `since` itself. Pure."""
+    if isinstance(sched, datetime.datetime):
+        return max(sched, since)
+    return cron_next(sched, since - datetime.timedelta(microseconds=1))
+
+
+def routine_of(t, routines):
+    """The routine entry task `t` points at, by its name or a former one."""
+    name = (t.get("routine") or "").strip()
+    return registry_holder(routines, name) if name else None
+
+
+def routine_tasks(tasks, routines, r):
+    """Tasks pointing at routine entry `r`, under any of its names."""
+    return [t for t in tasks if routine_of(t, routines) is r]
+
+
+def routine_stall(t, r, now):
+    """Why a task its routine should already have started has not, or None:
+    ('paused' | 'missing', None), or ('did not start', when it should have
+    fired). Only a due task at rest with no open needs is checked — one in
+    flight has started, one with needs waits on a human. A routine whose
+    schedule cannot be read is skipped; routine list says why. Pure."""
+    if (not recur_at_rest(t) or not on_the_clock(t) or t.get("needs")
+            or not task_is_due(t, now)):
+        return None
+    if r is None:
+        return ("missing", None)
+    if r.get("status") == "paused":
+        return ("paused", None)
+    due = task_due_date(t)
+    if due is None:
+        created = (t.get("created") or "").strip()
+        if not created:
+            return None
+        due = iso_date(created, "created")
+    sched, _ = read_routine_schedule(r)
+    if sched is None:
+        return None
+    expected = routine_expected_fire(sched, due_instant(due))
+    if expected is not None and expected + ROUTINE_GRACE < due_instant(now):
+        return ("did not start", expected)
+    return None
+
+
+def stall_words(stall):
+    return "not on the board" if stall[0] == "missing" else stall[0]
+
+
+def routine_not_started(t):
+    """A covered task its routine should have started and will not: it did
+    not start, or the routine is gone. Paused is a human's choice, so it
+    keeps the plain due mark."""
+    stall = t.get("routine_stall")
+    return bool(stall) and stall[0] != "paused"
+
+
+def routine_stall_text(t):
+    """The board's note for a stalled covered task, or ''."""
+    stall = t.get("routine_stall")
+    if not stall:
+        return ""
+    mark = "🚨" if routine_not_started(t) else ""
+    return f"{mark}routine {stall[2]} {stall_words(stall)}"
+
+
+def note_routine_stalls(tasks, routines, now=None):
+    """Derive each covered task's stall as routine_stall, (reason, expected,
+    the routine's current name): kept in memory, never written, since
+    render_task writes FIELDS only."""
+    now = now or datetime.datetime.now().astimezone()
+    for t in tasks:
+        r = routine_of(t, routines)
+        stall = routine_stall(t, r, now) if t.get("routine") else None
+        if stall:
+            t["routine_stall"] = stall + (r["name"] if r else t["routine"],)
+
+
+def routine_pointer_check(meta, tasks, routines, flows):
+    """(entry, error, notes) for pointing task `meta` at its routine field.
+    An attended routine holds exactly one task, and a routine's tasks share
+    one type (/dev wake and /ops wake each run only their own). Notes: an
+    unattended routine's tasks share one session's context, and a flow with
+    [user] steps has nobody to do them there. Pure."""
+    name = (meta.get("routine") or "").strip()
+    if not is_recurring(meta):
+        return None, (f"routine only applies to kind {RECURRING} tasks; "
+                      f"T{meta['id']} is not one"), []
+    r = registry_holder(routines, name)
+    if r is None:
+        have = ", ".join(x["name"] for x in routines) or "none"
+        return None, f"no routine '{name}' ({have}). See: routine list", []
+    others = [t for t in routine_tasks(tasks, routines, r)
+              if t["id"] != meta["id"]]
+    ids = ", ".join(f"T{t['id']}" for t in others)
+    if r.get("mode") == "attended" and others:
+        return r, (f"routine {r['name']} is attended and already runs {ids}; "
+                   "an attended routine holds exactly one task"), []
+    clash = [t for t in others if task_type(t) != task_type(meta)]
+    if clash:
+        return r, (f"routine {r['name']} runs {task_type(clash[0])} tasks "
+                   f"({ids}) and T{meta['id']} is {task_type(meta)}; a "
+                   "routine's tasks share one type"), []
+    notes = []
+    if r.get("mode") == "unattended":
+        if others:
+            notes.append(f"note: routine {r['name']} also runs {ids}; its "
+                         "tasks run in one session and share its context")
+        by_id = {f["id"]: f for f in flows}
+        for fid, _ in parse_flow_refs(meta.get("flow")):
+            f = by_id.get(fid)
+            if f and "[user]" in (f.get("body") or ""):
+                notes.append(f"warning: flow {f['name']} has [user] steps "
+                             f"and routine {r['name']} is unattended: "
+                             "nobody is there to do them")
+    return r, None, notes
+
+
+def routine_trigger_reminder(meta):
+    r = meta["routine"]
+    return (f"reminder: T{meta['id']} is started by routine {r}; if its "
+            f"trigger no longer fits, change it at the source (routine show "
+            f"{r} says how), then routine update {r} --schedule")
+
+
+def cmd_routine_wake(bw, scope, entries, name):
+    """The routine's entry gate: exit 2 with the reason when the record is
+    paused, gone, or of the other skill's tasks; else its due tasks at rest
+    in due order, then those waiting on a decision and those in flight on
+    skipped lines (a re-fire must not hand out a parked question again, nor
+    a run that is still going)."""
+    e = registry_holder(entries, name)
+    if e is None:
+        print(f"wake: no routine '{name}' on this board, so this trigger has "
+              "nothing to run; remove it at its source", file=sys.stderr)
+        sys.exit(2)
+    if e["status"] == "paused":
+        print(f"wake: routine '{e['name']}' is paused on the board; nothing "
+              f"runs until routine update {e['name']} --status active",
+              file=sys.stderr)
+        sys.exit(2)
+    tasks = all_tasks(bw, scope)
+    mine = routine_tasks(tasks, entries, e)
+    skill = invoking_skill()
+    other = [t for t in mine if task_type(t) != skill]
+    if other:
+        print(f"wake: routine '{e['name']}' runs {task_type(other[0])} "
+              f"tasks; wake it with /{task_type(other[0])} wake",
+              file=sys.stderr)
+        sys.exit(2)
+    due, waiting, busy = wake_partition(mine)
+    for t in due:
+        print(fmt_line(t, tasks))
+    if not due:
+        print(f"(nothing due on routine {e['name']})")
+    if waiting:
+        print("skipped, waiting on a decision: " + ", ".join(
+            f"T{t['id']}" for t in waiting))
+    if busy:
+        print("skipped, in flight: " + ", ".join(
+            f"T{t['id']} ({t['status']})" for t in busy))
+
+
+def wake_partition(mine):
+    """A routine's tasks as the wake sees them: (due at rest, in due order;
+    due at rest but with an open needs, which a human must answer before a
+    re-fire may hand it out again; in flight). Pure."""
+    ready = sorted((t for t in mine if recur_at_rest(t) and task_is_due(t)),
+                   key=recur_due_sort)
+    due = [t for t in ready if not t.get("needs")]
+    waiting = [t for t in ready if t.get("needs")]
+    busy = [t for t in mine if t["status"] in IN_FLIGHT]
+    return due, waiting, busy
+
+
+def routine_fields(args, e, act, entries, tasks, envs):
+    """Apply a routine's own flags to entry `e`; the changed field names.
+    add needs every one of them but --status (a new routine is active)."""
+    if act == "add":
+        missing = [f"--{f}" for f in ("mode", "environment", "schedule",
+                                      "trigger", "manage")
+                   if not (getattr(args, f) or "").strip()]
+        if missing:
+            sys.exit(f"error: routine add needs {', '.join(missing)}")
+        e["status"] = "active"
+    changes = []
+    if args.mode is not None:
+        mode = args.mode.strip()
+        if mode not in ROUTINE_MODES:
+            sys.exit(f"error: mode must be one of {', '.join(ROUTINE_MODES)}")
+        mine = routine_tasks(tasks, entries, e) if act != "add" else []
+        if mode == "attended" and len(mine) > 1:
+            sys.exit(f"error: an attended routine holds exactly one task and "
+                     f"{e['name']} runs "
+                     + ", ".join(f"T{t['id']}" for t in mine))
+        e["mode"] = mode
+        changes.append("mode")
+    if args.environment is not None:
+        env = registry_holder(envs, args.environment.strip())
+        if env is None:
+            have = ", ".join(x["name"] for x in envs) or "none"
+            sys.exit(f"error: no environment '{args.environment.strip()}' "
+                     f"({have}); register it first: env add <name>")
+        e["environment"] = env["name"]
+        changes.append("environment")
+    if args.schedule is not None:
+        parse_routine_schedule(args.schedule)
+        e["schedule"] = " ".join(args.schedule.split())
+        changes.append("schedule")
+    if args.trigger is not None:
+        trigger = " ".join(args.trigger.split())
+        if not trigger:
+            sys.exit("error: a routine's trigger cannot be empty")
+        e["trigger"] = trigger
+        changes.append("trigger")
+    status = getattr(args, "status", None)
+    if status is not None:
+        if status.strip() not in ROUTINE_STATUSES:
+            sys.exit("error: status must be one of "
+                     + ", ".join(ROUTINE_STATUSES))
+        e["status"] = status.strip()
+        changes.append("status")
+    if args.manage is not None:
+        if not args.manage.strip():
+            sys.exit("error: a routine says how to change or remove its "
+                     "trigger at the source; --manage cannot be empty")
+        e["body"] = args.manage.strip()
+        changes.append("manage")
+    return changes
+
+
 def cmd_registry(args):
     root, scope, branch, bw = ctx()
     kind = args.registry
     label = REGISTRIES[kind]["label"]
     entries = all_registry(bw, scope, kind)
     act = args.action
+    name = (getattr(args, "name", None) or "").strip()
+    if act == "wake":
+        cmd_routine_wake(bw, scope, entries, name)
+        return
+    tasks = all_tasks(bw, scope) if kind == "routine" else []
     if act == "list":
         if args.json:
             print(json.dumps([{k: e.get(k, "") for k in
@@ -2014,10 +2340,18 @@ def cmd_registry(args):
             return
         for e in entries:
             print(registry_line(e))
+            mine = routine_tasks(tasks, entries, e) if tasks else []
+            if mine:
+                print("  tasks: " + ", ".join(f"T{t['id']}" for t in mine))
+            for t in mine:
+                stall = t.get("routine_stall")
+                if stall:
+                    when = (f" (should have fired {format_due(stall[1])})"
+                            if stall[1] else "")
+                    print(f"  T{t['id']} {stall_words(stall)}{when}")
         if not entries:
             print(f"(no {label}s)")
         return
-    name = (args.name or "").strip()
     e = registry_holder(entries, name)
     if act == "add":
         err = registry_name_error(name)
@@ -2045,6 +2379,19 @@ def cmd_registry(args):
             print(fh.read().rstrip())
         return
     if act == "rm":
+        held = (", ".join(f"T{t['id']}" for t in
+                          routine_tasks(tasks, entries, e))
+                if kind == "routine" else "")
+        if held:
+            sys.exit(f"error: {held} point at routine {e['name']}; clear "
+                     "each first (update <id> --routine \"\")")
+        used = ([r["name"] for r in all_registry(bw, scope, "routine")
+                 if registry_holder([e], r.get("environment")) is e]
+                if kind == "env" else [])
+        if used:
+            sys.exit(f"error: environment {e['name']} is used by routine "
+                     f"{', '.join(used)}; point each elsewhere first (routine "
+                     "update <name> --environment <env>)")
         os.remove(e["path"])
         board_commit(root, branch, bw, scope, f"dev: {kind} rm {e['name']}")
         freed = [e["name"]] + split_names(e.get("formerly"))
@@ -2092,6 +2439,9 @@ def cmd_registry(args):
     if kind == "env" and args.expects is not None:
         e["body"] = args.expects.strip()
         changes.append("expectations")
+    if kind == "routine":
+        changes += routine_fields(args, e, act, entries, tasks,
+                                  all_registry(bw, scope, "env"))
     if act == "update" and not changes:
         sys.exit("error: nothing to update")
     os.makedirs(os.path.dirname(e["path"]), exist_ok=True)
@@ -2292,7 +2642,7 @@ def render_task(meta):
             v = task_type(meta)
         elif k in OPTIONAL_FIELDS and not v:
             continue
-        elif k in ("waiting", "auto") and not waiting_allowed(meta):
+        elif k in ("waiting", "unattended") and not waiting_allowed(meta):
             continue
         lines.append(f"{k}: {v}")
     lines.append("---")
@@ -2374,15 +2724,23 @@ def validate_type(meta, set_type=False, set_area=False, new=False):
 
 # --- Recurring tasks -------------------------------------------------
 #
-# kind: recurring + cadence "<N><unit>" (d/w/m). A recurring task is never
-# terminal: instead of done it re-arms — last_run is stamped and status goes
-# back to backlog. The due date is DERIVED (last_run + cadence), never
-# stored, so a cadence edit takes effect immediately and the two can't drift.
-# No last_run yet = due now. The one override is next_due, a date a human set
-# (`update --next-due`): it replaces the derived date in either direction —
-# a first run on a chosen future day, or the next run pushed or pulled —
-# without inventing a last_run. Any recorded run clears it, so it governs
-# exactly one run and the cadence takes over again after.
+# kind: recurring + cadence "<N><unit>" (d/w/m), or + schedule "<cron>
+# <IANA tz>" for a wall-clock time. A recurring task is never terminal:
+# instead of done it re-arms — last_run is stamped and status goes back to
+# backlog. The due date is DERIVED (last_run + cadence, or the first
+# scheduled time after last_run), never stored, so a clock edit takes effect
+# immediately and the two can't drift. A cadence task with no last_run yet is
+# due now; a scheduled one with no last_run counts from the start of its
+# created day. The one override is next_due, a date a human set (`update
+# --next-due`): it replaces the derived due in either direction — a first run
+# on a chosen day, or the next run pushed or pulled — without inventing a
+# last_run. Any recorded run clears it, so it governs exactly one run and the
+# clock takes over again after.
+#
+# last_run is stamped as a timestamp with offset (2026-11-11T12:04-05:00). A
+# bare date (older boards, or `--date YYYY-MM-DD`) still reads: a cadence uses
+# its date either way, and a schedule reads it as the end of that day in the
+# schedule's timezone.
 
 CADENCE_RE = re.compile(r"^(\d+)([dwm])$")
 CADENCE_HELP = "cadence must be <N><unit> with unit d, w, or m (e.g. 2w, 1m)"
@@ -2390,6 +2748,141 @@ CADENCE_HELP = "cadence must be <N><unit> with unit d, w, or m (e.g. 2w, 1m)"
 
 def is_recurring(t):
     return (t.get("kind") or "").strip() == RECURRING
+
+
+# Standard 5-field cron: numbers, `*`, lists, ranges, steps, and day/month
+# names. As in vixie cron, when day-of-month and day-of-week are both
+# restricted (neither starts with `*`) a day matches if either does.
+SCHEDULE_HELP = ("schedule must be a 5-field cron expression and an IANA "
+                 "timezone, e.g. \"0 12 * * 3 America/New_York\"")
+CRON_MONTHS = {n: i for i, n in enumerate(
+    "jan feb mar apr may jun jul aug sep oct nov dec".split(), 1)}
+CRON_DAYS = {n: i for i, n in enumerate("sun mon tue wed thu fri sat".split())}
+CRON_FIELDS = (("minute", 0, 59, {}), ("hour", 0, 23, {}),
+               ("day-of-month", 1, 31, {}), ("month", 1, 12, CRON_MONTHS),
+               ("day-of-week", 0, 7, CRON_DAYS))
+# How far ahead to look for the next scheduled time: past the longest gap a
+# satisfiable expression has (Feb 29 only, 8 years across 2100). Nothing
+# within it = the schedule never fires (Feb 30), refused on write.
+CRON_HORIZON_DAYS = 366 * 9
+
+
+def _cron_field(text, name, lo, hi, names):
+    def num(tok):
+        tok = tok.lower()
+        if tok in names:
+            return names[tok]
+        if not tok.isdigit() or not lo <= int(tok) <= hi:
+            raise ValueError(f"{name} value '{tok}' is out of range {lo}-{hi}")
+        return int(tok)
+    out = set()
+    for part in text.split(","):
+        rng, slash, step = part.partition("/")
+        if slash and not (step.isdigit() and int(step) > 0):
+            raise ValueError(f"bad {name} step in '{part}'")
+        if rng == "*":
+            a, b = lo, hi
+        elif "-" in rng:
+            a, b = (num(x) for x in rng.split("-", 1))
+            if a > b:
+                raise ValueError(f"bad {name} range '{rng}'")
+        elif step:
+            raise ValueError(f"a {name} step needs * or a range: '{part}'")
+        else:
+            a = b = num(rng)
+        out.update(range(a, b + 1, int(step or 1)))
+    return out
+
+
+def parse_schedule(value, what="schedule"):
+    """Cron fields plus timezone, as a dict. Exits on a bad schedule."""
+    toks = (value or "").split()
+    if len(toks) != 6:
+        sys.exit(f"error: bad {what} '{value}'; {SCHEDULE_HELP}")
+    try:
+        tz = zoneinfo.ZoneInfo(toks[5])
+    except (ValueError, zoneinfo.ZoneInfoNotFoundError):
+        sys.exit(f"error: bad {what} '{value}': unknown timezone "
+                 f"'{toks[5]}' (an IANA name such as America/New_York)")
+    sched = {"tz": tz, "dom_star": toks[2].startswith("*"),
+             "dow_star": toks[4].startswith("*")}
+    try:
+        for tok, (name, lo, hi, names) in zip(toks, CRON_FIELDS):
+            sched[name] = _cron_field(tok, name, lo, hi, names)
+    except ValueError as e:
+        sys.exit(f"error: bad {what} '{value}': {e}")
+    sched["day-of-week"] = {d % 7 for d in sched["day-of-week"]}
+    return sched
+
+
+def _cron_day(sched, day):
+    if day.month not in sched["month"]:
+        return False
+    dom = day.day in sched["day-of-month"]
+    dow = day.isoweekday() % 7 in sched["day-of-week"]
+    if sched["dom_star"] or sched["dow_star"]:
+        return dom and dow
+    return dom or dow
+
+
+def cron_next(sched, after):
+    """First scheduled time strictly after `after` (aware), in the schedule's
+    timezone, or None if there is none within CRON_HORIZON_DAYS. Compared in
+    UTC, so a wall time a DST gap skips is shifted past the gap."""
+    tz, utc = sched["tz"], datetime.timezone.utc
+    after = after.astimezone(utc)
+    day = after.astimezone(tz).date()
+    for _ in range(CRON_HORIZON_DAYS):
+        if _cron_day(sched, day):
+            hits = [datetime.datetime(day.year, day.month, day.day, h, m,
+                                      tzinfo=tz).astimezone(utc)
+                    for h in sched["hour"] for m in sched["minute"]]
+            hits = [h for h in hits if h > after]
+            if hits:
+                return min(hits).astimezone(tz)
+        day += datetime.timedelta(days=1)
+    return None
+
+
+def parse_run_time(value, what="last_run"):
+    """A run's time: YYYY-MM-DD, or a timestamp with its UTC offset
+    (2026-11-11T12:04-05:00). Returns a date or an aware datetime."""
+    raw = (value or "").strip()
+    try:
+        if "T" not in raw:
+            return datetime.date.fromisoformat(raw)
+        ts = datetime.datetime.fromisoformat(raw)
+        if ts.tzinfo is not None:
+            return ts
+    except ValueError:
+        pass
+    sys.exit(f"error: {what} must be YYYY-MM-DD or a timestamp with its "
+             f"offset, e.g. 2026-11-11T12:04-05:00 (got {value!r})")
+
+
+def run_day(ran):
+    """The calendar date of a run time (date or aware datetime)."""
+    return ran.date() if isinstance(ran, datetime.datetime) else ran
+
+
+def format_run_time(ran):
+    if isinstance(ran, datetime.datetime):
+        return ran.isoformat(timespec="minutes")
+    return ran.isoformat()
+
+
+def due_instant(due):
+    """A due date or time as an aware datetime: a bare date is local midnight,
+    so it is reached when today reaches it."""
+    if isinstance(due, datetime.datetime):
+        return due
+    return datetime.datetime.combine(due, datetime.time()).astimezone()
+
+
+def format_due(due):
+    if isinstance(due, datetime.datetime):
+        return due.strftime("%Y-%m-%d %H:%M %Z")
+    return due.isoformat()
 
 
 # Statuses that stop a recurring task's clock: proposed is not approved yet,
@@ -2438,23 +2931,52 @@ def cadence_next(last_run, cadence):
 
 
 def task_due_date(t):
-    """Due date: next_due if set, else last_run + cadence, else None (= due now)."""
+    """When a recurring task is due: next_due if set (a date); else, for a
+    schedule, the first scheduled time after last_run (or on or after the
+    start of its created day) as an aware datetime; else last_run + cadence
+    (a date); else None (= due now)."""
     if not is_recurring(t):
         return None
     pinned = (t.get("next_due") or "").strip()
     if pinned:
         return iso_date(pinned, "next_due")
     last = (t.get("last_run") or "").strip()
+    schedule = (t.get("schedule") or "").strip()
+    if schedule:
+        sched = parse_schedule(schedule)
+        after = schedule_counts_from(t, sched)
+        return cron_next(sched, after) if after else None
     if not last:
         return None
-    return cadence_next(iso_date(last, "last_run"), t.get("cadence"))
+    return cadence_next(run_day(parse_run_time(last)), t.get("cadence"))
 
 
-def task_is_due(t, today=None):
+def schedule_counts_from(t, sched):
+    """The instant a scheduled task's next time is counted (strictly) from:
+    its last_run, or for a task never run just before the start of its
+    created day, so that day's first scheduled time counts. None = due now.
+    A bare last_run date is the end of that day in the schedule's timezone,
+    a created date its start."""
+    last = (t.get("last_run") or "").strip()
+    created = (t.get("created") or "").strip()
+    if not (last or created):
+        return None
+    ran = parse_run_time(last or created)
+    if isinstance(ran, datetime.datetime):
+        return ran
+    start = ran + datetime.timedelta(days=1) if last else ran
+    return (datetime.datetime.combine(start, datetime.time(),
+                                      tzinfo=sched["tz"])
+            - datetime.timedelta(microseconds=1))
+
+
+def task_is_due(t, now=None):
+    """Due now (or at `now`, a date or aware datetime)."""
     if not on_the_clock(t):
         return False
     due = task_due_date(t)
-    return due is None or due <= (today or datetime.date.today())
+    now = due_instant(now) if now else datetime.datetime.now().astimezone()
+    return due is None or due_instant(due) <= now
 
 
 def recur_sort_rank(t):
@@ -2527,44 +3049,59 @@ def rehearsal_clash_refusal(meta, tasks):
 
 
 def validate_recurring(meta):
-    """kind and cadence must agree; last_run/next_due must be dates. Exits on error."""
+    """kind and its clock (cadence or schedule, exactly one) must agree;
+    last_run is a date or timestamp, next_due a date. Exits on error."""
     cadence = (meta.get("cadence") or "").strip()
+    schedule = (meta.get("schedule") or "").strip()
     if is_recurring(meta):
-        if not cadence:
+        if cadence and schedule:
+            sys.exit(f"error: a {RECURRING} task has a cadence or a schedule, "
+                     "not both; clear one (--cadence \"\" or --schedule \"\")")
+        if not (cadence or schedule):
             sys.exit(f"error: kind {RECURRING} requires --cadence <N><unit> "
-                     "(e.g. 2w, 1m)")
-        parse_cadence(cadence)
-    elif cadence:
-        sys.exit(f"error: cadence only applies to kind {RECURRING} tasks")
+                     "(e.g. 2w, 1m) or --schedule \"<cron> <timezone>\"")
+        if cadence:
+            parse_cadence(cadence)
+        elif cron_next(parse_schedule(schedule),
+                       datetime.datetime.now().astimezone()) is None:
+            sys.exit(f"error: schedule '{schedule}' never fires")
+    elif cadence or schedule:
+        field = "cadence" if cadence else "schedule"
+        sys.exit(f"error: {field} only applies to kind {RECURRING} tasks")
     for field in ("last_run", "next_due"):
         value = (meta.get(field) or "").strip()
         if value:
             if not is_recurring(meta):
                 sys.exit(f"error: {field} only applies to kind {RECURRING} "
                          "tasks")
-            parse_iso_date(value, field)
+            if field == "last_run":
+                parse_run_time(value, field)
+            else:
+                parse_iso_date(value, field)
 
 
 def rearm_recurring(root, scope, branch, bw, meta, ran_on=None, record=None):
     """Record a run: stamp last_run and re-arm instead of going terminal.
 
-    Callers pass a freshly read record. Clears the per-run fields (assignee,
-    branch, pr) and any next_due override (it governed this run) so the next
-    cycle starts clean; the run itself is recorded in
-    the body — a bare `Ran (<date>).` for a landed or `recur ran` run (the
-    Shipped record already says what happened), or the full `Ran (<date>):
-    …` line an ops run passes in.
+    Callers pass a freshly read record. `ran_on` is a date or an aware
+    datetime (default: now, stamped to the minute with its offset). Clears
+    the per-run fields (assignee, branch, pr) and any next_due override (it
+    governed this run) so the next cycle starts clean; the run itself is
+    recorded in the body — a bare `Ran (<date>).` for a landed or `recur
+    ran` run (the Shipped record already says what happened), or the full
+    `Ran (<date>): …` line an ops run passes in.
     """
-    ran = ran_on or datetime.date.today()
-    meta["last_run"] = ran.isoformat()
+    ran = ran_on or datetime.datetime.now().astimezone()
+    day = run_day(ran).isoformat()
+    meta["last_run"] = format_run_time(ran)
     meta["next_due"] = ""
     meta["status"] = "backlog"
     meta["assignee"] = meta["branch"] = meta["pr"] = ""
-    meta["body"] = append_body(meta["body"], record or f"Ran ({ran.isoformat()}).")
+    meta["body"] = append_body(meta["body"], record or f"Ran ({day}).")
     with open(meta["path"], "w") as f:
         f.write(render_task(meta))
     board_commit(root, branch, bw, scope,
-                 f"dev: T{meta['id']} ran {ran.isoformat()} (re-armed)")
+                 f"dev: T{meta['id']} ran {day} (re-armed)")
     return meta
 
 
@@ -2638,8 +3175,11 @@ def task_glob(bw, scope):
 
 
 def all_tasks(bw, scope):
-    return sorted((parse_task(p) for p in task_glob(bw, scope)),
-                  key=lambda t: t["id"])
+    tasks = sorted((parse_task(p) for p in task_glob(bw, scope)),
+                   key=lambda t: t["id"])
+    if any(t["routine"] for t in tasks):
+        note_routine_stalls(tasks, all_registry(bw, scope, "routine"))
+    return tasks
 
 
 def find_task(bw, scope, tid):
@@ -2662,7 +3202,7 @@ def occupies_area(t):
 # "the author is not asking for review yet" — the board owns that state,
 # and the PR's draft bit mirrors it where GitHub supports one.
 OPEN_PR = ("draft", "review")
-# The in-flight set implement negotiates over / auto skips.
+# The in-flight set implement negotiates over / unattended runs skip.
 IN_FLIGHT = ("doing",) + OPEN_PR
 
 
@@ -2838,9 +3378,30 @@ def watch_group_check_lines(ids, tasks, color=False):
             line = (f"{_task_head(by_id[i], color=color)} — "
                     f"{_status_ansi(st, st) if color else st}")
         lines.append("  " + line)
-    ids = live
-    if len(ids) < 2:
+    if len(live) < 2:
         return lines
+    reasons, cycle = group_verdicts(live, tasks)
+    ok = _ansi(_OK, "ok") if color else "ok"
+    no = _ansi(_ERR, "no") if color else "no"
+    lines.append("within group:")
+    lines.append("  " + parallel_line(reasons, color=color))
+    if cycle:
+        cycle = ", ".join(f"T{i}" for i in cycle)
+        lines.append(f"  batch: {no} — dep cycle; cannot order {cycle}")
+    else:
+        lines.append(f"  batch: {ok}")
+    return lines
+
+
+def group_verdicts(ids, tasks):
+    """Within-group checks among live members ``ids``.
+
+    Returns (reasons parallel is ruled out — area overlap or a dep between
+    members, ids a dep cycle leaves unordered). Shared by watch-mode c and
+    multi-id ``collisions``, so both give the same parallel verdict.
+    """
+    by_id = {t["id"]: t for t in tasks}
+    group = set(ids)
     reasons = [f"T{a['id']} and T{b['id']} share areas"
                for a, b in set_area_overlaps(ids, tasks)]
     needs = {i: [o["id"] for o in unfinished_deps(by_id[i], tasks)
@@ -2853,17 +3414,14 @@ def watch_group_check_lines(ids, tasks, color=False):
             break
         done |= ready
         left -= ready
-    ok = _ansi(_OK, "ok") if color else "ok"
+    return reasons, [i for i in ids if i in left]
+
+
+def parallel_line(reasons, color=False):
+    if not reasons:
+        return f"parallel: {_ansi(_OK, 'ok') if color else 'ok'}"
     no = _ansi(_ERR, "no") if color else "no"
-    lines.append("within group:")
-    lines.append(f"  parallel: {no} — {'; '.join(reasons)}" if reasons
-                 else f"  parallel: {ok}")
-    if left:
-        cycle = ", ".join(f"T{i}" for i in ids if i in left)
-        lines.append(f"  batch: {no} — dep cycle; cannot order {cycle}")
-    else:
-        lines.append(f"  batch: {ok}")
-    return lines
+    return f"parallel: {no} — {'; '.join(reasons)}"
 
 
 def watch_task_view(tid, tasks):
@@ -4525,7 +5083,7 @@ def land_outcome(meta):
     if not is_recurring(meta):
         return "done"
     due = task_due_date(meta)
-    return f"re-armed (next due {due.isoformat()})" if due else "re-armed"
+    return f"re-armed (next due {format_due(due)})" if due else "re-armed"
 
 
 def _switch_primary_off_task_branch(root, scope, branch, actions):
@@ -5063,16 +5621,40 @@ def resolve_stack_start(root, bw, scope, tid, parent_id, integration):
     return remote
 
 
-def claim_auto_refusal(meta, run):
-    """Error text when a claim would resume into a running auto agent's
-    work, else ''. Only auto may re-claim its own run (same model id); the
+def claim_unattended_refusal(meta, run):
+    """Error text when a claim would resume into a running unattended run's
+    work, else ''. Only that run may re-claim it (same model id); the
     owner takes a dead run back by moving the task to backlog."""
-    held = task_auto(meta)
+    held = task_unattended(meta)
     if not held or held == run:
         return ""
-    return (f"error: T{meta['id']} is being worked by an auto run "
-            f"({held}); do not resume into its worktree. If that run is "
+    return (f"error: T{meta['id']} is being worked by an unattended run "
+            f"({held}); do not resume into its work. If that run is "
             f"dead, take it back with: update {meta['id']} --status backlog")
+
+
+def update_unattended_refusal(old, meta, run, status_req):
+    """Error text for an update that would set the unattended marker
+    wrongly, else ''. `run` is the --unattended value (None when absent,
+    '' clears — always allowed, it is how an ops run hands back or the
+    owner takes a dead one back in place). A marker is only for a task
+    left `doing`. Setting one, or asking for `doing`, is refused while the
+    task already holds any marker — the same model id included, unlike
+    claim: an ops run starts from a task not yet doing and resumes only
+    after handing the marker back, so it never re-stamps, and two sessions
+    of one model must not both take the task."""
+    if run == "" or (run is None and status_req != "doing"):
+        return ""
+    if run and meta["status"] != "doing":
+        return (f"error: --unattended marks a doing task; pass --status "
+                f"doing (T{meta['id']} would be {meta['status']})")
+    held = task_unattended(old)
+    if not held:
+        return ""
+    return (f"error: T{meta['id']} is being worked by an unattended run "
+            f"({held}); do not start or resume it. If that run is dead, "
+            f"take it back where it stopped with: update {meta['id']} "
+            f"--unattended \"\"")
 
 
 def cmd_claim(args):
@@ -5108,8 +5690,8 @@ def cmd_claim(args):
     if not split_areas(meta.get("area", "")):
         sys.exit(f"error: T{tid} has no area; set a real name "
                  f"(reuse or area set) before claim")
-    run = (args.auto or "").strip()
-    refusal = claim_auto_refusal(meta, run)
+    run = (args.unattended or "").strip()
+    refusal = claim_unattended_refusal(meta, run)
     if refusal:
         sys.exit(refusal)
 
@@ -5153,9 +5735,9 @@ def cmd_claim(args):
     # Refresh meta after git work (board may have moved on shared integration).
     integration, bw = resolve_board(root, scope)
     meta = find_task(bw, scope, tid)
-    # An auto run may have claimed it during the git work: never overwrite
-    # its marker.
-    refusal = claim_auto_refusal(meta, run)
+    # An unattended run may have claimed it during the git work: never
+    # overwrite its marker.
+    refusal = claim_unattended_refusal(meta, run)
     if refusal:
         sys.exit(refusal)
     changes = []
@@ -5168,9 +5750,9 @@ def cmd_claim(args):
     if meta.get("branch") != branch:
         meta["branch"] = branch
         changes.append(f"branch={branch}")
-    if run and meta.get("auto") != run:
-        meta["auto"] = run
-        changes.append(f"auto={run}")
+    if run and meta.get("unattended") != run:
+        meta["unattended"] = run
+        changes.append(f"unattended={run}")
     if changes:
         with open(meta["path"], "w") as f:
             f.write(render_task(meta))
@@ -5580,10 +6162,10 @@ def task_waiting(t):
         return None
 
 
-def task_auto(t):
-    """Model id of the auto run working this task, else ''. Like waiting,
-    only a doing task carries one."""
-    return (t.get("auto") or "").strip() if waiting_allowed(t) else ""
+def task_unattended(t):
+    """Model id of the unattended run working this task, else ''. Like
+    waiting, only a doing task carries one."""
+    return (t.get("unattended") or "").strip() if waiting_allowed(t) else ""
 
 
 def waiting_sort_rank(t):
@@ -6421,8 +7003,9 @@ def cmd_preflight(args):
     Park/discard require a clean working tree checked out on integration.
     """
     root, scope, integration, bw = ctx()
-    # The sign-in gate for implement and auto: their flows run no gh check
-    # of their own, so it holds in check mode too, not only for --park.
+    # The sign-in gate for implement and unattended runs: their flows run no
+    # gh check of their own, so it holds in check mode too, not only for
+    # --park.
     require_gh(root)
     mode = "check"
     if args.park:
@@ -6989,8 +7572,8 @@ def cmd_contributor(args):
         return
     name = args.name.strip()
     ident = identity_or_exit(root, scope)
-    registries = all_registry(bw, scope, "agent") + all_registry(bw, scope,
-                                                                "env")
+    registries = [e for kind in REGISTRIES
+                  for e in all_registry(bw, scope, kind)]
     if args.action == "rename":
         contributor_rename(root, scope, branch, bw, cfg, ident, name,
                            args.new_name.strip(), registries)
@@ -7029,7 +7612,7 @@ def cmd_contributor(args):
 def contributor_rename(root, scope, branch, bw, cfg, ident, old, new,
                        registries):
     """Rename a handle everywhere it means a person now: the roster, the
-    integrator roster, assignees on the live board, and agent/env
+    integrator roster, assignees on the live board, and agent/env/routine
     accessors. Archives, run records and flow prose are history and keep
     the old name; former_handles is what still ties it to `new`."""
     entries = board_contributors(cfg)
@@ -7121,14 +7704,17 @@ def cmd_add(args):
         "assignee": args.assignee or "", "branch": "",
         "deps": [int(x) for x in re.findall(r"\d+", args.deps or "")], "pr": "",
         "needs": "", "created": datetime.date.today().isoformat(),
-        "cadence": (args.cadence or "").strip(), "last_run": "",
+        "cadence": (args.cadence or "").strip(),
+        "schedule": (args.schedule or "").strip(), "last_run": "",
         "next_due": (args.next_due or "").strip(),
         "rehearsal": "true" if args.rehearsal else "",
+        "routine": (args.routine or "").strip(),
         "body": args.desc or "",
     }
     validate_recurring(meta)
     validate_type(meta, new=True)
     validate_rehearsal(meta)
+    notes = point_at_routine(bw, scope, meta, tasks)
     umbrellas = add_umbrella_targets(parse_id_list(args.umbrella), meta["deps"],
                                      tasks)
     known = {t["id"] for t in tasks}
@@ -7152,6 +7738,21 @@ def cmd_add(args):
     print(render_task(meta).rstrip())
     for u in umbrellas:
         print(f"T{u['id']} updated: deps={u['deps']}")
+    for n in notes:
+        print(n, file=sys.stderr)
+
+
+def point_at_routine(bw, scope, meta, tasks):
+    """Check `meta`'s routine field and store the routine's current name;
+    returns the notes to print once written. Exits on a refusal."""
+    if not meta["routine"]:
+        return []
+    r, err, notes = routine_pointer_check(
+        meta, tasks, all_registry(bw, scope, "routine"), all_flows(bw, scope))
+    if err:
+        sys.exit(f"error: {err}")
+    meta["routine"] = r["name"]
+    return notes
 
 
 def add_umbrella_targets(ids, deps, tasks):
@@ -7183,8 +7784,8 @@ def cmd_update(args):
     old = dict(meta)
     changes = []
     for field in ("title", "area", "status", "kind", "type", "assignee",
-                  "branch", "pr", "needs", "desc", "cadence", "last_run",
-                  "next_due"):
+                  "branch", "pr", "needs", "desc", "cadence", "schedule",
+                  "last_run", "next_due"):
         v = getattr(args, field, None)
         if v is not None:
             key = "body" if field == "desc" else field
@@ -7197,6 +7798,13 @@ def cmd_update(args):
         # Names resolve now so the field always holds `<id> <name>` refs.
         meta["flow"] = ", ".join(resolve_flow_refs(bw, scope, args.flow))
         changes.append(f"flow={meta['flow']}")
+    if args.routine is not None:
+        meta["routine"] = args.routine.strip()
+        changes.append(f"routine={meta['routine']}")
+    run = None if args.unattended is None else args.unattended.strip()
+    if run is not None:
+        meta["unattended"] = run
+        changes.append(f"unattended={run}")
     if args.deps is not None:
         meta["deps"] = [int(x) for x in re.findall(r"\d+", args.deps)]
         changes.append(f"deps={meta['deps']}")
@@ -7228,10 +7836,25 @@ def cmd_update(args):
         sys.exit(f"error: status must be one of {STATUSES}")
     if meta.get("needs") not in ("", "decision"):
         sys.exit("error: needs must be 'decision' or empty")
+    if old["routine"] and args.routine is None and not is_recurring(meta):
+        sys.exit(f"error: T{meta['id']} is started by routine "
+                 f"{old['routine']}; clear it first (update {meta['id']} "
+                 "--routine \"\") before changing its kind")
     validate_recurring(meta)
     validate_type(meta, set_type=args.type is not None,
                   set_area=args.area is not None)
     validate_rehearsal(meta)
+    refusal = update_unattended_refusal(old, meta, run, args.status)
+    if refusal:
+        sys.exit(refusal)
+    notes = []
+    if [meta.get(k) for k in ("routine", "kind", "flow")] + [task_type(meta)] \
+            != [old.get(k) for k in ("routine", "kind", "flow")] \
+            + [task_type(old)]:
+        notes = point_at_routine(bw, scope, meta, all_tasks(bw, scope))
+    if meta["routine"] and any(getattr(args, f) is not None for f in
+                               ("cadence", "schedule", "next_due")):
+        notes.append(routine_trigger_reminder(meta))
     # Checked on entering the state (start, flow set or type changed while
     # doing), so an unrelated edit to a doing task is never refused.
     if (old["status"], old["flow"], task_type(old)) != \
@@ -7262,6 +7885,8 @@ def cmd_update(args):
     board_commit(root, branch, bw, scope,
                  f"dev: update T{meta['id']} ({', '.join(changes)})")
     print(f"T{meta['id']} updated: {', '.join(changes)}")
+    for n in notes:
+        print(n, file=sys.stderr)
 
 
 STOPWORDS = {"the", "and", "for", "with", "that", "this", "add", "use",
@@ -7366,7 +7991,8 @@ def cmd_list(args):
 def recur_due_sort(t):
     """Overdue first, then by due date; never-run sorts to the very front."""
     due = task_due_date(t)
-    return (0, datetime.date.min, t["id"]) if due is None else (1, due, t["id"])
+    return ((0, datetime.date.min, t["id"]) if due is None
+            else (1, due_instant(due), t["id"]))
 
 
 def cmd_recur(args):
@@ -7395,17 +8021,15 @@ def cmd_recur(args):
                      f"(branch/PR set); land it (TASKS land {meta['id']}) or "
                      f"clear it (TASKS cleanup {meta['id']}) — `recur ran` is "
                      f"for runs that never had a PR")
-        ran = (iso_date(args.date, "date") if args.date
-               else datetime.date.today())
+        ran = parse_run_time(args.date, "date") if args.date else None
         meta = rearm_recurring(root, scope, branch, bw, meta, ran_on=ran)
         due = task_due_date(meta)
         print(f"T{meta['id']} ran {meta['last_run']}, re-armed to backlog; "
-              f"next due {due.isoformat()}")
+              f"next due {format_due(due)}")
         return
-    today = datetime.date.today()
     sel = [t for t in tasks if on_the_clock(t)]
     if args.due:
-        sel = [t for t in sel if task_is_due(t, today)]
+        sel = [t for t in sel if task_is_due(t)]
     if not sel:
         print("(no due recurring tasks)" if args.due
               else "(no recurring tasks)")
@@ -7480,8 +8104,9 @@ def cmd_ran(args):
     if args.rehearsal and not refs:
         sys.exit(f"error: a rehearsal is of a flow; name it: "
                  f"ran {tid} --rehearsal --flow <name> --record \"…\"")
-    ran = iso_date(args.date, "date") if args.date else datetime.date.today()
-    record = format_ran(text, refs, ran.isoformat(),
+    ran = parse_run_time(args.date, "date") if args.date else None
+    day = run_day(ran) if ran else datetime.date.today()
+    record = format_ran(text, refs, day.isoformat(),
                         "Rehearsed" if args.rehearsal else "Ran")
     meta["flow"] = ", ".join(refs)
     if is_recurring(meta):
@@ -7489,7 +8114,7 @@ def cmd_ran(args):
                                record=record)
         due = task_due_date(meta)
         print(f"T{tid} ran {meta['last_run']}, re-armed to backlog; "
-              f"next due {due.isoformat()}")
+              f"next due {format_due(due)}")
     else:
         meta["status"] = "done"
         meta["body"] = append_body(meta["body"], record)
@@ -7610,25 +8235,28 @@ def cmd_wait(args):
     print(f"  when the reply is in: {resume}")
 
 
-def cmd_note(args):
-    """Append a note to an ops task's run history.
+def note_refusal(meta):
+    """Why task `meta` cannot take a note, or None. Any type and any status
+    a run has touched or will touch — `done` included, since a forgotten
+    note is most often remembered at the post-run flow tweak, after the
+    close. `proposed` and `not-planned` never ran. Pure."""
+    if meta["status"] in ("proposed", "not-planned"):
+        return (f"T{meta['id']} is {meta['status']}; nothing has run to "
+                f"note")
+    return None
 
-    Open to any status a run has touched or will touch — `done` included,
-    since a forgotten note is most often remembered at the post-run flow
-    tweak, after the close. `proposed` and `not-planned` never ran. Status,
-    assignee and the `flow` field are left alone: a note records, it does not
-    move the task.
+
+def cmd_note(args):
+    """Append a note to a task's run history (ops or dev — a dev wake notes
+    a harness refusal). Status, assignee and the `flow` field are left
+    alone: a note records, it does not move the task.
     """
     root, scope, branch, bw = ctx()
     meta = find_task(bw, scope, args.id)
     tid = meta["id"]
-    if not is_ops(meta):
-        sys.exit(f"error: T{tid} is a dev task; record decisions there with "
-                 f"update {tid} --append \"Decision: …\". Only ops tasks "
-                 f"take notes")
-    if meta["status"] in ("proposed", "not-planned"):
-        sys.exit(f"error: T{tid} is {meta['status']}; nothing has run to "
-                 f"note")
+    refusal = note_refusal(meta)
+    if refusal:
+        sys.exit(f"error: {refusal}")
     text = " ".join((args.text or "").split())
     if not text:
         sys.exit("error: note needs its text: what the flow did not predict")
@@ -7649,7 +8277,8 @@ def cmd_collisions(args):
 
     One id matches watch-mode. Several ids: each vs in-flight *outside*
     the set (batch peers are sequential); then ``set:`` lines for
-    in-set area overlap (informational, does not fail).
+    in-set area overlap and the watch-mode group's ``parallel:`` verdict
+    (both informational, neither fails).
 
     Exit 3 when every blocker already has a PR open (``draft`` or
     ``review``, any assignee): there is a pushed tip to stack on, so
@@ -7657,7 +8286,8 @@ def cmd_collisions(args):
     (flows/implement.md). Draft counts because a slow draft must not park
     the areas it touches — its PR is out, whether or not its author has
     asked for review yet. A single ``doing`` blocker has nothing pushed to
-    build on and is still moving — that stays exit 2, and auto skips both.
+    build on and is still moving — that stays exit 2, and an unattended run
+    skips both.
     """
     root, scope, branch, bw = ctx()
     tasks = all_tasks(bw, scope)
@@ -7680,6 +8310,9 @@ def cmd_collisions(args):
     if len(ids) > 1:
         for a, b in set_area_overlaps(ids, tasks):
             print(f"set: T{a['id']} overlaps T{b['id']}")
+        live = [i for i in ids if by_id[i].get("status") not in TERMINAL]
+        if len(live) > 1:
+            print(parallel_line(group_verdicts(live, tasks)[0]))
     if not blockers:
         return
     all_hits = [blockers[i] for i in sorted(blockers)]
@@ -7758,8 +8391,8 @@ def fmt_line(t, tasks, color=False):
     if t.get("assignee"):
         who = f"@{t['assignee']}"
         parts.append(_assignee_ansi(t["assignee"], who) if color else who)
-    if task_auto(t):
-        run = f"auto:{task_auto(t)}"
+    if task_unattended(t):
+        run = f"unattended:{task_unattended(t)}"
         parts.append(_ansi(_DIM, run) if color else run)
     if t.get("needs"):
         flag = f"❓needs-{t['needs']}"
@@ -7772,6 +8405,10 @@ def fmt_line(t, tasks, color=False):
     if on_the_clock(t):
         mark, sgr = recur_marker(t)
         parts.append(_ansi(sgr, mark) if color else mark)
+    stalled = routine_stall_text(t)
+    if stalled:
+        sgr = _NEEDS if t["routine_stall"][0] == "paused" else _ERR
+        parts.append(_ansi(sgr, stalled) if color else stalled)
     if is_umbrella(t):
         roll = umbrella_rollup(t, tasks)
         parts.append(_ansi(_DIM, roll) if color else roll)
@@ -7794,16 +8431,19 @@ def recur_marker(t, today=None):
     due = task_due_date(t)
     if due is None:
         return "⏰due now", _ERR
-    if due <= (today or datetime.date.today()):
-        return f"⏰due {due.isoformat()}", _ERR
-    return f"↻{due.isoformat()}", _DIM
+    now = (due_instant(today) if today
+           else datetime.datetime.now().astimezone())
+    if due_instant(due) <= now:
+        return f"⏰due {format_due(due)}", _ERR
+    return f"↻{format_due(due)}", _DIM
 
 
 def _fmt_id(t, color=False):
     """One index id, carrying the same marks as its line: ↻ for a recurring
-    task on the clock (⏰ when due), then ❓ for an open needs, then 📨 for a
-    run waiting on someone else (T81↻❓📨). Emoji only for marks that ask for
-    attention (❓ 📨 ⏰); routine marks stay dimmable text glyphs (↻ ⊘ ⚙ ⇢ ☂).
+    task on the clock (⏰ when due, 🚨 when its routine did not start it),
+    then ❓ for an open needs, then 📨 for a run waiting on someone else
+    (T81↻❓📨). Emoji only for marks that ask for attention (❓ 📨 ⏰ 🚨);
+    routine marks stay dimmable text glyphs (↻ ⊘ ⚙ ⇢ ☂).
     Marks are plain text too so TASKS.md shows them; in color a due
     recurring id or an overdue wait is red instead of its status color. A
     stopped clock (RECUR_STOPPED) gets no recurring mark."""
@@ -7811,7 +8451,7 @@ def _fmt_id(t, color=False):
     red = False
     if on_the_clock(t):
         red = task_is_due(t)
-        tid += "⏰" if red else "↻"
+        tid += ("🚨" if routine_not_started(t) else "⏰" if red else "↻")
     if t.get("needs"):
         tid += "❓"
     w = task_waiting(t)
@@ -8975,8 +9615,10 @@ def reseed_later_tasks(bw, scope, old_index):
             "flow": t.get("flow") or "",
             "rehearsal": t.get("rehearsal") or "",
             "cadence": t.get("cadence") or "",
+            "schedule": t.get("schedule") or "",
             "last_run": t.get("last_run") or "",
             "next_due": t.get("next_due") or "",
+            "routine": t.get("routine") or "",
             "assignee": "",
             "branch": "",
             "deps": new_deps,
@@ -9063,7 +9705,7 @@ def cmd_iteration_close(args):
         elif t["status"] == "shelved":
             line += " [shelved]"
         elif is_recurring(t):
-            line += f" [recurring {t.get('cadence')}]"
+            line += f" [recurring {t.get('cadence') or t.get('schedule')}]"
             if not recur_at_rest(t):
                 line += f" [{left}: {t['status']}]"
         elif t["status"] != "done":
@@ -9433,11 +10075,35 @@ def main():
                                                "handles who can reach it now")
             if kind == "agent":
                 m.add_argument("--desc", help="one line: who it is")
-            else:
+            elif kind == "env":
                 m.add_argument("--machine", help="the machine it lives on "
                                                  "(empty string clears)")
                 m.add_argument("--expects", help="prose: what a step can "
                                                  "count on there")
+            else:
+                m.add_argument("--mode", help="attended (one task, the user "
+                                              "is reached) | unattended")
+                m.add_argument("--environment",
+                               help="the registered environment it runs in")
+                m.add_argument("--schedule",
+                               help="what the trigger is set to: \"<cron> "
+                                    "<timezone>\", or one fire time as a "
+                                    "timestamp with offset")
+                m.add_argument("--trigger", help="one line: what the trigger "
+                                                 "is and where, with its "
+                                                 "identifier")
+                m.add_argument("--manage", help="prose: how to change or "
+                                                "remove the trigger at its "
+                                                "source")
+                if act == "update":
+                    m.add_argument("--status", help="active | paused (the "
+                                                    "board-side off switch)")
+        if kind == "routine":
+            m = rsub.add_parser("wake", help="a routine's entry gate: exit 2 "
+                                             "with the reason when it is "
+                                             "paused or gone, else its due "
+                                             "tasks in due order")
+            m.add_argument("name", help="its name or a former one")
         s.set_defaults(fn=cmd_registry, registry=kind)
 
     s = sub.add_parser("add", help="add a task")
@@ -9453,12 +10119,21 @@ def main():
                         "no PR); dev (the default) = code work")
     s.add_argument("--cadence",
                    help="recurring tasks only: <N><unit>, unit d/w/m (2w, 1m)")
+    s.add_argument("--schedule",
+                   help="recurring tasks only, instead of --cadence: a "
+                        "5-field cron expression and an IANA timezone "
+                        "(\"0 12 * * 3 America/New_York\")")
     s.add_argument("--next-due", dest="next_due",
                    help="recurring tasks only: YYYY-MM-DD of the first run "
-                        "(default: due now)")
+                        "(default: due now on a cadence, the first "
+                        "scheduled time from the start of today on a "
+                        "schedule)")
     s.add_argument("--rehearsal", action="store_true",
                    help="ops tasks only: a dry run of its flow; no real run "
                         "of that flow may be doing while it is")
+    s.add_argument("--routine",
+                   help="recurring tasks only: the routine whose trigger "
+                        "starts it")
     s.add_argument("--status",
                    choices=["proposed", "backlog", "planned", "later"],
                    default="backlog")
@@ -9470,18 +10145,26 @@ def main():
     s = sub.add_parser("update", help="update task fields")
     s.add_argument("id", type=int)
     for f in ("title", "area", "status", "kind", "type", "assignee", "branch",
-              "pr", "needs", "deps", "desc", "cadence"):
+              "pr", "needs", "deps", "desc", "cadence", "schedule"):
         s.add_argument(f"--{f}")
     s.add_argument("--last-run", dest="last_run",
-                   help="recurring tasks only: YYYY-MM-DD of the last run "
-                        "(empty string clears; due date is derived from it)")
+                   help="recurring tasks only: YYYY-MM-DD or a timestamp with "
+                        "offset (2026-11-11T12:04-05:00) of the last run "
+                        "(empty string clears; due is derived from it)")
     s.add_argument("--next-due", dest="next_due",
                    help="recurring tasks only: YYYY-MM-DD the next run is due, "
-                        "overriding last_run + cadence until a run is "
+                        "overriding the derived due until a run is "
                         "recorded (empty string clears)")
     s.add_argument("--flow", help="flow name(s) this task runs, comma-"
                                   "separated; stored as `<id> <name>` refs "
                                   "(empty string clears)")
+    s.add_argument("--routine", help="recurring tasks only: the routine "
+                                     "whose trigger starts it (empty string "
+                                     "clears)")
+    s.add_argument("--unattended", metavar="MODEL_ID",
+                   help="unattended ops runs and audits: mark the doing "
+                        "task as worked by this run (refused while any "
+                        "run's marker is set; empty string clears)")
     s.add_argument("--append", action="append",
                    help="append a paragraph to the body (leaves existing text "
                         "untouched; repeatable, each in order)")
@@ -9520,7 +10203,8 @@ def main():
                    help="only tasks that are due now or overdue")
     m = rsub.add_parser("ran", help="record a run: stamp last_run, re-arm")
     m.add_argument("id", type=int)
-    m.add_argument("--date", help="run date (default today), YYYY-MM-DD")
+    m.add_argument("--date", help="run time (default now): YYYY-MM-DD or a "
+                                  "timestamp with offset")
     s.set_defaults(fn=cmd_recur)
 
     s = sub.add_parser("ran", help="close an ops task with its run record")
@@ -9530,7 +10214,8 @@ def main():
                                   "for a run with no stored flow")
     s.add_argument("--record", help="inputs the run was given; deviations "
                                     "from the flow — recorded as Ran (<date>): …")
-    s.add_argument("--date", help="YYYY-MM-DD the run happened (default today)")
+    s.add_argument("--date", help="when the run happened (default now): "
+                                  "YYYY-MM-DD or a timestamp with offset")
     s.add_argument("--rehearsal", action="store_true",
                    help="the task was a dry run of a flow: record "
                         "Rehearsed (<date>): … so it never counts as a run")
@@ -9570,7 +10255,7 @@ def main():
     s.set_defaults(fn=cmd_wait)
 
     s = sub.add_parser("note",
-                       help="note on an ops task what its flow did not "
+                       help="note on a task what its flow did not "
                             "predict")
     s.add_argument("id", type=int)
     s.add_argument("text", help="a step the user did, a step inserted, a "
@@ -9664,9 +10349,10 @@ def main():
                         "origin/<integration> (collisions exit 3, when this "
                         "task builds on that unmerged code); ship then bases "
                         "the PR on that branch")
-    s.add_argument("--auto", metavar="MODEL_ID",
-                   help="auto only: mark the task as worked by this auto "
-                        "run until it leaves doing (others' claims refuse)")
+    s.add_argument("--unattended", metavar="MODEL_ID",
+                   help="unattended runs only: mark the task as worked by "
+                        "this run until it leaves doing (others' claims "
+                        "refuse)")
     s.set_defaults(fn=cmd_claim)
 
     s = sub.add_parser("diff",

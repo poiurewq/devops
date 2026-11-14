@@ -15,7 +15,7 @@ Let the user pick what to handle, and batch small ones into a single sitting rat
 
 1. `TASKS show <id>` — the body carries the question, the options, and whatever the person who parked it recommended. Present it as one decision, not a discussion of everything the task touches.
 2. On the user's call, record it: `TASKS update <id> --needs "" --append "Decision: <choice + one-line why>"`. The decision stays on the task, so the run that follows it does not re-open the question.
-3. **Then put it back where it belongs.** A question parked mid-run is still `doing` — clear the flag and leave the status alone, so the half-finished run keeps its assignee and `/ops run <id>` resumes it. Only a question parked on work that never started goes back to the pool: add `--status backlog`.
+3. **Leave the status alone.** A question parked mid-run is still `doing`, so the half-finished run keeps its assignee and `/ops run <id>` resumes it; one parked in preflight (`[preflight]`) left the task at rest, so `/ops run <id>` starts it.
 4. If the answer is "don't do this at all", that is a not-planned outcome instead: `TASKS update <id> --needs "" --status not-planned --reason "<the user's why>"` — whether or not a run had started.
 5. If the user wants it done now, `/ops run <id>` follows straight on — the decision is already recorded.
 
