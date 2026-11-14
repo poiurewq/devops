@@ -1,6 +1,6 @@
-# /ops wake <routine> — a routine's run
+# /ops wake <routine> <dir> — a routine's run
 
-The prompt a routine's trigger carries at its source is this one command and nothing else. Every rule the run follows lives here, in the skill and on the board, so changing how scheduled runs behave never means editing a trigger. Run from the product directory, or pass `--scope`.
+The prompt a routine's trigger carries at its source is this one command and nothing else, `<dir>` being the project directory's absolute path in the runner environment. Every rule the run follows lives here, in the skill and on the board, so changing how scheduled runs behave never means editing a trigger. Work from `<dir>` for the whole run — every `TASKS` call and every task run under it — so a session that starts elsewhere (at a repo root, in an environment holding several repos) still reaches the right board. A `<dir>` that does not exist stops the run before step 1: report it, since the environment no longer matches what the routine was set up with (`flows/schedule.md` step 3). A prompt with no `<dir>` (a trigger set up before it was part of the prompt) works from where the session started.
 
 1. **Skill check.** `SKILL_CMD check` (SKILL.md *Skill check*): show any line it prints, never stop on it.
 2. **Gate.** `TASKS whoami` — an error (no readable login, or one not on the roster) stops the run; report it verbatim, since joining a board is a human step. Then `TASKS routine wake <routine>`. Exit 2 → report its reason and stop: nothing runs, and step 5 is skipped (on a one-time routine, add that the trigger is now spent and needs moving at its source once the routine is back). Otherwise `TASKS routine show <routine>` for its mode and schedule.

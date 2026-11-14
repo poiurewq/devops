@@ -1,6 +1,6 @@
 # /dev schedule <id> [<routine>] — set up a routine for a recurring task
 
-Makes a recurring task start on its own: a trigger at its source that runs `/dev wake <routine>`, mirrored on the board as a routine the task points at (SKILL.md *Routines*). One conversation, in whatever harness the user runs. Covers `/dev schedule <id> [<routine>]` and the offers that lead here. Run from the product directory, or pass `--scope`. An unattended run never offers it and never runs it: it creates something outside the board.
+Makes a recurring task start on its own: a trigger at its source that runs `/dev wake <routine> <dir>`, mirrored on the board as a routine the task points at (SKILL.md *Routines*). One conversation, in whatever harness the user runs. Covers `/dev schedule <id> [<routine>]` and the offers that lead here. Run from the product directory, or pass `--scope`. An unattended run never offers it and never runs it: it creates something outside the board.
 
 ## The offer
 
@@ -26,13 +26,13 @@ Joining an existing one → step 6.
 
 ## 3. Runner environment
 
-`TASKS env list`. Recommend one that meets SKILL.md *Routines* (Runner environment) — this harness on this machine, or a cloud one — and wait. None fits → register it, named by the user: `TASKS env add <name> --accessors "<who can reach it>" [--machine <m>] --expects "<what a run there can count on>"`. What setup cannot confirm (a call held at a permission prompt) is the watched run's to find (step 7).
+`TASKS env list`. Recommend one that meets SKILL.md *Routines* (Runner environment) — this harness on this machine, or a cloud one — and wait. None fits → register it, named by the user: `TASKS env add <name> --accessors "<who can reach it>" [--machine <m>] --expects "<what a run there can count on>"`. Its `--expects` names where this product directory sits there, since the trigger's prompt carries that path (step 4); an existing environment that does not name it gets it added with `TASKS env update <env> --expects "…"`. What setup cannot confirm (a call held at a permission prompt) is the watched run's to find (step 7).
 
 ## 4. Propose the trigger
 
 You know the harness you are running in: propose a trigger from it — its scheduled-agent feature, a cloud routine, cron on the machine — with every setting spelled out against the contract:
 
-- **Prompt**: exactly `/dev wake <name>`, nothing else (`flows/wake.md`), run from the product directory in the chosen environment.
+- **Prompt**: exactly `/dev wake <name> <dir>`, nothing else (`flows/wake.md`), `<dir>` being the product directory's absolute path in the chosen environment as its `--expects` records it (step 3).
 - **Schedule**: the task's `schedule` when it has one. On a cadence, a cron firing at least once per cadence, at a time the user picks. A harness that offers only one-time fires gets the task's next due as a timestamp, and each wake re-points it.
 - **Permissions**: every call a run makes allowed or refused up front, never left at a prompt; for an attended routine, a way to notify the user.
 
