@@ -4,7 +4,7 @@ One sitting, one interface: this session is the **lead** for the task. It spawns
 
 **No subagents on this host** → say so once and run `/dev implement <id>` (`flows/implement.md`) instead.
 
-**`unattended` after the ids** → not the lead: nobody is there to stand in for and there is no reviewer pass. Read `flows/unattended.md` instead.
+**`unattended` after the ids** → not the lead: nobody is there to stand in for and there is no reviewer pass. Read `shared/flows/unattended.md` instead.
 
 ## Spawning
 
@@ -32,7 +32,7 @@ A subagent's question arrives as its reply; the lead's answer continues it. The 
 
 ## The sitting
 
-1. **Route.** `TASKS show <id>`. `kind: umbrella` → the lead runs the verification pass in `flows/implement.md` itself, no subagents. `type: ops` → `/ops run <id>`. `draft` or `review` → step 3. Anything else → step 2. Routing is by status only: who may touch the task, and which states stop work, are `flows/implement.md`'s and `flows/review.md`'s to judge — when a subagent stops, relay its reason to the user as given.
+1. **Route.** `TASKS show <id>`. `kind: umbrella` → the lead runs its verification pass itself (`shared/flows/verify.md`), no subagents. `type: ops` → `/ops run <id>`. `draft` or `review` → step 3. Anything else → step 2. Routing is by status only: who may touch the task, and which states stop work, are `flows/implement.md`'s and `flows/review.md`'s to judge — when a subagent stops, relay its reason to the user as given.
 2. **Premise, then implement.** For a `backlog` or `planned` task that adds behavior, spans several files, or opens design surface, the lead first reads the code it touches and says in a few lines whether the premise holds — already solved, superseded, wrong layer, or a clearly better path to the intent. The user decides proceed, reshape, or drop, and the check ends `Reply "go" to proceed, or say how to reshape or drop it.` — the same `go` as every other lead checkpoint. Mechanical tasks skip this. Then spawn the implementer (several ids: *Several ids*). It runs the whole implement flow — gates, claim, build, ship to `draft` — so the work is pushed before review.
 3. **Review.** Spawn the reviewer. It checks intent first (`flows/review.md`), then the rest, and ends with numbered findings and a proposal line. The lead relays them to the user with any `decided` forks, keeping the numbering and adding the labels below; plain bug fixes it may approve itself, saying so. The user's reply goes back to the reviewer as given, except the wave (step 5). On the user's own draft the reviewer makes the fixes and re-ships (`flows/review.md`).
 4. **Another round?** The lead's judgment, stated in one line with its reason. The intent: a fresh reviewer earns its cost when the fixes carry real risk. Size is one sign (structural changes, new or reworked logic), but a small change in a sensitive spot counts too. Low-risk fixes, such as doc or wording edits, skip it. Cases in between are the lead's call. The user can always ask for one.
@@ -40,11 +40,11 @@ A subagent's question arrives as its reply; the lead's answer continues it. The 
 
 ## A scheduled sitting
 
-A sitting an attended routine's wake starts (SKILL.md *Routines*) begins with nobody at the keyboard, but with someone the routine can reach. It runs as above up to the first thing that needs the user — the premise check's `go`, a question the lead cannot answer itself, the review findings or a wave.
+A sitting an attended routine's wake starts reaches the user as `shared/flows/wake.md` *A scheduled run* says, running as above up to the first thing that needs the user — the premise check's `go`, a question the lead cannot answer itself, the review findings or a wave. The wake's provenance tag goes to the implementer for the shipped record.
 
-- **Before ship** (the premise check, a fork) → park it on the task, adding the session's link when the harness gives one: `TASKS update <id> --needs decision --append "Question: … — live: <session link>"`.
-- **After ship** (findings, a wave) → nothing is parked: the user's own draft already shows in their `/dev review` inbox.
-- Either way, **notify the user** through the harness — the task, the question in a line, the link — and wait in the session. Answered there → clear a parked question (`TASKS update <id> --needs "" --append "Decision: …"`) and go on; the user is there now, so later questions are asked as usual. A session that ends first leaves it on the board: `/dev review <id>` decides a parked question (`flows/review.md` *Deciding a design fork*), and `/dev <id>` picks the task back up (*Cut off partway*).
+- **Before ship** (the premise check, a fork) → park it on the task, as wake.md says.
+- **After ship** (findings, a wave) → nothing is parked: the user's own draft already shows in their `/dev review` inbox. Notify and wait all the same.
+- A session that ends first leaves it on the board: `/dev decide <id>` decides a parked question (`shared/flows/decide.md`), and `/dev <id>` picks the task back up (*Cut off partway*).
 
 ## Labels the lead adds
 

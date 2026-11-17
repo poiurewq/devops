@@ -3,8 +3,10 @@
 
 Backs the `/dev skill ...` and `/ops skill ...` namespaces: everything
 acting on the installed skills themselves rather than on the user's board.
-Both skills live in one clone and update together, so every message here
-names the package, not a single skill.
+Both skills live in one clone, install together and update together, so
+every message here names the package, not a single skill. A linked install
+from before that rule may hold only one of them; check and update link the
+missing one in beside it.
 
 Install (public consumers): one clone, symlinked into each agent skills
 directory by the installer —
@@ -27,9 +29,11 @@ Never downgrade a higher schema_version stamp; preserve unknown keys.
 
 Commands:
   status  Local version, auto-update state, and the skill commands.
-  check   Throttled version check vs origin/main VERSION. Quiet if local >=
-          public or network fails. One line if behind. If auto_update, apply.
-  update  Ignore throttle; git pull --ff-only origin main (requires clone).
+  check   Link a missing sibling skill (every call), then a throttled
+          version check vs origin/main VERSION. Quiet if local >= public or
+          network fails. One line if behind. If auto_update, apply.
+  update  Link a missing sibling skill, then ignore throttle; git pull
+          --ff-only origin main (requires clone).
   auto    Show or set auto_update (on|off|true|false).
   feedback  Open an issue on the public repo (maintainer inbox) via gh;
             REST when GraphQL is blocked, else a prefilled link to file by hand.
@@ -85,8 +89,12 @@ CONFIG_KEYS = (
 SKILL_DIR = Path(os.path.abspath(__file__)).parent.parent
 # What a linked install updates: the clone holding the real skill dir.
 CLONE_DIR = SKILL_DIR.resolve().parent
-# Written by `install.py --copy-to` into each copy (version, output, skills).
+# Written by `install.py --copy-to` into each copy (version, output).
 BUILD_RECORD = "BUILD"
+# Where agents keep skills, as install.py finds them (duplicated there: it
+# cannot import this module). Keep them in step.
+AGENT_HOME_GLOBS = (".claude*", ".grok*")
+SKILLS_SUBDIR = "skills"
 
 # Run from the package's own lib/ there is no SKILL.md beside it, so printed
 # guidance keeps the historical "dev".
@@ -95,8 +103,7 @@ DEFAULT_SKILL = "dev"
 
 def invoking_skill() -> str:
     """Skill namespace to name in output ('dev', 'ops', …), so printed
-    guidance names a command the user actually has: an ops-only install has
-    no /dev."""
+    guidance names the command the user came in through."""
     if (SKILL_DIR / "SKILL.md").is_file():
         return SKILL_DIR.name
     return DEFAULT_SKILL
@@ -355,8 +362,6 @@ def rebuild_message(rec: dict[str, str]) -> str:
     """Why a copy cannot update, and the exact command that rebuilds it."""
     out = rec.get("output", "")
     cmd = f"curl -fsSL {RAW_INSTALLER_URL} | python3 - --copy-to {shlex.quote(out)}"
-    if rec.get("skills"):
-        cmd += f" --skills {rec['skills']}"
     return (
         f"this is a self-contained copy (devops {rec.get('version') or local_version()}) "
         "and cannot update itself; on the machine that built it, run:\n"
@@ -400,9 +405,86 @@ def git_pull_ff(path: Path) -> tuple[bool, str]:
     return True, detail or "already up to date"
 
 
+# --- siblings ---
+
+def package_skills(pkg: Path) -> list[str]:
+    """Skill dirs in the package (a SKILL.md inside), as install.py finds them."""
+    try:
+        return sorted(d.name for d in pkg.iterdir()
+                      if not d.name.startswith(".") and (d / "SKILL.md").is_file())
+    except OSError:
+        return []
+
+
+def half_installed_roots(skills: list[str]) -> list[tuple[Path, list[str]]]:
+    """(skills root, missing skills) for each agent skills root that links
+    some skill of this clone but not all of them.
+
+    The shims exec lib/ through the resolved skill dir, so this process
+    never learns which skills root it was reached through: every agent
+    root is scanned instead (cheap lstats), which also fixes roots other
+    than the one in use. A skill counts as missing when <root>/<skill>/
+    SKILL.md is absent.
+    """
+    found = []
+    for pattern in AGENT_HOME_GLOBS:
+        for root in sorted(Path.home().glob(f"{pattern}/{SKILLS_SUBDIR}")):
+            linked = False
+            for name in skills:
+                target = root / name
+                try:
+                    if target.is_symlink() and \
+                            target.resolve() == (CLONE_DIR / name).resolve():
+                        linked = True
+                        break
+                except OSError:
+                    continue
+            if not linked:
+                continue
+            missing = [n for n in skills if not (root / n / "SKILL.md").is_file()]
+            if missing:
+                found.append((root, missing))
+    return found
+
+
+def link_missing_siblings() -> None:
+    """Link the skills of this package missing beside a linked one.
+
+    dev and ops always install together, but a linked install from before
+    that rule may hold only one. Only links into the canonical clone count,
+    and a copy is never touched. A free path gets the link; an occupied one
+    gets the installer command, since whatever sits there is not ours to
+    replace.
+    """
+    if build_record() is not None:
+        return
+    half = half_installed_roots(package_skills(CLONE_DIR))
+    # The git checks cost subprocesses, so they run only when there is work.
+    if not half or not is_skill_git_root(CLONE_DIR) \
+            or not origin_looks_canonical(origin_url(CLONE_DIR)):
+        return
+    for root, missing in half:
+        for name in missing:
+            target = root / name
+            if not target.exists() and not target.is_symlink():
+                try:
+                    target.symlink_to(CLONE_DIR / name, target_is_directory=True)
+                    print(f"devops: linked the missing {name} skill into "
+                          f"{root} (dev and ops install together)")
+                    continue
+                except OSError as e:
+                    why = str(e)
+            else:
+                why = "something else is at that path"
+            print(f"devops: the {name} skill is missing from {root} ({why}); "
+                  f"install it with:\n  curl -fsSL {RAW_INSTALLER_URL} | python3 -",
+                  file=sys.stderr)
+
+
 # --- commands ---
 
 def cmd_check(*, force: bool = False) -> int:
+    link_missing_siblings()
     cfg = read_config()
     if not force and should_skip_check(cfg):
         return 0
@@ -446,6 +528,7 @@ def cmd_check(*, force: bool = False) -> int:
 
 
 def cmd_update() -> int:
+    link_missing_siblings()
     local = local_version()
     ok, msg = git_pull_ff(CLONE_DIR)
     if not ok:

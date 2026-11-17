@@ -42,23 +42,24 @@ import urllib.parse
 import zoneinfo
 
 STATUSES = ["proposed", "backlog", "planned", "doing", "draft", "review",
-            "done", "later", "shelved", "not-planned"]
+            "done", "shelved", "not-planned"]
+# Retired status (T88): a task file still saying `later` reads as shelved
+# (parse_task), and `--status later` is refused with a pointer to shelved.
+RETIRED_LATER = "later"
+LATER_RETIRED_ERR = ('error: the later status is retired; set the task aside '
+                     'with --status shelved --reason "<why>"')
 # Hottest-first list/index. Watch and static `TASKS board` / TASKS.md share
-# this; STATUSES stays the pipeline (validation, rollup counts). later sits
-# ahead of done: parked-but-intended work reads before finished work.
+# this; STATUSES stays the pipeline (validation, rollup counts).
 _WATCH_HEAD = ("review", "draft", "doing", "planned", "proposed",
-               "backlog", "later")
+               "backlog")
 WATCH_STATUSES = [s for s in _WATCH_HEAD if s in STATUSES] + [
     s for s in STATUSES if s not in _WATCH_HEAD]
-# Don't block an iteration close. later is parked (reseeds on iteration-new),
-# not finished — but close treats it like not-planned. shelved = not needed
-# for now: kept with its reason, holds no area, and carries over as shelved
-# (not as intended work) until someone revives it.
-TERMINAL = ("done", "later", "shelved", "not-planned")
+# Don't block an iteration close. shelved = set aside: kept with its reason,
+# holds no area, and carries over as shelved until someone revives it.
+TERMINAL = ("done", "shelved", "not-planned")
 # Out of umbrella progress (not done, not this iteration).
-OUT_OF_PLAY = ("later", "shelved", "not-planned")
-STATUS_LABEL = {"not-planned": "Not planned", "later": "Later",
-                "shelved": "Shelved"}
+OUT_OF_PLAY = ("shelved", "not-planned")
+STATUS_LABEL = {"not-planned": "Not planned", "shelved": "Shelved"}
 # --status values that need --reason, and the body line each one writes.
 REASON_STATUSES = {"not-planned": "Not planned", "shelved": "Shelved"}
 TASKS_DIR = ".tasks"
@@ -143,9 +144,9 @@ OPS = "ops"
 # already have started a due task (routine_stall), and stores nothing.
 # unattended: optional, the model id of an unattended run that claimed the
 # task (`claim --unattended`). Same lifetime as waiting — only a doing task
-# carries it — so the run's fork un-claim, its ship to draft and a manual
-# move to backlog all clear it. While it is set, claim refuses anyone else's
-# resume.
+# carries it — so the run's ship to draft and a manual move to backlog
+# clear it, and a park hands it back with `update --unattended ""`. While it
+# is set, claim refuses anyone else's resume.
 FIELDS = ["id", "title", "area", "status", "kind", "type", "assignee", "branch",
           "deps", "pr", "needs", "waiting", "unattended", "flow", "rehearsal",
           "created", "cadence", "schedule", "last_run", "next_due",
@@ -1488,10 +1489,10 @@ def flow_run_entries(bw, scope, flow):
     (undated, still listed, when it has none); any other status is left out,
     since no run happened there (a resting recurring task's runs are its own
     records). An archived doing/draft/review copy is left out too: a --carry
-    close puts the live run on the next board, and a --force close abandoned
-    it, so listing it would show one run twice or a dead one forever.
+    close puts the live run on the next board, so listing it would show one
+    run twice.
 
-    A carried task (--carry, later, or a shelved recurring one, reseeded by
+    A carried task (--carry, or a shelved one, reseeded by
     iteration-new) is copied body and all, so its predecessor's records live
     in two files at once. The `carried from <n>/T<id>` marker reseed leaves
     is what tells them apart: a record the ancestor already holds is the
@@ -2640,6 +2641,11 @@ def parse_task(path):
     deps = meta.get("deps", "")
     meta["deps"] = [int(x) for x in re.findall(r"\d+", deps)]
     meta["kind"] = meta.get("kind", "") or ""
+    # later was folded into shelved (T88). Reading it as shelved keeps an
+    # older board, and its archives, working with no migration; the next
+    # rewrite stamps shelved, which every schema-9+ script knows.
+    if meta.get("status") == RETIRED_LATER:
+        meta["status"] = "shelved"
     for k in OPTIONAL_FIELDS:
         meta[k] = meta.get(k, "") or ""
     meta["body"] = m.group(2).strip()
@@ -2679,7 +2685,7 @@ def is_ops(t):
 
 
 def off_board_guard(old, new, status):
-    """Guard for `update --status` later|shelved|not-planned (OUT_OF_PLAY).
+    """Guard for `update --status` shelved|not-planned (OUT_OF_PLAY).
 
     Returns (error, cleared). A task moved off the board must not keep a
     live branch or PR: shelved and not-planned drop its area lock, and the
@@ -2903,10 +2909,10 @@ def format_due(due):
 
 
 # Statuses that stop a recurring task's clock: proposed is not approved yet,
-# later is not this iteration, shelved pauses it, not-planned retires it. None
+# shelved pauses it, not-planned retires it. None
 # is ever due, and `recur ran` refuses each until revived. Cadence, last_run
 # and next_due are kept, so the clock resumes when the status goes active.
-RECUR_STOPPED = ("proposed", "later", "shelved", "not-planned")
+RECUR_STOPPED = ("proposed", "shelved", "not-planned")
 
 
 def on_the_clock(t):
@@ -3229,13 +3235,13 @@ def membership_leaves(umbrella, by_id, _seen=None):
 def umbrella_rollup(umbrella, tasks):
     """Short status rollup over membership leaves (not ordering-only deps).
 
-    later, shelved and not-planned leaves are out of scope: excluded from
+    shelved and not-planned leaves are out of scope: excluded from
     both the done numerator and the denominator, and omitted from open
     status counts.
     """
     by_id = {t["id"]: t for t in tasks}
     leaves = membership_leaves(umbrella, by_id)
-    # Progress is over work still in play — drop later / shelved / not-planned.
+    # Progress is over work still in play — drop shelved / not-planned.
     active = [t for t in leaves if t["status"] not in OUT_OF_PLAY]
     if not active:
         if leaves:
@@ -3290,7 +3296,6 @@ def split_areas(s):
 
 
 def occupies_area(t):
-    # later still occupies (intended work); shelved and not-planned do not.
     return t["status"] not in ("done", "shelved", "not-planned")
 
 
@@ -3541,7 +3546,7 @@ def watch_search_view(query, tasks, expand=False, color=False):
     if not hits:
         lines.append("(nothing related)" if expand else
                      "(nothing related; e includes "
-                     "done/later/shelved/not-planned)")
+                     "done/shelved/not-planned)")
     for score, t in hits:
         if color and t["status"] in TERMINAL:
             lines.append(_ansi(_DIM, f"{score:.2f} {fmt_line(t, tasks)}"))
@@ -3583,6 +3588,59 @@ def flows_pane_text(bw, scope, color=False):
     return "\n".join(lines)
 
 
+REGISTRY_PANE_HEADS = {"agent": "Agents", "env": "Environments",
+                       "routine": "Routines"}
+
+
+def registries_pane(bw, scope, color=False):
+    """Watch-mode g: agents, environments and routines, one line each.
+
+    Returns (text, rows); rows[n - 1] is the (kind, name) that row n opens.
+    Registries have no ids: the numbers only point at rows of this view,
+    so they are written `n)` and run on across the three sections.
+    """
+    title = "# Registries"
+    if scope != ".":
+        title += f" ({scope})"
+    note = "Numbers are references for this view, not ids."
+    lines = [title, _ansi(_DIM, note) if color else note]
+    rows = []
+    for kind, head in REGISTRY_PANE_HEADS.items():
+        lines.extend(["", head])
+        entries = all_registry(bw, scope, kind)
+        if not entries:
+            none = f"(no {REGISTRIES[kind]['label']}s)"
+            lines.append(_ansi(_DIM, none) if color else none)
+        for e in entries:
+            rows.append((kind, e["name"]))
+            ref = f"{len(rows):>2})"
+            line = registry_line(e)
+            if color:
+                ref = _ansi(_DIM, ref)
+                line = _ansi(_FLOW_NAME, e["name"]) + line[len(e["name"]):]
+            lines.append(f"{ref} {line}")
+    return "\n".join(lines), rows
+
+
+def watch_registry_view(bw, scope, kind, name, tasks=()):
+    """One registry entry's file, titled by its name, or None if gone.
+
+    A renamed entry is still found (its former name resolves). A routine
+    also lists the tasks pointing at it.
+    """
+    entries = all_registry(bw, scope, kind)
+    e = registry_holder(entries, name)
+    if e is None:
+        return None
+    with open(e["path"]) as fh:
+        text = fh.read().rstrip()
+    page = f"# {REGISTRIES[kind]['label']} {e['name']}\n\n{text}"
+    mine = routine_tasks(tasks, entries, e) if kind == "routine" else []
+    if mine:
+        page += "\n\ntasks: " + ", ".join(f"T{t['id']}" for t in mine)
+    return page
+
+
 def watch_flow_search_view(query, flows, color=False):
     """Flows-pane s: flows ranked as `related` ranks tasks.
 
@@ -3619,6 +3677,11 @@ def watch_flow_view(bw, scope, fid):
         text = render_flow(flow).rstrip()
     runs = flow_runs_text(bw, scope, flow, color=_use_color())
     return f"{text}\n\n{runs}", len(text.splitlines()) + 1
+
+
+def watch_missing_reg(kind, name, color=False):
+    msg = f"{REGISTRIES[kind]['label']} {name} — no longer there"
+    return _ansi(_ERR, msg) if color else msg
 
 
 def watch_missing_fid(fid, color=False):
@@ -3837,7 +3900,23 @@ def ff_task_branch(root, branch, start_ref):
     print(f"note: fast-forwarded leftover '{branch}' to {start_ref}")
 
 
-def ensure_task_branch(root, branch, start_ref):
+def adopt_pushed_task_branch(root, branch):
+    """Resume of a recorded branch: fetch it, and fast-forward a stale local
+    copy to it. Work pushed elsewhere (a parked run, another machine) is
+    otherwise invisible to ensure_task_branch, which would build on a stale
+    local branch or cut a fresh one from integration. A local branch ahead
+    of or diverged from origin is left alone: it holds unpushed work."""
+    git("fetch", "origin", f"+refs/heads/{branch}:refs/remotes/origin/{branch}",
+        cwd=root, check=False)
+    remote = f"origin/{branch}"
+    if not (ref_exists(root, remote) and ref_exists(root, f"refs/heads/{branch}")):
+        return
+    if (is_ancestor(root, branch, remote)
+            and not is_ancestor(root, remote, branch)):
+        ff_task_branch(root, branch, remote)
+
+
+def ensure_task_branch(root, branch, start_ref, resume=False):
     """Create local task branch from start_ref if missing; no checkout.
 
     An existing branch is reused only when start_ref is already an ancestor
@@ -3847,6 +3926,10 @@ def ensure_task_branch(root, branch, start_ref):
     (show unique commits and leftover dirty status, ask keep vs throw;
     do not write branch: first; keep: commit/stash if dirty; refuse
     throw-away while dirty; throw-away: TASKS pr <id> close then delete).
+    `resume` (the task's own recorded branch) keeps a diverged branch as it
+    is: integration moves with every board commit, so a branch with work on
+    it has always diverged by the time anyone resumes it; ship and land
+    absorb that with a merge, never a rebase here.
     """
     if not ref_exists(root, start_ref):
         sys.exit(f"error: start ref '{start_ref}' not found; fetch origin first")
@@ -3866,6 +3949,8 @@ def ensure_task_branch(root, branch, start_ref):
     if is_ancestor(root, branch, start_ref):
         ff_task_branch(root, branch, start_ref)
         return
+    if resume:
+        return
     ahead = git("rev-list", "--count", f"{start_ref}..{branch}",
                 cwd=root, check=False).stdout.strip() or "?"
     behind = git("rev-list", "--count", f"{branch}..{start_ref}",
@@ -3876,8 +3961,14 @@ def ensure_task_branch(root, branch, start_ref):
              f"branch: (flows/implement.md)")
 
 
-def verified_claim_base(root, branch, start_ref):
-    """start_ref if it is an ancestor of branch; else refuse to name a base."""
+def verified_claim_base(root, branch, start_ref, resume=False):
+    """start_ref if it is an ancestor of branch; else refuse to name a base.
+    A resumed branch that has diverged reports where it forked instead."""
+    if not is_ancestor(root, start_ref, branch) and resume:
+        fork = git("merge-base", start_ref, branch, cwd=root,
+                   check=False).stdout.strip()
+        if fork:
+            return f"{fork[:12]} (resumed; {start_ref} has moved on)"
     if not is_ancestor(root, start_ref, branch):
         sys.exit(f"error: task branch '{branch}' is not based on {start_ref}; "
                  f"refusing to report an unverified base")
@@ -5822,11 +5913,16 @@ def cmd_claim(args):
     if args.stack_on is not None:
         start = resolve_stack_start(
             root, bw, scope, tid, args.stack_on, integration)
+    # The task's own recorded branch is a resume, not a leftover: un-claim
+    # clears the field, so a branch still recorded is this task's work.
+    resume = (meta.get("branch") or "").strip() == branch
+    if resume:
+        adopt_pushed_task_branch(root, branch)
 
-    ensure_task_branch(root, branch, start)
+    ensure_task_branch(root, branch, start, resume=resume)
     ready = resolve_task_ready_path(
         root, scope, tid, meta["title"], branch, integration)
-    base = verified_claim_base(root, branch, start)
+    base = verified_claim_base(root, branch, start, resume=resume)
 
     # Refresh meta after git work (board may have moved on shared integration).
     integration, bw = resolve_board(root, scope)
@@ -6196,8 +6292,9 @@ def collect_rehearsed(text):
 #   Paused (2026-09-29): [7 send-invoice step 4] invoice drafted on `laptop`…
 # It is not an outcome: the task stays `doing`, `ran` still closes it, and
 # nothing collects these into log.md — the closing record is the trace that
-# outlives the task. Only written on the user's explicit call, so an ordinary
-# run that finishes in one sitting carries none.
+# outlives the task. Only written on the user's explicit call, or where an
+# unattended dev run parks, so an ordinary run that finishes in one sitting
+# carries none. On a dev task it also commits and pushes the branch.
 def format_paused(text, refs, at, date=None):
     """One pause record, collapsed to a single paragraph."""
     text = " ".join((text or "").split())
@@ -6722,6 +6819,52 @@ def derive_stack_base(root, bw, scope, meta, branch, integration, *,
     return best
 
 
+def commit_task_work(work, msg):
+    """Commit everything in the task worktree `work`; exits on failure.
+    Refuses (and unstages) board state, which never rides a code branch."""
+    r = git("add", "-A", cwd=work, check=False)
+    if r.returncode != 0:
+        err = (r.stderr or r.stdout or "").strip()
+        sys.exit(f"error: git add failed in {work}:\n{err}")
+    staged = git("diff", "--cached", "--name-only", cwd=work,
+                 check=False).stdout.strip()
+    if not staged:
+        sys.exit(f"error: worktree dirty but nothing staged in {work}")
+    board_paths = [ln for ln in staged.splitlines()
+                   if path_is_tasks_dir(ln)]
+    if board_paths:
+        git("reset", "HEAD", cwd=work, check=False)
+        listed = "\n".join(f"  {p}" for p in board_paths[:20])
+        more = "" if len(board_paths) <= 20 else f"\n  …+{len(board_paths)-20} more"
+        sys.exit(f"error: .tasks/ paths staged in {work}; board state "
+                 f"must not ship on a code branch:\n{listed}{more}")
+    r = git("commit", "-m", msg, cwd=work, check=False)
+    if r.returncode != 0:
+        err = (r.stderr or r.stdout or "").strip()
+        sys.exit(f"error: commit failed in {work}:\n{err}")
+    print(f"  committed: {msg}")
+
+
+def push_dev_work(root, scope, integration, bw, meta, why):
+    """Commit and push a doing dev task's work in progress, so it outlives
+    this checkout: an unattended runner is often thrown away once the run
+    stops, and the next session may be on another machine. `why` ends the
+    commit subject (`paused`, `waiting`). Opens no PR; ship does that."""
+    tid = meta["id"]
+    branch = task_branch_name(meta)
+    if not branch:
+        sys.exit(f"error: T{tid} has no branch; nothing to keep (claim first)")
+    if not has_remote(root):
+        sys.exit("error: no origin remote; cannot push the task branch")
+    work = ship_work_cwd(root, scope, meta, branch, integration)
+    if worktree_is_dirty(work):
+        prefix = title_prefix(iteration_index(read_board_cfg(bw, scope)),
+                              tid, scope)
+        commit_task_work(work, f"{prefix} {meta['title']} ({why})")
+    push_task_branch(root, branch, force=False)
+    print(f"  pushed: {branch}")
+
+
 def cmd_ship(args):
     """Ship end of implement: commit if needed, push, open PR, mark draft.
 
@@ -6773,28 +6916,7 @@ def cmd_ship(args):
 
     if worktree_is_dirty(work):
         msg = (args.message or "").strip() or f"{prefix} {meta['title']}"
-        msg = with_title_prefix(msg, prefix, tid)
-        r = git("add", "-A", cwd=work, check=False)
-        if r.returncode != 0:
-            err = (r.stderr or r.stdout or "").strip()
-            sys.exit(f"error: git add failed in {work}:\n{err}")
-        staged = git("diff", "--cached", "--name-only", cwd=work,
-                     check=False).stdout.strip()
-        if not staged:
-            sys.exit(f"error: worktree dirty but nothing staged in {work}")
-        board_paths = [ln for ln in staged.splitlines()
-                       if path_is_tasks_dir(ln)]
-        if board_paths:
-            git("reset", "HEAD", cwd=work, check=False)
-            listed = "\n".join(f"  {p}" for p in board_paths[:20])
-            more = "" if len(board_paths) <= 20 else f"\n  …+{len(board_paths)-20} more"
-            sys.exit(f"error: .tasks/ paths staged in {work}; board state "
-                     f"must not ship on a code branch:\n{listed}{more}")
-        r = git("commit", "-m", msg, cwd=work, check=False)
-        if r.returncode != 0:
-            err = (r.stderr or r.stdout or "").strip()
-            sys.exit(f"error: commit failed in {work}:\n{err}")
-        print(f"  committed: {msg}")
+        commit_task_work(work, with_title_prefix(msg, prefix, tid))
 
     # PR base is only needed to CREATE a PR: explicit --base wins, else it
     # is derived below once we know there is no open PR on this head. A
@@ -7479,7 +7601,7 @@ def cmd_init(args):
     if os.path.isdir(dest):
         print(f"viewer: skipped ({VIEWER_NAME} is a directory)")
     else:
-        print(f"viewer: ./{VIEWER_NAME}  (r refresh, a by area, e expand, l latest, c check, f flows, q back/quit, arrows scroll, space/b page, type id↵)")
+        print(f"viewer: ./{VIEWER_NAME}  (r refresh, a by area, e expand, l latest, c check, f flows, g registries, q back/quit, arrows scroll, space/b page, type id↵)")
     print(f"identity: {name} (GitHub: {login})")
     if scope != ".":
         print(f"note: commands target this board from inside '{scope}/' "
@@ -7615,8 +7737,8 @@ def contributor_rm_refusal(ident, name, entries, integrators, tasks,
     Only the contributor themself or an integrator may remove a handle. The
     last integrator stays (an empty integrator roster blocks land for
     everyone), and so does anyone still assigned work that will carry on:
-    every status but done and not-planned, since later and shelved tasks
-    come back still assigned. So does the last accessor of an agent or
+    every status but done and not-planned, since shelved tasks come back
+    still assigned. So does the last accessor of an agent or
     environment (`registries`), which would otherwise lead to nobody."""
     if name not in [h for h, _ in entries]:
         return (f"'{name}' is not a contributor "
@@ -7788,7 +7910,19 @@ def cmd_area(args):
         print(f"area '{name}' removed")
 
 
+ADD_STATUSES = ("proposed", "backlog", "planned", "shelved")
+
+
 def cmd_add(args):
+    if args.status == RETIRED_LATER:
+        sys.exit(LATER_RETIRED_ERR)
+    if args.status not in ADD_STATUSES:
+        sys.exit(f"error: --status must be one of {', '.join(ADD_STATUSES)}")
+    if args.reason is not None and args.status != "shelved":
+        sys.exit("error: --reason only applies with --status shelved")
+    if args.status == "shelved" and not (args.reason or "").strip():
+        sys.exit('error: --status shelved requires --reason "<why>" '
+                 "(recorded in the task body)")
     root, scope, branch, bw = ctx()
     tasks = all_tasks(bw, scope)
     tid = max((t["id"] for t in tasks), default=0) + 1
@@ -7807,6 +7941,10 @@ def cmd_add(args):
         "routine": (args.routine or "").strip(),
         "body": args.desc or "",
     }
+    if args.reason is not None:
+        meta["body"] = append_body(
+            meta["body"], f"{REASON_STATUSES['shelved']} "
+            f"({meta['created']}): {args.reason}")
     validate_recurring(meta)
     validate_type(meta, new=True)
     validate_rehearsal(meta)
@@ -7904,6 +8042,8 @@ def cmd_update(args):
     if args.deps is not None:
         meta["deps"] = [int(x) for x in re.findall(r"\d+", args.deps)]
         changes.append(f"deps={meta['deps']}")
+    if args.status == RETIRED_LATER:
+        sys.exit(LATER_RETIRED_ERR)
     if args.reason is not None and args.status not in REASON_STATUSES:
         sys.exit("error: --reason only applies with --status "
                  + " or ".join(REASON_STATUSES))
@@ -8231,15 +8371,13 @@ def cmd_pause(args):
     keeps its assignee — a paused run is open, not finished, and sending it
     back to `backlog` would throw away the fact that it is half-done. The
     flows followed are stamped on the task now rather than at close, so the
-    session that picks it up sees them in the frontmatter.
+    session that picks it up sees them in the frontmatter. A dev task's
+    work in progress lives on its branch, so that is committed and pushed
+    first (push_dev_work): the record is written only once the work is safe.
     """
     root, scope, branch, bw = ctx()
     meta = find_task(bw, scope, args.id)
     tid = meta["id"]
-    if not is_ops(meta):
-        sys.exit(f"error: T{tid} is a dev task; its work in progress lives on "
-                 f"the branch, and implement resumes from there. Only ops "
-                 f"runs pause with a record")
     if meta["status"] != "doing":
         sys.exit(f"error: T{tid} is {meta['status']}; only a run under way "
                  f"(doing) can pause")
@@ -8260,6 +8398,8 @@ def cmd_pause(args):
     record = format_paused(text, refs, at,
                            iso_date(args.date, "date").isoformat()
                            if args.date else None)
+    if not is_ops(meta):
+        push_dev_work(root, scope, branch, bw, meta, "paused")
     meta["body"] = append_body(meta["body"], record)
     with open(meta["path"], "w") as f:
         f.write(render_task(meta))
@@ -8267,7 +8407,8 @@ def cmd_pause(args):
     print(f"T{tid} paused (still doing, assigned to "
           f"{meta.get('assignee') or 'nobody'})")
     print(f"  {record}")
-    print(f"  resume with: /ops run {tid}")
+    resume = f"/ops run {tid}" if is_ops(meta) else f"/dev {tid}"
+    print(f"  resume with: {resume}")
 
 
 def cmd_wait(args):
@@ -8280,6 +8421,8 @@ def cmd_wait(args):
     index 📨 mark), and a `Waiting (<date>): …` record keeps the
     trace after the marker is gone. Re-running it moves the date. `--clear`
     is for the reply arriving mid-run; leaving doing clears it anyway.
+    A dev task's branch is committed and pushed first, as pause does: the
+    reply may be days out, and the work must not live only in this checkout.
     """
     root, scope, branch, bw = ctx()
     meta = find_task(bw, scope, args.id)
@@ -8322,6 +8465,8 @@ def cmd_wait(args):
     record = format_waiting(text, refs, at, who, by,
                             iso_date(args.date, "date").isoformat()
                             if args.date else None)
+    if not is_ops(meta) and task_branch_name(meta):
+        push_dev_work(root, scope, branch, bw, meta, "waiting")
     meta["waiting"] = f"{who} by {by}"
     meta["body"] = append_body(meta["body"], record)
     with open(meta["path"], "w") as f:
@@ -8435,7 +8580,6 @@ _STATUS_COLOR = {
     "draft": "2;35",      # dim magenta — review's colour, muted
     "review": "35",       # magenta
     "done": "32",         # green
-    "later": "2",
     "shelved": "2",
     "not-planned": "2",
 }
@@ -8599,7 +8743,7 @@ def _index_block(rows):
 def _list_block(tasks, expand=False, color=False, status_order=None):
     """In-play tasks one per line, umbrella children indented under the parent.
 
-    --expand also lists done/later/shelved/not-planned. A child whose umbrella is
+    --expand also lists done/shelved/not-planned. A child whose umbrella is
     itself unlisted renders at top level, so nothing drops off the board.
     Umbrellas rank by the hottest of their own status and their listed
     descendants'.
@@ -8686,7 +8830,7 @@ def _board_by_area(bw, scope, tasks, expand=False, color=False,
     Index order: areas.md order, then other named areas (sorted), then
     reserved `all`, then untagged. Empty named areas from areas.md are kept
     so the cut shows the full map; empty ad-hoc / all / untagged are omitted.
-    Default keeps done/later/shelved/not-planned off area lines (own count rows)
+    Default keeps done/shelved/not-planned off area lines (own count rows)
     so open work stays scannable; --expand puts those ids on area lines too.
     Ids on each area line use the same hottest-first status order as the
     default view, so in-flight work sits left of the backlog.
@@ -8960,17 +9104,25 @@ def _rows_of(lines, cols):
 
 def _watch_help(by_area, expand, more_above=0, more_below=0, check=False,
                 history=False, flows=False, search=False, latest=False,
-                back=False):
-    """`history`: the flows pane's h> prompt is open. `back`: q steps back."""
+                back=False, registries=False):
+    """`history`: the flows pane's h> prompt is open. `back`: q steps back.
+    `registries`: True on the pane's index, "entry" while an entry is open
+    (its row numbers are off screen, so none is taken)."""
     r_key = "r refresh"
     q_key = "q back" if back else "q quit"
     if search:
         # Every printable key is query text, so no letter shortcut is live.
         return _watch_help_counts("type query↵  esc cancel  arrows",
                                   more_above, more_below)
+    if registries:
+        return _watch_help_counts(
+            f"{r_key}  f flows  g board  {q_key}"
+            f"  · {'' if registries == 'entry' else 'type row number↵  '}"
+            f"arrows  space/b page",
+            more_above, more_below)
     if flows:
         return _watch_help_counts(
-            f"{r_key}  s search  f board  {q_key}"
+            f"{r_key}  s search  f board  g registries  {q_key}"
             f"  · {'history id↵  h close' if history else 'type flow id↵  h history'}"
             f"  arrows  space/b page",
             more_above, more_below)
@@ -8980,7 +9132,7 @@ def _watch_help(by_area, expand, more_above=0, more_below=0, check=False,
     # While the latest list is up it owns the screen: a/e do not apply.
     views = "l board" if latest else f"a {other}  e {fold}  l latest"
     help_line = (f"{r_key}  {views}  c check  s search  f flows"
-                 f"  {q_key}"
+                 f"  g registries  {q_key}"
                  f"  · {query}  arrows  space/b page")
     return _watch_help_counts(help_line, more_above, more_below)
 
@@ -9000,15 +9152,18 @@ def _watch_help_counts(help_line, more_above, more_below):
 def _watch_footer_lines(by_area, expand, buf, result,
                         more_above=0, more_below=0, check=False,
                         history=False, flows=False, search=False,
-                        latest=False, back=False):
+                        latest=False, back=False, registries=False):
     help_line = _watch_help(by_area, expand, more_above, more_below,
                            check=check, history=history, flows=flows,
-                           search=search, latest=latest, back=back)
+                           search=search, latest=latest, back=back,
+                           registries=registries)
     if _use_color():
         help_line = _ansi(_DIM, help_line)
     lines = ["", help_line]
     if check or search or history or buf:
-        if search:
+        if registries:
+            lines.append(f"g> {buf}")
+        elif search:
             lines.append(f"s> {buf}")
         elif check:
             lines.append(f"c> {buf}".rstrip())
@@ -9065,7 +9220,7 @@ def _watch_page_offsets(body, offset, body_rows, cols):
 
 def _paint_watch(out, by_area, expand, buf, result, offset, check=False,
                  history=False, flows=False, search=False, latest=False,
-                 back=False):
+                 back=False, registries=False):
     """Paint a terminal-height viewport.
 
     Returns (clamped offset, page-up offset, page-down offset).
@@ -9076,7 +9231,8 @@ def _paint_watch(out, by_area, expand, buf, result, offset, check=False,
     footer_rows = _rows_of(
         _watch_footer_lines(by_area, expand, buf, result,
                             check=check, history=history, flows=flows,
-                            search=search, latest=latest, back=back), cols)
+                            search=search, latest=latest, back=back,
+                            registries=registries), cols)
     body_rows = max(1, rows - footer_rows)
     shown, offset, more_below = _window_lines(body, offset, body_rows, cols)
     more_above = offset
@@ -9086,7 +9242,8 @@ def _paint_watch(out, by_area, expand, buf, result, offset, check=False,
             _watch_footer_lines(by_area, expand, buf, result,
                                 more_above, more_below, check=check,
                                 history=history, flows=flows, search=search,
-                                latest=latest, back=back),
+                                latest=latest, back=back,
+                                registries=registries),
             cols)
         body_rows = max(1, rows - footer_rows)
         shown, offset, more_below = _window_lines(
@@ -9095,7 +9252,8 @@ def _paint_watch(out, by_area, expand, buf, result, offset, check=False,
     footer = _watch_footer_lines(by_area, expand, buf, result,
                                  more_above, more_below, check=check,
                                  history=history, flows=flows, search=search,
-                                 latest=latest, back=back)
+                                 latest=latest, back=back,
+                                 registries=registries)
     _clear_screen()
     # No trailing newline: print() on the last row scrolls the first line off.
     frame = shown + footer
@@ -9160,6 +9318,9 @@ def cmd_board(args):
         check_mode = False
         search_mode = False  # s> prompt open: printable keys are query
         flows_mode = False
+        regs_mode = False    # g: the registries pane
+        reg_rows = []        # ...its rows, (kind, name) per typed number
+        last_reg = None      # ...and the (kind, name) being shown
         latest_mode = False  # l: flat latest-first list replaces the board
         offset = 0
         try:
@@ -9168,7 +9329,20 @@ def cmd_board(args):
                 expand = bool(getattr(args, "expand", False))
                 board, tasks = _watch_board(args, latest_mode, bw, scope)
                 display = board
-                if flows_mode:
+                if regs_mode:
+                    display, reg_rows = registries_pane(
+                        bw, scope, color=_use_color())
+                    if last_reg is not None:
+                        view = watch_registry_view(
+                            bw, scope, *last_reg, tasks=tasks)
+                        if view is None:
+                            result = watch_missing_reg(
+                                *last_reg, color=_use_color())
+                            last_reg = None
+                        else:
+                            display = view
+                            result = ""
+                elif flows_mode:
                     display = flows_pane_text(bw, scope, color=_use_color())
                     if last_query:
                         display = watch_flow_search_view(
@@ -9213,10 +9387,14 @@ def cmd_board(args):
                         check=check_mode, flows=flows_mode,
                         search=search_mode, latest=latest_mode,
                         history=history_mode,
-                        back=bool(flows_mode or latest_mode or check_mode
+                        registries=("entry" if regs_mode and last_reg
+                                    else regs_mode),
+                        back=bool(flows_mode or regs_mode or latest_mode
+                                  or check_mode
                                   or buf or result
                                   or last_kind is not None))
                     key = _read_key(cooked=old_term is None)
+                    pane = flows_mode or regs_mode
                     if key == "\x04":  # Ctrl-D / EOF, even mid-query
                         print()
                         return
@@ -9259,7 +9437,12 @@ def cmd_board(args):
                             history_mode = False  # the page stays up
                             continue
                         offset = 0
-                        if flows_mode:
+                        if regs_mode:
+                            if last_reg is not None:
+                                last_reg = None
+                            else:
+                                regs_mode = False
+                        elif flows_mode:
                             if last_fid is not None:
                                 last_fid = None
                             elif last_query:
@@ -9291,8 +9474,16 @@ def cmd_board(args):
                         buf = ""
                         offset = 0
                         break
-                    if not buf and key in "fF":
-                        flows_mode = not flows_mode
+                    if not buf and (key in "fF" or key in "gG"):
+                        # Each pane key toggles its own pane and closes
+                        # the other.
+                        if key in "fF":
+                            flows_mode = not flows_mode
+                            regs_mode = False
+                        else:
+                            regs_mode = not regs_mode
+                            flows_mode = False
+                        last_reg = None
                         buf = ""
                         result = ""
                         last_tid = None
@@ -9303,7 +9494,7 @@ def cmd_board(args):
                         history_mode = False
                         offset = 0
                         break
-                    if not buf and key in "lL" and not flows_mode:
+                    if not buf and key in "lL" and not pane:
                         latest_mode = not latest_mode
                         buf = ""
                         result = ""
@@ -9312,14 +9503,14 @@ def cmd_board(args):
                         last_query = ""
                         offset = 0
                         break
-                    if (key in ("a", "A") and not flows_mode
+                    if (key in ("a", "A") and not pane
                             and not latest_mode):
                         buf = ""
                         offset = 0
                         args.by_area = not by_area
                         break
                     # e still widens a search shown over the latest list.
-                    if (key in ("e", "E") and not flows_mode
+                    if (key in ("e", "E") and not pane
                             and (not latest_mode or last_kind == "search")):
                         buf = ""
                         offset = 0
@@ -9337,12 +9528,12 @@ def cmd_board(args):
                     if key in ("b", "B"):
                         offset = page_up
                         continue
-                    if not buf and key in ("s", "S"):
+                    if not buf and key in ("s", "S") and not regs_mode:
                         search_mode = True
                         check_mode = False
                         history_mode = False
                         continue
-                    if not buf and key in "cC" and not flows_mode:
+                    if not buf and key in "cC" and not pane:
                         check_mode = not check_mode
                         if check_mode and last_kind in ("show", "search"):
                             last_tid = None
@@ -9358,6 +9549,18 @@ def cmd_board(args):
                     if key in ("\n", "\r"):
                         if not buf:
                             continue
+                        if regs_mode:
+                            row = parse_watch_fid(buf)
+                            buf = ""
+                            if row is None or not 1 <= row <= len(reg_rows):
+                                msg = f"no row {row}"
+                                result = (_ansi(_ERR, msg) if _use_color()
+                                          else msg)
+                                continue
+                            last_reg = reg_rows[row - 1]
+                            result = ""
+                            offset = 0
+                            break
                         if flows_mode:
                             fid = parse_watch_fid(buf)
                             buf = ""
@@ -9427,12 +9630,16 @@ def cmd_board(args):
                         if history_mode and last_fid is not None:
                             offset = history_at
                         continue
-                    if not buf and key in "tT" and not flows_mode:
+                    if not buf and key in "tT" and not pane:
                         buf = key
                         continue
                     if (key == "," and check_mode and buf
                             and buf[-1] != "," and len(buf) < 64):
                         buf += key
+                        continue
+                    if regs_mode and last_reg is not None:
+                        # The rows are off screen and may have renumbered
+                        # on a refresh: no blind jump, q returns to them.
                         continue
                     if key.isdigit() and len(buf) < (64 if check_mode else 8):
                         buf += key
@@ -9453,8 +9660,8 @@ def cmd_iteration(args):
     root, scope, branch, bw = ctx()
     cfg = read_board_cfg(bw, scope)
     tasks = all_tasks(bw, scope)
-    # later and shelved are parked: omit them from the X/Y done denominator.
-    in_play = [t for t in tasks if t["status"] not in ("later", "shelved")]
+    # shelved is set aside: omit it from the X/Y done denominator.
+    in_play = [t for t in tasks if t["status"] != "shelved"]
     done = sum(1 for t in in_play if t["status"] == "done")
     print(f"scope: {scope}")
     print(f"iteration: {iteration_index(cfg)}")
@@ -9550,15 +9757,14 @@ def archived_tasks(bw, scope, index):
 
 
 def carries_to_next_iteration(t):
-    """later = intended but not this iteration; shelved = not needed for
-    now, kept until revived; recurring = perpetual.
+    """shelved = set aside, kept until revived; recurring = perpetual.
 
     not-planned wins over recurrence: retiring a recurring task is how you
     stop it, so it must not be reseeded back onto the next board.
     """
     if t.get("status") == "not-planned":
         return False
-    return t.get("status") in ("later", "shelved") or is_recurring(t)
+    return t.get("status") == "shelved" or is_recurring(t)
 
 
 CARRIED_TAG_RE = r"\[carried: [a-z-]+\](?: \S+)?$"
@@ -9567,8 +9773,7 @@ CARRIED_TAG_RE = r"\[carried: [a-z-]+\](?: \S+)?$"
 def carried_ids(bw, scope, index):
     """Ids `iteration-close --carry` tagged `[carried: <status>]` in this
     iteration's log.md section. The tag is the only record of the choice:
-    the archived file is verbatim, and a --force close archives the same
-    unfinished statuses without carrying them."""
+    the archived file is verbatim."""
     log = os.path.join(bw, tdir(scope), "log.md")
     if not os.path.exists(log):
         return set()
@@ -9627,10 +9832,10 @@ def trim_run_records(body, keep_runs=False):
 
 
 def reseed_later_tasks(bw, scope, old_index):
-    """Copy carried, later, shelved and recurring tasks onto the live board.
+    """Copy carried, shelved and recurring tasks onto the live board.
 
     Only the outgoing iteration's archive (the one just closed). Scanning
-    every archive would duplicate a task that stayed later across closes.
+    every archive would duplicate a task that stayed shelved across closes.
     Everything reseeded is numbered compactly, 1..N in old-id order.
     Carried tasks (`iteration-close --carry`) otherwise come back as they
     were — status, assignee, branch, pr and body — and find their worktrees
@@ -9651,13 +9856,13 @@ def reseed_later_tasks(bw, scope, old_index):
     keep = carried_ids(bw, scope, old_index)
     carried = sorted((t for t in archived if t["id"] in keep),
                      key=lambda x: x["id"])
-    laters = [t for t in archived
-              if t["id"] not in keep and carries_to_next_iteration(t)]
-    if not carried and not laters:
+    rest = [t for t in archived
+            if t["id"] not in keep and carries_to_next_iteration(t)]
+    if not carried and not rest:
         return [], []
     nid = max((t["id"] for t in all_tasks(bw, scope)), default=0) + 1
     mapping = {}
-    for t in sorted(carried + laters, key=lambda x: x["id"]):
+    for t in sorted(carried + rest, key=lambda x: x["id"]):
         mapping[t["id"]] = nid
         nid += 1
     kept = []
@@ -9677,7 +9882,7 @@ def reseed_later_tasks(bw, scope, old_index):
         kept.append((meta, t["id"]))
     written = []
     today = datetime.date.today().isoformat()
-    for t in sorted(laters, key=lambda x: x["id"]):
+    for t in sorted(rest, key=lambda x: x["id"]):
         new_id = mapping[t["id"]]
         new_deps = [mapping[d] for d in t.get("deps", []) if d in mapping]
         # A recurring task at rest sheds its run records so its file stays
@@ -9691,16 +9896,16 @@ def reseed_later_tasks(bw, scope, old_index):
             "id": new_id,
             "title": t.get("title") or "",
             "area": t.get("area") or "",
-            # Only later, shelved and recurring tasks are carried. later
-            # stays later, shelved stays shelved (a shelved recurring task
-            # too: shelving pauses it), and a proposed recurring task stays
-            # proposed — a forced close must not promote an unapproved
-            # proposal to approved work. Anything else is a recurring task that
-            # starts the new board armed and unclaimed (assignee/branch/pr
-            # are cleared below, so an in-flight status would name a
-            # branch that is not carried).
+            # Only shelved and recurring tasks are carried. shelved stays
+            # shelved (a shelved recurring task too: shelving pauses it), and
+            # a proposed recurring task stays proposed — a close no longer
+            # leaves one behind, but an archive an older script force-closed
+            # may hold one, and reseeding must never promote an unapproved
+            # proposal. Anything else is a recurring task at rest, which
+            # starts the new board armed and unclaimed (one in flight blocks
+            # the close unless --carry took it).
             "status": (t["status"]
-                       if t.get("status") in ("later", "shelved", "proposed")
+                       if t.get("status") in ("shelved", "proposed")
                        else "backlog"),
             "kind": t.get("kind") or "",
             # Carry the type: a recurring ops task that came back as a dev
@@ -9745,24 +9950,20 @@ def cmd_iteration_close(args):
         sys.exit("error: no tasks on this board; nothing to close")
     # A recurring task at rest is perpetual, never "finished", so it does not
     # block a close: it archives like everything else and iteration-new
-    # reseeds it, the same way later tasks carry over. One with a run in
-    # flight (doing/draft/review) still blocks. Nothing is deleted by a --force
-    # close — branch, worktree and PR all survive, and the archived file
-    # keeps their names — but they are ORPHANED: the reseeded copy is a
-    # fresh id with branch/pr cleared, land only reads the live board, and
-    # the PR is left based on an integration branch that has already
-    # landed. Recovering one is a manual merge. --carry is the way to keep
-    # them: tagged [carried: <status>] in log.md, they come back at
-    # iteration-new with a fresh id and status, branch and PR intact.
+    # reseeds it, the same way shelved tasks carry over. One with a run in
+    # flight (doing/draft/review) still blocks. There is no way to close
+    # past unfinished work: left behind, its branch and PR would be orphaned
+    # (land only reads the live board). --carry keeps them: tagged
+    # [carried: <status>] in log.md, they come back at iteration-new with a
+    # fresh id and status, branch and PR intact.
     unfinished = [t for t in tasks
                   if t["status"] not in TERMINAL and not recur_at_rest(t)]
-    if unfinished and not (args.force or args.carry):
+    if unfinished and not args.carry:
         ids = ", ".join(f"T{t['id']}" for t in unfinished)
-        sys.exit(f"error: unfinished tasks: {ids}. Finish them, mark later, "
-                 "shelve them, drop them (not-planned), delete them, re-run "
-                 "with --carry to carry them into the next iteration as they "
-                 "are, or with --force to close anyway "
-                 "(they will be logged as unfinished and removed).")
+        sys.exit(f"error: unfinished tasks: {ids}. Finish them, shelve "
+                 "them, drop them (not-planned), delete them, or "
+                 "re-run with --carry to carry them into the next iteration "
+                 "as they are.")
     carry = {t["id"] for t in unfinished} if args.carry else set()
     idx = iteration_index(cfg)
     name = iteration_name(cfg)
@@ -9790,7 +9991,6 @@ def cmd_iteration_close(args):
     entry.append(f"branch: {branch}{extra}")
     entry.append(f"archive: {arel}/")
     for t in tasks:
-        left = "carried" if t["id"] in carry else "unfinished"
         line = f"- {idx}/T{t['id']} {t['title']}"
         if t.get("assignee"):
             line += f" — {t['assignee']}"
@@ -9798,16 +9998,14 @@ def cmd_iteration_close(args):
             line += f" [{t['area']}]"
         if t["status"] == "not-planned":
             line += " [not planned]"
-        elif t["status"] == "later":
-            line += " [later]"
         elif t["status"] == "shelved":
             line += " [shelved]"
         elif is_recurring(t):
             line += f" [recurring {t.get('cadence') or t.get('schedule')}]"
             if not recur_at_rest(t):
-                line += f" [{left}: {t['status']}]"
+                line += f" [carried: {t['status']}]"
         elif t["status"] != "done":
-            line += f" [{left}: {t['status']}]"
+            line += f" [carried: {t['status']}]"
         if t.get("pr"):
             line += f" {t['pr']}"
         entry.append(line)
@@ -9878,7 +10076,7 @@ def report_reseeded(carried, reseeded, old_idx):
     if reseeded:
         bits = ", ".join(f"T{m['id']} ← {old_idx}/T{oid}"
                          for m, oid in reseeded)
-        print(f"reseeded {len(reseeded)} later/shelved/recurring task(s): "
+        print(f"reseeded {len(reseeded)} shelved/recurring task(s): "
               f"{bits}")
 
 
@@ -10042,7 +10240,8 @@ def main():
     s = sub.add_parser("init", help="create or join a board")
     s.add_argument("--name",
                    help="your handle; omit to join an existing board as the "
-                        "handle your GitHub login (gh) is registered under")
+                        "handle your GitHub login (gh) is registered under; "
+                        "required to create a board")
     s.add_argument("--scope", default=argparse.SUPPRESS,
                    help="subdir (relative to repo root) whose board "
                    "to create/join; default: nearest board at/above cwd, else root")
@@ -10066,7 +10265,10 @@ def main():
                    help="same as plain whoami (kept for compatibility)")
     s.set_defaults(fn=cmd_whoami)
 
-    s = sub.add_parser("config", help="show or set board settings")
+    s = sub.add_parser("config", help="show or set board settings: "
+                       "parent_branch, iteration, iteration_name, "
+                       "iteration_started (integrator is read-only here: "
+                       "use integrator add/rm)")
     s.add_argument("key", nargs="?")
     s.add_argument("value", nargs="?")
     s.set_defaults(fn=cmd_config)
@@ -10076,7 +10278,8 @@ def main():
     m = isub.add_parser("list", help="who may land on this board")
     m = isub.add_parser("add", help="grant the integrator role")
     m.add_argument("name")
-    m = isub.add_parser("rm", help="revoke the integrator role")
+    m = isub.add_parser("rm", help="revoke the integrator role; refused "
+                                   "for the last one")
     m.add_argument("name")
     s.set_defaults(fn=cmd_integrator)
 
@@ -10084,7 +10287,8 @@ def main():
                        help="read, rename or prune the board's contributor "
                             "roster")
     csub = s.add_subparsers(dest="action", required=True)
-    m = csub.add_parser("list", help="handles with their GitHub logins")
+    m = csub.add_parser("list", help="handles with their GitHub logins, "
+                                     "integrators and (you) marked")
     m = csub.add_parser("rm", help="remove a handle (yourself, or any as "
                                    "integrator)")
     m.add_argument("name")
@@ -10138,13 +10342,16 @@ def main():
                    help="append a paragraph to the procedure (repeatable; "
                         "each one is its own paragraph, in order)")
     m = fsub.add_parser("rename", help="rename a flow; the old name is free "
-                                       "at once and kept as a matching hint")
+                                       "at once and kept as a matching hint; "
+                                       "other flows' uses follow")
     m.add_argument("name")
     m.add_argument("new_name")
     m = fsub.add_parser("reid", help="give a flow a fresh id when two boards "
                                      "minted the same one")
     m.add_argument("name")
-    m = fsub.add_parser("retire", help="mark a flow retired (kept for the record)")
+    m = fsub.add_parser("retire", help="mark a flow retired (kept for the "
+                                       "record; update --status active "
+                                       "revives it)")
     m.add_argument("name")
     s.set_defaults(fn=cmd_flow)
 
@@ -10166,11 +10373,14 @@ def main():
         for act in ("add", "update"):
             m = rsub.add_parser(act, help=f"{act} one {label}")
             m.add_argument("name", help="slug: lowercase letters, digits, "
-                                        "hyphens; not project, runner, any"
+                                        "hyphens; not project, runner, any, "
+                                        "inline"
                                         + ("" if act == "add" else
                                            " (a former name also matches)"))
             m.add_argument("--accessors", help="comma-separated contributor "
-                                               "handles who can reach it now")
+                                               "handles who can reach it now"
+                                               + ("" if act == "add" else
+                                                  " (replaces the list)"))
             if kind == "agent":
                 m.add_argument("--desc", help="one line: who it is")
             elif kind == "env":
@@ -10232,9 +10442,10 @@ def main():
     s.add_argument("--routine",
                    help="recurring tasks only: the routine whose trigger "
                         "starts it")
-    s.add_argument("--status",
-                   choices=["proposed", "backlog", "planned", "later"],
-                   default="backlog")
+    s.add_argument("--status", default="backlog",
+                   help=" | ".join(ADD_STATUSES))
+    s.add_argument("--reason", help="why it is set aside; required with "
+                                    "--status shelved")
     s.add_argument("--umbrella", help="comma-separated umbrella ids to file "
                                       "the new task under (adds it to their "
                                       "deps in the same board commit)")
@@ -10308,7 +10519,8 @@ def main():
                                   "timestamp with offset")
     s.set_defaults(fn=cmd_recur)
 
-    s = sub.add_parser("ran", help="close an ops task with its run record")
+    s = sub.add_parser("ran", help="close an ops task with its run record "
+                                   "(refused on a dev task)")
     s.add_argument("id", type=int)
     s.add_argument("--flow", help="flow name(s) followed, comma-separated; "
                                   "omit to keep the task's flow field, or "
@@ -10319,11 +10531,13 @@ def main():
                                   "YYYY-MM-DD or a timestamp with offset")
     s.add_argument("--rehearsal", action="store_true",
                    help="the task was a dry run of a flow: record "
-                        "Rehearsed (<date>): … so it never counts as a run")
+                        "Rehearsed (<date>): … so it never counts as a run "
+                        "(required on a rehearsal task)")
     s.set_defaults(fn=cmd_ran)
 
     s = sub.add_parser("pause",
-                       help="record where an ops run stopped; it stays doing")
+                       help="record where a run stopped; it stays doing (a "
+                            "dev task's branch is committed and pushed)")
     s.add_argument("id", type=int)
     s.add_argument("--at", help="where the run stopped: the flow's step "
                                 "(numbered, or its text), or what was last "
@@ -10383,7 +10597,7 @@ def main():
 
     s = sub.add_parser("board", help="print board view; regenerate TASKS.md")
     s.add_argument("--expand", action="store_true",
-                   help="also list done/later/shelved/not-planned (default "
+                   help="also list done/shelved/not-planned (default "
                         "folds them to counts)")
     s.add_argument("--by-area", action="store_true",
                    help="index by area instead of status (multi-area tasks "
@@ -10392,7 +10606,8 @@ def main():
                    help="interactive: r refresh, a toggle by-area, "
                         "e toggle expand, l latest-first list, c check mode, "
                         "s search, "
-                        "f flows pane, q (or Esc) back one level, q quits "
+                        "f flows pane, g registries pane, "
+                        "q (or Esc) back one level, q quits "
                         "from the plain board, "
                         "arrows scroll, space/b page, type id+Enter to "
                         "show a task (used by ./board)")
@@ -10405,10 +10620,7 @@ def main():
     s.set_defaults(fn=cmd_iteration)
 
     s = sub.add_parser("iteration-close", help="log + remove all tasks on the board")
-    g = s.add_mutually_exclusive_group()
-    g.add_argument("--force", action="store_true",
-                   help="close even with unfinished tasks")
-    g.add_argument("--carry", action="store_true",
+    s.add_argument("--carry", action="store_true",
                    help="carry unfinished tasks into the next iteration "
                         "with status, branch and PR intact (iteration-new "
                         "reseeds them)")
@@ -10449,7 +10661,8 @@ def main():
                    help="start on task ID's pushed review tip instead of "
                         "origin/<integration> (collisions exit 3, when this "
                         "task builds on that unmerged code); ship then bases "
-                        "the PR on that branch")
+                        "the PR on that branch. Refused when that task has "
+                        "no branch or it is already in integration")
     s.add_argument("--unattended", metavar="MODEL_ID",
                    help="unattended runs only: mark the task as worked by "
                         "this run until it leaves doing (others' claims "
@@ -10562,12 +10775,15 @@ def main():
     s.set_defaults(fn=cmd_preflight)
 
     s = sub.add_parser("land",
-                       help="integrator-only: merge task PR (merge commit), cleanup, mark done")
+                       help="integrator-only: merge task PR (merge commit), "
+                            "cleanup, mark done; refuses a draft")
     s.add_argument("id", type=int)
     s.set_defaults(fn=cmd_land)
 
     s = sub.add_parser("cleanup",
-                       help="idempotent: remove task worktree/local branch/remote-tracking")
+                       help="idempotent: remove task worktree/local branch/"
+                            "remote-tracking (branches only once the PR is "
+                            "merged)")
     s.add_argument("id", type=int)
     s.set_defaults(fn=cmd_cleanup)
 

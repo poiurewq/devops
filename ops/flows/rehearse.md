@@ -6,12 +6,12 @@ Covers `/ops rehearse [<flow-name>]` and "dry run <flow-name>". A rehearsal test
 
 - **No flow named** → ask which one; never guess. Offer the likely candidates: active flows created or edited recently (`created` in `TASKS flow list --json`; an edit made this session or one the user mentions) and active flows with no recorded runs yet (`TASKS flow runs <name>`).
 - Resolve the flow (`TASKS flow show <name>`, closest-name resolution) and follow its `uses` into the flows it composes — those are rehearsed with it.
-- An open task already on the board with `rehearsal: true` whose `flow` field (`<id> <name>`, in `TASKS list --type ops --json`) carries this flow's id is this rehearsal — match on the id, not the name in the title, which a rename leaves behind: resume it as `flows/run.md` section 2 resumes a run. Otherwise file one directly (`TASKS related` first, as `flows/add.md` does): `TASKS add --type ops --rehearsal --title "Rehearse <flow-name>" --desc "…"`, the description ending in its `Intent:` line — what the user wants this rehearsal to settle (`flows/add.md` *Intent*; ask only when the invocation leaves it unclear) — then `TASKS update <id> --flow <name[,name]>`. The flow ref is required — `ran --rehearsal` refuses a task without one. Never rehearse on the real task, and never on a recurring one.
+- An open task already on the board with `rehearsal: true` whose `flow` field (`<id> <name>`, in `TASKS list --type ops --json`) carries this flow's id is this rehearsal — match on the id, not the name in the title, which a rename leaves behind: resume it as `flows/run.md` section 2 resumes a run. Otherwise file one directly (`TASKS related` first, as `shared/flows/add.md` does): `TASKS add --type ops --rehearsal --title "Rehearse <flow-name>" --desc "…"`, the description ending in its `Intent:` line — what the user wants this rehearsal to settle (SKILL.md *Intent*) — then `TASKS update <id> --flow <name[,name]>`. The flow ref is required — `ran --rehearsal` refuses a task without one. Never rehearse on the real task, and never on a recurring one.
 - **The user is present.** A rehearsal is never driven unattended: its checkpoints and feedback need a person. Nobody there → say so and stop.
 
 ## 2. Preflight
 
-Do `flows/run.md` section 2 for this task (sequences, handoffs, inputs, mark started). Marking it started is refused while a real run of the flow is `doing`: surface that and stop until the run closes. Inputs are the values a real run would get, or stand-ins the user picks; record them as usual. Then sort every step that is outward or hard to undo (SKILL.md *Step marks*, *The floor*) into one of two kinds:
+Do `flows/run.md` section 2 for this task (sequences, handoffs, inputs, mark started). Marking it started is refused while a real run of the flow is `doing`: surface that and stop until the run closes. Inputs are the values a real run would get, or stand-ins the user picks; record them as usual. Then sort every step that is outward or hard to undo (`shared/flows/flows.md` *Step marks*, *The floor*) into one of two kinds:
 
 - **Dry** — skipped. When the run reaches it, say exactly what it would do (the payload, as at a checkpoint) and go on without doing it. The default.
 - **Wet-required** — a later step needs its real output (a confirmation number, an uploaded file's URL, a reply), so it has to happen for the rehearsal to reach that step. The user may keep one dry anyway; the steps that need its output then go dry with it.
@@ -26,7 +26,7 @@ Follow the flow as `flows/run.md` section 3 does, with the dry/wet sort applied.
 
 - **Deviations** — a step that did not work as written, an order that fought the work, a missing input, a step inserted.
 - **Disambiguations** — a step that could be read two ways, and which way was right; look-alike accounts, records or buttons and what tells them apart.
-- **Things to avoid** — for GUI steps, the committing buttons, look-alikes, landmarks and session quirks in `flows/gui.md` *What a rehearsal or first run notes*.
+- **Things to avoid** — for GUI steps, the committing buttons, look-alikes, landmarks and session quirks in `shared/flows/gui.md` *What a rehearsal or first run notes*.
 - **Drafts left behind** — every non-file thing left on an external platform: `TASKS note <id> --at "<step>" "draft: <platform> <where> — <one-line description>"`. Like a `file:` note (`flows/run.md` section 3), it is a cleanup item, not a deviation.
 
 A handed-off sequence gets the usual brief (`flows/run.md` *Handoffs*) plus which of its steps are dry, and asks the agent to report, beside the usual fields, every draft it left and what in the steps was unclear to it.
@@ -49,7 +49,7 @@ Anything that could not be removed is noted (`TASKS note <id> "left: <what, wher
 
 ## 6. Propose the flow edit
 
-Then, from the notes and the feedback, propose the edit the rehearsal earned — and it may be structural: reordered steps, a sequence split off, a `[confirm]` added before a step that turned out to commit, an input added or derived. Small fixes go in directly on the user's go-ahead (`TASKS flow update <name> --append "…"` or `--file`); anything larger goes through `flows/flow-create.md` *Editing*, in this session while the rehearsal is fresh. A rehearsal that found nothing proposes nothing — say so.
+Then, from the notes and the feedback, propose the edit the rehearsal earned — and it may be structural: reordered steps, a sequence split off, a `[confirm]` added before a step that turned out to commit, an input added or derived. Small fixes go in directly on the user's go-ahead (`TASKS flow update <name> --append "…"` or `--file`); anything larger goes through `shared/flows/flow-create.md` *Editing*, in this session while the rehearsal is fresh. A rehearsal that found nothing proposes nothing — say so.
 
-- **An inline environment** (SKILL.md *Sequences*) that the rehearsal walked: if its `Expects:` held up unchanged, its shape has settled — offer to register it (`flows/run.md` section 6, the inline-environment offer). If the rehearsal corrected it, fix the `Expects:` in the edit and leave registration for the next rehearsal or run.
+- **An inline environment** (`shared/flows/flows.md` *Sequences*) that the rehearsal walked: if its `Expects:` held up unchanged, its shape has settled — offer to register it (`flows/run.md` section 6, the inline-environment offer). If the rehearsal corrected it, fix the `Expects:` in the edit and leave registration for the next rehearsal or run.
 - **A significant edit** → suggest rehearsing again, in a new session (`/ops rehearse <name>`), so the next pass reads only the flow as written.

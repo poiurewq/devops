@@ -7,8 +7,22 @@ Covers bare `/ops` and `/ops help`. Do not improvise the welcome or the options 
 Classify with two script calls — `TASKS board` (board?) and `TASKS whoami` (identity?):
 
 - **Board exists** (and identity set): show what is live — runs in flight, anything due (`TASKS recur list --due`) — then **context options only** (below). Never the full options table, and no per-command commentary. Close with one line that `/ops help` has the complete menu.
-- **No board** — assume the user knows nothing beyond the name. Read `flows/init.md` and deliver its step-0 welcome **verbatim** (it exists so every agent gives the same first impression — don't improvise your own), then run the init flow if they accept.
-- **Board exists but no identity** (new contributor, or a board `/dev` already set up here): skip the sales pitch — one line ("this project keeps its work on a shared board; let's get you on it"), then the init flow's identity/join steps.
+- **No board** — assume the user knows nothing beyond the name. Deliver the *Welcome* below **verbatim** (it exists so every agent gives the same first impression — don't improvise your own; only trim a section if the user has made clear they already know it), then run `shared/flows/init.md` if they accept. If they decline, point at `/ops help` for later and stop — don't set anything up unasked.
+- **Board exists but no identity** (new contributor, or a board `/dev` already set up here): skip the sales pitch — one line ("this project keeps its work on a shared board; let's get you on it"), then `shared/flows/init.md`'s identity/join steps.
+
+### Welcome (no board)
+
+---
+**Welcome to ops** — a shared board for the work that isn't code, plus a playbook of the procedures you run over and over.
+
+**What it is.** A **flow** is a written procedure: how you close the month, onboard a client, publish an issue. A **run** is one execution of it, recorded on the task it was run for — inputs it was given, anything that went differently. Both live in small files inside your project, synced through git, so every contributor on any machine sees the same board and the same playbook.
+
+**How it works.** You file what needs doing. When you run a task, I find the flow that fits, ask for anything it needs, and walk it with you — checking in where the flow says to, and once more at the end before anything is marked done — unless the run went exactly to plan and its result shows it. No flow yet? We do it a chunk at a time, I write down what we actually did, and you can turn that into a flow at the end.
+
+**The philosophy.** The playbook is written by using it. Procedures start rough and get sharper every run, and you approve every step that matters. Nothing is marked done because the steps ran out — only because the aim was met: you say so, or a run that went exactly as the flow says shows it plainly, and I tell you it closed.
+
+Want me to set it up here? It takes about a minute — a name for attribution, and a GitHub remote and sign-in if they aren't set up yet.
+---
 
 ### Context options (bare only; after identity)
 

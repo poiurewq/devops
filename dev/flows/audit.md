@@ -28,7 +28,7 @@ Follow what looks wrong rather than sweeping evenly. Depth beats coverage: three
 Per finding:
 
 1. Draft a title and a 1–3 sentence description: what is wrong, where, and why it matters. The evidence, not the fix — the fix is the implementer's call. Do not write constraints or non-goals the code does not force (SKILL.md *Do not manufacture specifications*).
-2. `TASKS related "<title + description>"` — already filed, or an umbrella already covers the cluster → amend or attach rather than duplicate (`flows/add.md` step 2).
+2. `TASKS related "<title + description>"` — already filed, or an umbrella already covers the cluster → amend or attach rather than duplicate (`shared/flows/add.md` *Filing* step 2).
 3. `TASKS add --title "..." --status proposed [--area <m>] [--desc "..."]`.
 
 Then report **one line per filed task**: id, title, why. No findings document, no severity table — the tasks are the output. Filed nothing? One line saying so.
@@ -48,6 +48,6 @@ TASKS add --title "Recurring audit: <scope>" --kind recurring \
           --cadence <N><unit> --desc "<scope + emphasis>"
 ```
 
-Whole-board and per-area audits are separate recurring tasks; a board may hold several. Declined → drop it, and do not re-offer on every pass. Filed → offer to start it on its own (`flows/schedule.md` *The offer*).
+Whole-board and per-area audits are separate recurring tasks; a board may hold several. Declined → drop it, and do not re-offer on every pass. Filed → offer to start it on its own (`shared/flows/schedule.md` *The offer*).
 
 Rescheduling runs through this same command: when the user asks to change the schedule, `TASKS update <id> --cadence <N><unit>` — the due date re-derives immediately. `--status not-planned` stops one for good.

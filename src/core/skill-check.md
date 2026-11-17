@@ -1,0 +1,1 @@
+It runs at most every 24h and stays silent when the local version is current or the network fails; a missing local `VERSION` counts as `0.0.0`. Show any line it prints (one quiet line) and continue the command — never block board work on it. With auto-update on, the check may apply a pull and print one success/failure line.

@@ -10,13 +10,13 @@ This is not a codebase scan and not `/dev review` (inbox of pending judgments). 
 
 Read the board (`TASKS board`, `--expand` if needed), umbrella bodies, `TASKS area list`. `log.md` only if the current board is thin. If they named a focus, start there.
 
-Do not park work as `later` or pull later work into the current cut. That is an operational team call — the iteration name does not tell you what belongs now.
+Do not shelve work for a later iteration or pull shelved work into the current cut. That is an operational team call — the iteration name does not tell you what belongs now.
 
 Follow attention. Do not open with a tour of axes. Open with whatever looks unstable — a task that only makes sense if an unstated choice is true, a missing or fake dep, two tasks that contradict, an umbrella whose children don't add up to its goal, a stale area name.
 
 Topics the sitting may notice (not a checklist, not sibling verbs): assumptions, deps, umbrellas, stale areas.
 
-**Never propose closing an umbrella** (SKILL.md *Umbrella close*). All children `done` is not the goal met — that judgment is a separate pass, and collapsing it into a board edit is what the umbrella exists to prevent. When one reads complete, say the goal check is **due** and worth prioritizing over new work, and point at `/dev <id>`; the pass runs in-session with no branch, PR, or review. If the sitting already sees a gap between the children and the goal, name it — that is what the pass will have to resolve, not a reason to skip it.
+**Never propose closing an umbrella** (SKILL.md *Umbrella close*) — when one looks complete, say the goal check is due and point at `/dev <id>`.
 
 Speak in their frame. Same posture as review: propose concrete board edits (retitle, split, merge, add a dep, `needs: decision`, not-planned, area rename). They say apply, or keep talking. Mutations only on explicit go-ahead, via `TASKS`. An unattended run never runs this.
 
