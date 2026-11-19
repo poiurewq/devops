@@ -73,13 +73,13 @@ install.py         # clone once, symlink each skill into your agent skill dirs
 VERSION            # one semver for the package (dev and ops ship together)
 lib/tasks.py       # board state API (shared)
 lib/skill.py       # status / update / feedback (shared)
-shared/flows/      # flows both skills follow (init, add, absorb, plan, shape, iteration, status, decide, verify, flows, flow-create, gui, schedule, wake, unattended, skill, tour)
+shared/routes/      # routes both skills follow (init, add, absorb, plan, shape, iteration, status, decide, verify, flows, flow-create, gui, schedule, wake, unattended, skill, tour)
 src/               # source of both SKILL.md files: python3 src/build.py rebuilds them
 dev/SKILL.md       # /dev agent-facing router (built from src/; edit there)
-dev/flows/         # /dev multi-step procedures
+dev/routes/         # /dev multi-step procedures
 dev/scripts/       # shims that exec dev/lib/ (resolve symlinks first)
 dev/lib, dev/VERSION, dev/shared  # links to ../lib, ../VERSION, ../shared; real files in a copy
 ops/               # /ops, same shape
 ```
 
-Each skill directory (`dev/`, `ops/`) is what gets linked into an agent's skills root, or copied by `--copy-to`. Its shims and flows only ever reach files inside the skill directory (`<skill>/lib/`, `<skill>/VERSION`, `<skill>/shared/`), which is what lets a copy stand alone.
+Each skill directory (`dev/`, `ops/`) is what gets linked into an agent's skills root, or copied by `--copy-to`. Its shims and routes only ever reach files inside the skill directory (`<skill>/lib/`, `<skill>/VERSION`, `<skill>/shared/`), which is what lets a copy stand alone.

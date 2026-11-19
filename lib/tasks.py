@@ -49,9 +49,10 @@ RETIRED_LATER = "later"
 LATER_RETIRED_ERR = ('error: the later status is retired; set the task aside '
                      'with --status shelved --reason "<why>"')
 # Hottest-first list/index. Watch and static `TASKS board` / TASKS.md share
-# this; STATUSES stays the pipeline (validation, rollup counts).
+# this; STATUSES stays the pipeline (validation, rollup counts). shelved
+# sits above done (T99) so set-aside work stays findable under --expand.
 _WATCH_HEAD = ("review", "draft", "doing", "planned", "proposed",
-               "backlog")
+               "backlog", "shelved")
 WATCH_STATUSES = [s for s in _WATCH_HEAD if s in STATUSES] + [
     s for s in STATUSES if s not in _WATCH_HEAD]
 # Don't block an iteration close. shelved = set aside: kept with its reason,
@@ -3310,8 +3311,8 @@ IN_FLIGHT = ("doing",) + OPEN_PR
 def areas_overlap(a, b):
     """Segment-prefix overlap (SKILL Area stewardship).
 
-    Split on `/`. `flows` overlaps `flows/implement`; `flows/implement` does
-    not overlap `flows/review`. String prefix is the trap (`flow` vs `flows`).
+    Split on `/`. `routes` overlaps `routes/implement`; `routes/implement` does
+    not overlap `routes/review`. String prefix is the trap (`route` vs `routes`).
     Reserved `all` overlaps every name.
     """
     if a == "all" or b == "all":
@@ -3922,7 +3923,7 @@ def ensure_task_branch(root, branch, start_ref, resume=False):
     An existing branch is reused only when start_ref is already an ancestor
     of its tip (at or ahead of the intended base). An empty leftover (the
     branch is a strict ancestor of start_ref) is fast-forwarded. A leftover
-    that has diverged is an error — recovery is in flows/implement.md
+    that has diverged is an error — recovery is in routes/implement.md
     (show unique commits and leftover dirty status, ask keep vs throw;
     do not write branch: first; keep: commit/stash if dirty; refuse
     throw-away while dirty; throw-away: TASKS pr <id> close then delete).
@@ -3958,7 +3959,7 @@ def ensure_task_branch(root, branch, start_ref, resume=False):
     sys.exit(f"error: task branch '{branch}' has diverged from {start_ref} "
              f"({ahead} unique, {behind} behind); show unique commits and "
              f"leftover dirty status and ask keep vs throw before writing "
-             f"branch: (flows/implement.md)")
+             f"branch: (routes/implement.md)")
 
 
 def verified_claim_base(root, branch, start_ref, resume=False):
@@ -5780,7 +5781,7 @@ def resolve_stack_start(root, bw, scope, tid, parent_id, integration):
     """Start ref for `claim --stack-on`: another task's pushed review tip.
 
     Offered when `collisions` exits 3 and the new task genuinely builds on
-    that unmerged code (flows/implement.md); when it does not, claim
+    that unmerged code (routes/implement.md); when it does not, claim
     normally and let the two PRs merge independently. The ref is
     origin/<parent branch> — the same tip GitHub will use as the child
     PR's base, so the child's diff is exactly its own commits. Refuses a
@@ -8526,7 +8527,7 @@ def cmd_collisions(args):
     Exit 3 when every blocker already has a PR open (``draft`` or
     ``review``, any assignee): there is a pushed tip to stack on, so
     implement offers proceed / stack / wait rather than aborting
-    (flows/implement.md). Draft counts because a slow draft must not park
+    (routes/implement.md). Draft counts because a slow draft must not park
     the areas it touches — its PR is out, whether or not its author has
     asked for review yet. A single ``doing`` blocker has nothing pushed to
     build on and is still moving — that stays exit 2, and an unattended run
@@ -8564,7 +8565,7 @@ def cmd_collisions(args):
             f"T{o['id']} [{o['status']}] ({o.get('assignee') or 'unassigned'})"
             for o in all_hits)
         print(f"pr-open: {bits} — proceed, stack, or wait "
-              f"(flows/implement.md)")
+              f"(routes/implement.md)")
         sys.exit(3)
     sys.exit(2)
 
@@ -8865,7 +8866,9 @@ def _board_by_area(bw, scope, tasks, expand=False, color=False,
     if untagged:
         rows.append(("(untagged)", ids(untagged)))
     if not expand:
-        for status in TERMINAL:
+        # Same order as the status board's folded lines (T99).
+        for status in [s for s in status_order or WATCH_STATUSES
+                       if s in TERMINAL]:
             col = [t for t in tasks if t["status"] == status]
             if col:
                 sgr = _STATUS_COLOR.get(status) if color else None
