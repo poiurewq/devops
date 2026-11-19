@@ -1,6 +1,6 @@
 ---
 name: ops
-description: Playbook of flows plus the runs that follow them, on a shared task board inside the user's repo. Use for /ops and subcommands (init, tour, add, run, next, wake, schedule, rehearse, flow list/show/create/edit/retire, agent, env, status, board, show, change, drop, delete, meta), and whenever the user asks to run a procedure or checklist, follow or write a flow, record what a run did, dry-run (rehearse) a flow, or work a task that is not code.
+description: Playbook of flows plus the runs that follow them, on a shared task board inside the user's repo. Use for /ops and subcommands (init, tour, add, run, next, wake, schedule, rehearse, flow list/show/create/edit/review/retire, agent, env, status, board, show, change, drop, delete, meta), and whenever the user asks to run a procedure or checklist, follow or write a flow, record what a run did, dry-run (rehearse) a flow, or work a task that is not code.
 ---
 
 # ops — procedures that run, recorded where they ran

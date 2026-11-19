@@ -1,6 +1,6 @@
 ---
 name: dev
-description: Multi-contributor task board and dev workflow for a repo, or per-subdir boards in a monorepo. Use for /dev and subcommands (init, tour, add, plan, board, kanban, status, pick, implement, review, decide, audit, next, wake, schedule, absorb, flow list/show/create/edit/retire, agent, env, routine, change, delete, show, config, area, meta, iteration, update), and whenever the user asks to add/see/assign/implement/review tasks on the repo's task board, or asks "what should I work on".
+description: Multi-contributor task board and dev workflow for a repo, or per-subdir boards in a monorepo. Use for /dev and subcommands (init, tour, add, plan, board, kanban, status, pick, implement, review, decide, audit, next, wake, schedule, absorb, flow list/show/create/edit/review/retire, agent, env, routine, change, delete, show, config, area, meta, iteration, update), and whenever the user asks to add/see/assign/implement/review tasks on the repo's task board, or asks "what should I work on".
 ---
 
 # dev — coordinated development for humans and agents

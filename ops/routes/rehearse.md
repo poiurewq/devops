@@ -49,7 +49,7 @@ Anything that could not be removed is noted (`TASKS note <id> "left: <what, wher
 
 ## 6. Propose the flow edit
 
-Then, from the notes and the feedback, propose the edit the rehearsal earned — and it may be structural: reordered steps, a sequence split off, a `[confirm]` added before a step that turned out to commit, an input added or derived. Small fixes go in directly on the user's go-ahead (`TASKS flow update <name> --append "…"` or `--file`); anything larger goes through `shared/routes/flow-create.md` *Editing*, in this session while the rehearsal is fresh. A rehearsal that found nothing proposes nothing — say so.
+Then, from the notes and the feedback, propose the edit the rehearsal earned — and it may be structural: reordered steps, a sequence split off, a `[confirm]` added before a step that turned out to commit, an input added or derived. Small fixes go in directly on the user's go-ahead (`TASKS flow update <name> --append "…"` or `--file`), reviewed as `shared/routes/flow-create.md` *Reviewing a flow write* says; anything larger goes through `shared/routes/flow-create.md` *Editing*, in this session while the rehearsal is fresh. A rehearsal that found nothing proposes nothing — say so.
 
 - **An inline environment** (`shared/routes/flows.md` *Sequences*) that the rehearsal walked: if its `Expects:` held up unchanged, its shape has settled — offer to register it (`routes/run.md` section 6, the inline-environment offer). If the rehearsal corrected it, fix the `Expects:` in the edit and leave registration for the next rehearsal or run.
 - **A significant edit** → suggest rehearsing again, in a new session (`/ops rehearse <name>`), so the next pass reads only the flow as written.

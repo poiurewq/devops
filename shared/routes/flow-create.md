@@ -27,7 +27,7 @@ Do not write the whole thing and ask for approval. Go a layer at a time, showing
 1. **Scope.** What this flow covers, when someone would reach for it, what it deliberately leaves out, and whether it should follow existing flows (`TASKS flow list` first — a new flow that overlaps an old one is usually an edit to the old one). Get this agreed before writing steps.
 2. **Outline.** The step list, numbered, one line each, tagged `[agent]`, `[user]`, `[confirm]`, or `[external]`, with the checkpoints where they fall and the inputs each step needs, grouped into sequences if any steps run elsewhere or by someone else. This is where structure is cheap to change, so push on it: wrong order, a missing branch, a checkpoint in a useless place.
 3. **Detail.** Flesh each step into instructions someone could follow. Name systems, fields, and formats concretely. Keep the marks and checkpoints from the outline.
-4. **Commit.** Only once they say it is right.
+4. **Commit.** Only once they say it is right, and after the review (*Reviewing a flow write*).
 
 Re-run any round as often as it takes; stop as soon as the user is satisfied rather than working through all four out of habit.
 
@@ -44,7 +44,7 @@ Re-run any round as often as it takes; stop as soon as the user is satisfied rat
 
 Name it as a slug: lowercase, hyphens, no numbers-as-names (`month-end-close`, `onboard-client`). Short and about the work, not the tool. Check `TASKS flow list --all` for something too close — a name that is one word off another is how the wrong flow gets picked later.
 
-Write the body to a temporary file and pass it, rather than trying to fit a procedure on the command line:
+Write the body to a temporary file and pass it, rather than trying to fit a procedure on the command line (a reviewed write is made by its reviewer, from the draft — *Reviewing a flow write*):
 
 ```
 TASKS flow create <name> --desc "<one line>" --inputs "<a, b (hint)>" [--uses "<flow, flow>"] --file <path>
@@ -56,9 +56,21 @@ Then show the user the flow as recorded (`TASKS flow show <name>`) and delete th
 
 ## Editing (`/<skill> flow edit <name>`)
 
-- **A change named in the invocation** ("`/<skill> flow edit month-end-close drop step 3`", "add an input for the currency") is surgical: read the flow, make exactly that change, show the result. No rounds, no rewrite of prose the user did not ask about. `TASKS flow update <name> --file <path>` for a body change, `--append` to add a paragraph, `--desc` / `--inputs` / `--uses` for the frontmatter.
+- **A change named in the invocation** ("`/<skill> flow edit month-end-close drop step 3`", "add an input for the currency") is surgical: read the flow, make exactly that change, review it (*Reviewing a flow write*), show the result. No rounds, no rewrite of prose the user did not ask about. `TASKS flow update <name> --file <path>` for a body change, `--append` to add a paragraph, `--desc` / `--inputs` / `--uses` for the frontmatter.
 - **No change named** → the rounds above, starting from the flow as it stands. Scope first: what is wrong with it today.
 - **After a significant edit** — steps reordered, added or removed, a sequence or checkpoint moved, anything beyond a wording fix — suggest rehearsing again in a new session (`/ops rehearse <name>`).
 - **Untagged or prose-marked steps** found on any edit: propose the tags alongside the change asked for (one line, not a rewrite) — an outward or hard-to-undo step gets a `[confirm]` step before it, or becomes `[user]`. Flows written before step marks existed get converted this way, a touch at a time.
 - **Renaming** is `TASKS flow rename <old> <new>` — the old name is free again immediately and past runs still resolve through the flow's id, so renaming is cheap. Say that, so nobody keeps a bad name out of fear.
 - **Retiring** is for a procedure nobody should follow any more: `TASKS flow retire <name>`, kept for the record because past runs point at it. Never delete one. A flow that is merely out of date gets edited; retire is for one whose reason to exist is gone.
+
+## Reviewing a flow write
+
+Every write that changes a flow — a new one, an edit, a post-run tweak, a rehearsal fix, the fix a departure earned — is checked against its intent before it is written. Every write takes steps 1 and 2; step 2 then sends it down one of two paths: your own pass, or a reviewer (steps 3–5).
+
+**Roles.** The agent writing a flow is the **editor**. On the reviewer path it hands the write to the **reviewer**, who reviews the draft, applies the agreed fixes and writes the flow (`shared/routes/flow-review.md`, which only the reviewer reads); from the spawn on, the editor only relays. A review the user runs in a new session works the same way, with nobody relaying.
+
+1. **Confirm the intent** in one line: what this write is for, in the user's terms (`Intent: step 4 points at the new Reports menu; nothing else changes`), and wait for their yes or correction. A proposed fix that already says what it is for (a tweak, a rehearsal fix) is confirmed by the go-ahead on it, and a new flow's intent is the scope the user agreed in round 1 — no second question for either.
+2. **Judge the impact.** Use a reviewer when a miss would be costly: the write creates a flow, touches an outward or hard-to-undo step or the `[confirm]` before it, reorders steps or sequences, or changes a flow that runs unattended or on a routine (`TASKS list --flow <name>`, `TASKS routine list`) or that another flow `uses`. Anything smaller — a wording fix, a moved landmark, a `Never …` line — gets your own pass instead: re-read the change against the intent, and the steps around it, then write it as usual. That is the whole check: no draft, no reviewer, so steps 3–5 do not apply. Say in one line which path you chose and why; the user may ask for a reviewer anyway, which puts the write on steps 3–5.
+3. **Draft** (reviewer path only). Save the whole proposed flow to `<scope>/.dev/flow-drafts/<name>.md` (gitignored, this checkout only): frontmatter with `intent` (the confirmed line), `description`, `inputs` and `uses`, then the full body as it would be written — never only the change.
+4. **Spawn the reviewer** as a fresh subagent with exactly `/<skill> flow review <name>`, plus one line: *ask any question in your reply, not with a question tool*. Nothing about the edit: the draft carries the intent, and your account of the change is the context the review exists to go without. Run it on your model tier, set in the spawn call's model option rather than the prompt unless the host spawns on its own model. No subagents on this host → you cannot spawn a fresh copy of yourself, so ask the user to run `/<skill> flow review <name>` in a new session in this same checkout, where it reviews and writes the flow; this session is done with the write.
+5. **Relay.** Pass the reviewer's findings to the user with their numbers and proposal line, and the user's reply back to the reviewer as given — the way the dev lead relays (`../dev/routes/lead.md` *Answering as the user*, read from this skill's directory). You never touch the draft after the spawn, and never write the flow: the reviewer does both.

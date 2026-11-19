@@ -35,7 +35,7 @@ A first pass through a GUI sequence is where its rough edges are cheapest to cat
 
 ## After the run
 
-Alongside the fix to the flow (`shared/routes/flows.md` *Departures*), two offers specific to GUI steps, on the user's go-ahead:
+Alongside the fix to the flow (`shared/routes/flows.md` *Departures*), two offers specific to GUI steps, on the user's go-ahead, each reviewed as `shared/routes/flow-create.md` *Reviewing a flow write* says:
 
 - **An API route was found.** If the run found that a GUI step's job can be done through an API or CLI the environment can reach, offer to swap the step for it — repeatable and checkable beats driving a screen when both are equally reliable. That is a structural edit of the flow: `/<skill> flow edit <name>`.
 - **A landmark moved.** For each `landmark moved` note, offer the one-line fix to the step's target (`TASKS flow update <name> --file <path>`).

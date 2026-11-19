@@ -73,7 +73,7 @@ install.py         # clone once, symlink each skill into your agent skill dirs
 VERSION            # one semver for the package (dev and ops ship together)
 lib/tasks.py       # board state API (shared)
 lib/skill.py       # status / update / feedback (shared)
-shared/routes/      # routes both skills follow (init, add, absorb, plan, shape, iteration, status, decide, verify, flows, flow-create, gui, schedule, wake, unattended, skill, tour)
+shared/routes/      # routes both skills follow (init, add, absorb, plan, shape, iteration, status, decide, verify, flows, flow-create, flow-review, gui, schedule, wake, unattended, skill, tour)
 src/               # source of both SKILL.md files: python3 src/build.py rebuilds them
 dev/SKILL.md       # /dev agent-facing router (built from src/; edit there)
 dev/routes/         # /dev multi-step procedures
