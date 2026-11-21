@@ -35,6 +35,8 @@ Commands:
   update  Link a missing sibling skill, then ignore throttle; git pull
           --ff-only origin main (requires clone).
   auto    Show or set auto_update (on|off|true|false).
+  uninstall  Run the clone's installer with --uninstall --yes (the links
+             into the clone, then the clone); refused on a copy.
   feedback  Open an issue on the public repo (maintainer inbox) via gh;
             REST when GraphQL is blocked, else a prefilled link to file by hand.
 """
@@ -607,6 +609,28 @@ def cmd_status() -> int:
     return 0
 
 
+def cmd_uninstall(remove_config: bool) -> int:
+    """Hand off to the clone's own installer, which owns every uninstall
+    rule; the agent has already asked the user. A copy has no installer
+    and nothing outside its folder, so it is deleted by hand."""
+    rec = build_record()
+    if rec is not None:
+        print("error: this is a self-contained copy (--copy-to); uninstall it "
+              f"by deleting the copies built in {rec.get('output') or 'its folder'}",
+              file=sys.stderr)
+        return 1
+    installer = CLONE_DIR / "install.py"
+    if not installer.is_file():
+        print(f"error: no installer at {installer}; this install was not made "
+              "by install.py, so remove its skill folders by hand",
+              file=sys.stderr)
+        return 1
+    argv = [sys.executable, str(installer), "--uninstall", "--yes"]
+    if remove_config:
+        argv.append("--remove-config")
+    return subprocess.call(argv)
+
+
 def install_kind() -> str:
     """How this skill copy was installed — coarse label for issue triage.
 
@@ -728,6 +752,11 @@ def main(argv: list[str] | None = None) -> int:
         help="on|off (omit to show current)",
     )
 
+    u = sub.add_parser("uninstall",
+                       help="remove the skill links and the clone")
+    u.add_argument("--remove-config", action="store_true",
+                   help="also delete the prefs (kept otherwise)")
+
     r = sub.add_parser("feedback", help=f"open an issue on {REPO_SLUG}")
     r.add_argument("--title", required=True, help="issue title")
     r.add_argument("--body", help="issue body (context is appended)")
@@ -741,6 +770,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_update()
     if args.cmd == "auto":
         return cmd_auto(getattr(args, "value", None))
+    if args.cmd == "uninstall":
+        return cmd_uninstall(args.remove_config)
     if args.cmd == "feedback":
         return cmd_feedback(args.title, getattr(args, "body", None))
     p.error(f"unknown command: {args.cmd}")

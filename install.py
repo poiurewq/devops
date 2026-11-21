@@ -39,6 +39,11 @@ dir carries its own copies and there is no top-level lib/ or shared/, so a
 Windows checkout needs no symlink support. Everything here accepts either
 layout.
 
+--uninstall reverses the linked install: every link in a skills root that
+points into the package, then the clone (only a clean clone of the
+canonical repo; a --source tree is never deleted), then, on consent, the
+prefs. Copies and the boards in the user's repos are never touched.
+
 CANONICAL_REPO is duplicated in lib/skill.py, which owns the update path.
 This file must stay standalone: it runs before any clone exists, so it
 cannot import from lib/.
@@ -47,6 +52,7 @@ cannot import from lib/.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import shutil
 import subprocess
@@ -180,6 +186,8 @@ def clone_has_unsaved_work(path: Path) -> str:
         return "uncommitted changes"
     if git_out(["log", "--branches", "--not", "--remotes", "--oneline"], path):
         return "commits not pushed to any remote"
+    if git_out(["stash", "list"], path):
+        return "stashed changes"
     return ""
 
 
@@ -785,6 +793,165 @@ def warn_tzdata() -> None:
         print(warning, file=sys.stderr)
 
 
+# --- uninstall -------------------------------------------------------------
+
+def config_files() -> list[Path]:
+    """The user's prefs files that exist: the current path and the one read
+    as a fallback before dev and ops shared a package. Both are duplicated
+    from lib/skill.py (CONFIG_PATH, LEGACY_CONFIG_PATH)."""
+    config = Path.home() / ".config"
+    return [p for p in (config / "devops-skill" / "config.yml",
+                        config / "dev-skill" / "config.yml") if p.is_file()]
+
+
+def path_is_inside(path: Path, parent: Path) -> bool:
+    key, parent_key = path_key(path), path_key(parent)
+    return key == parent_key or key.startswith(parent_key + os.sep)
+
+
+def links_into(roots: list[Path], pkg: Path) -> list[Path]:
+    """Every entry in roots that is a link into pkg — whatever its name, and
+    even when pkg is already gone (a broken link still names its target).
+    Anything else in a root, a self-contained copy included, is not ours."""
+    found = []
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for entry in sorted(root.iterdir()):
+            if is_link(entry) and path_is_inside(entry, pkg):
+                found.append(entry)
+    return found
+
+
+def clone_verdict(pkg: Path, is_source: bool) -> str:
+    """"" when pkg may be deleted, else why it stays. Only a clean clone of
+    the canonical repo is reproducible by a re-install; a --source tree, a
+    tree nested in another repo or a fork is someone's own work."""
+    if is_source:
+        return "a --source tree; never deleted"
+    if git_root(pkg) is None:
+        return "not a git clone of its own; delete it by hand if you mean to"
+    slug = clone_slug(pkg)
+    if slug.lower() != CANONICAL_SLUG.lower():
+        return f"a clone of {slug or 'no GitHub remote'}, not {CANONICAL_SLUG}"
+    return clone_has_unsaved_work(pkg)
+
+
+def remove_tree(path: Path) -> None:
+    """rmtree that also clears read-only files, which git leaves under
+    .git/objects on Windows and which os.remove there refuses."""
+    import stat
+
+    def retry(func, target, _exc):
+        os.chmod(target, stat.S_IWRITE)
+        func(target)
+
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=retry)
+    else:
+        shutil.rmtree(path, onerror=retry)
+
+
+def uninstall(args: argparse.Namespace) -> int:
+    """Remove the linked install: the links in every skills root that point
+    into the package, then the clone, then (on consent) the prefs. Boards
+    live in the user's repos and are never touched."""
+    if args.source and args.home:
+        die("--source and --home name the package two ways; pass one")
+    is_source = bool(args.source)
+    if args.source:
+        pkg = Path(args.source).expanduser().resolve()
+    elif args.home:
+        pkg = Path(args.home).expanduser().resolve()
+    else:
+        pkg = here_package() or default_home()
+    if args.root:
+        if any(not raw.strip() for raw in args.root):
+            die("--root was given an empty path")
+        roots = [Path(raw).expanduser().resolve() for raw in args.root]
+    else:
+        roots, _unused = discover_roots()
+    links = links_into(roots, pkg)
+    keep = clone_verdict(pkg, is_source) if pkg.exists() else ""
+    delete_pkg = pkg.exists() and not keep
+    configs = config_files()
+    if not links and not pkg.exists() and not configs:
+        print(f"nothing to uninstall: no clone at {tilde(pkg)} and no links "
+              "into it.")
+        return 0
+
+    print("\nuninstall plan:")
+    for link in links:
+        print(f"  unlink   {tilde(link)}")
+    if delete_pkg:
+        print(f"  delete   {tilde(pkg)}  (the clone)")
+    elif pkg.exists():
+        print(f"  keep     {tilde(pkg)}  ({keep})")
+    interactive = tty_stream() is not None and not args.yes
+    for path in configs:
+        how = ("delete" if args.remove_config else "ask" if interactive
+               else "keep")
+        print(f"  {how:<8} {tilde(path)}  (your prefs)")
+    print("never touched: self-contained copies (--copy-to), and the boards "
+          "in your repos (.tasks/, .flows/, .dev/, ./board)")
+
+    remove_config = args.remove_config
+    if args.dry_run:
+        print("\n(dry run: nothing changed)")
+        return 0
+    if interactive:
+        if not confirm("\nUninstall?"):
+            print("nothing changed.")
+            return 1
+        if configs and not remove_config:
+            remove_config = confirm("Remove your prefs too?")
+    elif not args.yes:
+        die("nothing changed: uninstalling needs consent; re-run from a "
+            "terminal, or pass --yes")
+
+    failed = unlinked = 0
+    for link in links:
+        try:
+            remove_link(link)
+            unlinked += 1
+        except OSError as e:
+            print(f"error: {tilde(link)}: {e}", file=sys.stderr)
+            failed += 1
+    if delete_pkg:
+        if path_is_inside(Path.cwd(), pkg):
+            # Windows will not delete a directory some process sits in.
+            os.chdir(pkg.parent)
+        try:
+            remove_tree(pkg)
+        except OSError as e:
+            print(f"error: could not delete {tilde(pkg)}: {e}",
+                  file=sys.stderr)
+            failed += 1
+    if remove_config:
+        for path in configs:
+            try:
+                path.unlink()
+            except OSError as e:
+                print(f"error: could not delete {tilde(path)}: {e}",
+                      file=sys.stderr)
+                failed += 1
+                continue
+            with contextlib.suppress(OSError):
+                path.parent.rmdir()  # only when nothing else is in it
+
+    gone = delete_pkg and not pkg.exists()
+    print(f"\nremoved {unlinked} skill link(s)"
+          + (f" and the clone at {tilde(pkg)}" if gone else ""))
+    sys.stdout.flush()
+    if pkg.exists() and keep:
+        print(f"kept {tilde(pkg)}: {keep}", file=sys.stderr)
+    if configs and not remove_config:
+        print(f"kept your prefs: {', '.join(tilde(p) for p in configs)}")
+    print("your boards are untouched; a repo's ./board viewer stops working "
+          "and can be deleted.")
+    return 1 if failed or (pkg.exists() and keep) else 0
+
+
 # --- main ------------------------------------------------------------------
 
 def cancel_note() -> str:
@@ -844,7 +1011,20 @@ def install(argv: list[str] | None = None) -> int:
     p.add_argument("--copy-to", metavar="DIR",
                    help="instead of linking, build self-contained skill "
                         "copies in DIR/<skill>/")
+    p.add_argument("--uninstall", action="store_true",
+                   help="remove the skill links into the clone, then the "
+                        "clone (--home / --source say which package)")
+    p.add_argument("--remove-config", action="store_true",
+                   help="with --uninstall: also delete your prefs "
+                        "(otherwise asked, or kept under --yes)")
     args = p.parse_args(argv)
+    if args.remove_config and not args.uninstall:
+        die("--remove-config applies only with --uninstall")
+    if args.uninstall:
+        if args.copy_to is not None:
+            die("--uninstall and --copy-to do opposite things; pass one. "
+                "A self-contained copy is removed by deleting its folder")
+        return uninstall(args)
     if args.copy_to is not None:
         if not args.copy_to.strip():
             die("--copy-to was given an empty path")

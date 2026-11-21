@@ -211,6 +211,7 @@ Caveats: for a flag not spelled in this synopsis or the route you are following,
 | `/dev skill update` | Read `shared/routes/skill.md` (`SKILL_CMD update`). |
 | `/dev skill update auto on/off` | Read `shared/routes/skill.md` (`SKILL_CMD auto on/off`). |
 | `/dev skill feedback <text>` | Read `shared/routes/skill.md`. |
+| `/dev skill uninstall` | Read `shared/routes/skill.md` (confirm, then `SKILL_CMD uninstall`, the session's last action). |
 
 Given a description instead of an id, run `TASKS list`, match, confirm if not obvious. **`/dev implement` only:** if nothing matches, run the `/dev add` path first (`shared/routes/add.md`), then continue implement on the new task(s) — details in `routes/implement.md`. Other id-or-desc commands (`pick`, `show`, …) still require a match.
 

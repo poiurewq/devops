@@ -51,6 +51,16 @@ curl -fsSL https://raw.githubusercontent.com/poiurewq/devops/main/install.py | p
 
 Each skill becomes `~/devops-skills/<skill>/` with its own `lib/` and `VERSION`, so you can move, copy or upload that folder as-is. The copies come from a temporary clone, so your linked install is not touched. A copy cannot update itself: `/dev skill update` on one prints the exact command that rebuilds it, then you put the new copy wherever the old one went. A rebuild replaces only a previous copy (recognised by the `BUILD` file each one carries), and the normal install never replaces a copy either, even with `--yes`. `--dry-run` works as above.
 
+## Uninstall
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/poiurewq/devops/main/install.py | python3 - --uninstall
+```
+
+On Windows, from Git Bash: `curl -fsSL https://raw.githubusercontent.com/poiurewq/devops/main/install.py | py - --uninstall --yes` (piped there, the installer cannot ask, so `--yes` is the consent). From inside an agent session, `/dev skill uninstall` does the same after asking you.
+
+It shows a plan and asks first, then removes the `dev` and `ops` links in every skills directory that point into the clone, and the clone itself, unless it holds uncommitted or unpushed work. It asks before deleting your prefs (`~/.config/devops-skill/config.yml`); with `--yes` they are kept unless you also pass `--remove-config`. `--home DIR` names a clone kept elsewhere, and `--dry-run` prints the plan. Self-contained copies are left alone (delete their folder), and nothing in your repos is touched: boards (`.tasks/`, `.flows/`) stay, and a `./board` viewer simply stops working.
+
 ## Getting started
 
 In a repo with at least one commit, a GitHub remote named `origin` and `gh` signed in (init reads your GitHub login), start with the skill that fits the work:

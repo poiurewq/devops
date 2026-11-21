@@ -93,7 +93,7 @@ TASKS board [--expand] [--watch]
 | `/ops decide [id]` | Read `shared/routes/decide.md` (open questions and proposed tasks, of either type — the judgments waiting on a person). |
 | `/ops pick <id-or-desc>` | `TASKS update <id> --status planned --assignee <me>`; if it is already assigned to someone else, confirm the takeover with the user first. |
 | `/ops meta` | Read `routes/meta.md` (pressure the playbook and the board). |
-| `/ops skill …` | Read `shared/routes/skill.md` (status, update, auto on/off, feedback). |
+| `/ops skill …` | Read `shared/routes/skill.md` (status, update, auto on/off, feedback, uninstall). |
 
 Anything not in the table maps onto the closest verb: read the intent, do it, and name the verb once. Given a description instead of an id, run `TASKS list`, match, and confirm if it is not obvious.
 

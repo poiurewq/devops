@@ -784,8 +784,8 @@ def resolve_board(root, scope):
     if read_cache(root, scope).get(scope) != branch:
         write_cache(root, scope, branch)
     # A command may resolve several times (board re-read after git work,
-    # board then _render_board, every watch refresh); the warning is one
-    # per command, so once per process for each board it lands on.
+    # every watch refresh); the warning is one per command, so once per
+    # process for each board it lands on.
     if (scope, branch) not in _STALE_WARNED:
         _STALE_WARNED.add((scope, branch))
         warn_stale_checkout(root, scope, branch, bw)
@@ -9216,26 +9216,29 @@ def _board_latest_text(cfg, scope, bw, tasks, color=False):
     return "\n".join(lines)
 
 
-def _watch_board(args, latest, bw, scope):
+def _watch_board(args, latest, bw, scope, resolved=None):
     """(display, tasks) for the watch loop: the board, or the latest list.
 
-    bw/scope come from cmd_board's one ctx(): _render_board already syncs.
+    bw/scope come from cmd_board's one ctx(); _render_board re-syncs on each
+    refresh unless handed `resolved` (the first paint reuses the entry sync).
     """
-    _plain, board, tasks = _render_board(args)
+    _plain, board, tasks = _render_board(args, resolved)
     if latest:
         board = _board_latest_text(read_board_cfg(bw, scope), scope, bw,
                                    tasks, color=_use_color()).rstrip()
     return board, tasks
 
 
-def _render_board(args):
+def _render_board(args, resolved=None):
     """Fetch, write plain TASKS.md, return (plain, display, tasks).
 
-    display is colorized when stdout is a color-capable tty. TASKS.md is
-    always the plain text. Watch and static share WATCH_STATUSES so hottest
-    work sits above the fold on both.
+    resolved is a ctx() result the caller already has, so the board is not
+    synced a second time; without it this syncs. display is colorized when
+    stdout is a color-capable tty. TASKS.md is always the plain text. Watch
+    and static share WATCH_STATUSES so hottest work sits above the fold on
+    both.
     """
-    root, scope, branch, bw = ctx()
+    root, scope, _branch, bw = resolved or ctx()
     cfg = read_board_cfg(bw, scope)
     tasks = all_tasks(bw, scope)
     expand = bool(getattr(args, "expand", False))
@@ -9569,7 +9572,8 @@ WATCH_WINDOWS_HINT = ("the live viewer does not run on Windows yet; "
 def cmd_board(args):
     if WINDOWS and getattr(args, "watch", False):
         sys.exit(f"error: board --watch: {WATCH_WINDOWS_HINT}")
-    root, scope, _branch, bw = ctx()
+    resolved = ctx()
+    root, scope, _branch, bw = resolved
     if getattr(args, "refresh_viewer", False):
         cmd_board_refresh_viewer(root, scope)
         return
@@ -9607,7 +9611,9 @@ def cmd_board(args):
             while True:
                 by_area = bool(getattr(args, "by_area", False))
                 expand = bool(getattr(args, "expand", False))
-                board, tasks = _watch_board(args, latest_mode, bw, scope)
+                board, tasks = _watch_board(args, latest_mode, bw, scope,
+                                            resolved)
+                resolved = None  # every later refresh re-syncs
                 display = board
                 if regs_mode:
                     display, reg_rows = registries_pane(
@@ -9931,7 +9937,7 @@ def cmd_board(args):
                 import termios
                 termios.tcsetattr(fd, termios.TCSADRAIN, old_term)
         return
-    print(_render_board(args)[1])
+    print(_render_board(args, resolved)[1])
 
 
 # ---------- iterations ----------
