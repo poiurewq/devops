@@ -1,6 +1,6 @@
 ---
 name: ops
-description: Playbook of flows plus the runs that follow them, on a shared task board inside the user's repo. Use for /ops and subcommands (init, tour, add, run, next, wake, schedule, rehearse, flow list/show/create/edit/review/retire, agent, env, status, board, show, change, drop, delete, meta), and whenever the user asks to run a procedure or checklist, follow or write a flow, record what a run did, dry-run (rehearse) a flow, or work a task that is not code.
+description: Playbook of flows plus the runs that follow them, on a shared task board inside the user's repo. Use for /ops and subcommands (init, tour, add, run, next, wake, schedule, rehearse, flow list/show/create/edit/review/retire, agent, env, status, board, show, change, drop, delete, meta, distill), and whenever the user asks to run a procedure or checklist, follow or write a flow, record what a run did, dry-run (rehearse) a flow, or work a task that is not code.
 ---
 
 # ops — procedures that run, recorded where they ran
@@ -22,6 +22,7 @@ TASKS add --title "<title>" --type ops [--deps <id,id>]
           [--schedule "<cron> <timezone>"]
           [--next-due <date>] [--status proposed|backlog|planned|shelved --reason "<why>"]
           [--rehearsal]                 # a dry run of its flow (rehearse.md)
+          [--distill]                   # a distill sitting (distill.md)
           [--routine <name>]            # the routine that starts it
           [--umbrella <id[,id]>]        # file under it: adds to its deps
 TASKS update <id> [--title] [--status] [--assignee <who>|""] [--deps]
@@ -86,6 +87,7 @@ TASKS board [--expand] [--watch]
 | `/ops drop <id>` / "we're not doing this" | *Not planned and shelved* below — offer delete as the alternative and let the user pick. "Not needed for now" is shelved instead. |
 | `/ops delete <id>` | Confirm, then `TASKS delete <id>`. |
 | `/ops iteration …` | Read `shared/routes/iteration.md` (show, close, start the next). |
+| `/ops distill` | Read `shared/routes/distill.md` (a sitting: turn this iteration's task records into `AGENTS.md` context and heuristics, each item the user's call; required before an iteration closes). |
 | `/ops config [key] [value]` | `TASKS config …` (settable: iteration, iteration_name, iteration_started, parent_branch). |
 | `/ops absorb <source>` | Read `shared/routes/absorb.md` (import a list of things to do, each filed as the type its work is; a written procedure goes to `/ops flow adopt` instead). |
 | `/ops decide [id]` | Read `shared/routes/decide.md` (open questions and proposed tasks, of either type — the judgments waiting on a person). |
@@ -115,7 +117,7 @@ A run is one execution against one task, and it ends inside the same session it 
 - **Then improve the flow.** After the close, offer small fixes to each flow that ran, from what actually happened (`routes/run.md` section 6).
 - **Unattended is a mode, chosen explicitly** by the trailing word `unattended`: the run goes to its first stop and puts every decision on the board instead of asking (`shared/routes/unattended.md`); without the word, a run is attended.
 - **A scheduled attended run** — one an attended routine's wake starts — reaches the user as `shared/routes/wake.md` *A scheduled run* says (`routes/run.md` *A scheduled run*).
-- **No flow yet?** The run is still a run: it proceeds in chunks the user verifies, each noted on the task as it is verified. At the end, offer to turn it into a flow (`/ops flow create from <id>`).
+- **No flow yet?** The run is still a run: it proceeds in rounds the user verifies — agent-led (you propose each chunk) or user-led (the user states each step) — each noted on the task as it is verified. At the end, offer to turn it into a flow (`/ops flow create from <id>`).
 
 ## Running a task
 

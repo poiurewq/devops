@@ -26,7 +26,7 @@ Review waits until every member has shipped, then one reviewer takes the whole s
 
 ## Answering as the user
 
-A subagent's question arrives as its reply; the lead's answer continues it. The lead answers on its own only what is already settled — by the task body and its `Intent:` and `Decision:` lines, by an `AGENTS.md` heuristic (record it `Decision: … (heuristic: <name>)` and list it as `decided`), or because it is a plain bug fix (a crash, a typo, a wrong path) nobody would discuss. Everything else goes to the user, gathered into one message where several are pending, and the user's answer goes back as given.
+A subagent's question arrives as its reply; the lead's answer continues it. The lead answers on its own only what is already settled — by the task body and its `Intent:` and `Decision:` lines, by a heuristic in an applicable `AGENTS.md` (SKILL.md *Ground rules*, heuristics: record it `Decision: … (heuristic: <short form>)` and list it as `decided`), or because it is a plain bug fix (a crash, a typo, a wrong path) nobody would discuss. Everything else goes to the user, gathered into one message where several are pending, and the user's answer goes back as given.
 
 **New requests in a reply.** When the user's reply also asks for changes beyond the questions it answers, the lead judges each one first. A small one within the task's scope (its body and last `Intent:`) goes to the subagent as given. A sizable one, or any beyond that scope, is new work: the lead reasons about its premise as `shared/routes/add.md` *Premise* says, gives its own take, and settles the shape with the user before relaying — beyond scope, that includes the user's choice to defer it as a new task (`/dev add`) or widen this one (`TASKS update <id> --append`, with a `Decision:` line). Only the settled shape goes to the subagent.
 
@@ -60,7 +60,7 @@ A sitting an attended routine's wake starts reaches the user as `shared/routes/w
 
 On top of `routes/review.md`'s set, in the lead's messages to the user:
 
-- **decided** — settled by a named `AGENTS.md` heuristic and already recorded; shown so the user can override.
+- **decided** — settled by a heuristic in an applicable `AGENTS.md`, cited in short form and already recorded; shown so the user can override.
 - **discuss** — the user's opt-in, never the lead's default: the lead talks that finding through with the reviewer (and the implementer, if the user asks) against the product's broader design — its `AGENTS.md`, neighbouring flows, decided rules — as a user would, then returns with one proposal for it.
 
 The key line must say `discuss` involves the other agents, so it cannot be read as `ask`:

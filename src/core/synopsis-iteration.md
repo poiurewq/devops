@@ -1,5 +1,6 @@
 TASKS iteration
-TASKS iteration-close [--carry]
+TASKS iteration-close [--carry] [--skip-distill "<why>"]
+                                        # skip: only when the user asks
 TASKS iteration-new [<branch>] [--parent <branch>] [--name <name>]
                     [--iteration N] [--iteration-started YYYY-MM-DD]
                     # omit the branch to roll in place (no parent)

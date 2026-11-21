@@ -8,8 +8,8 @@ every message here names the package, not a single skill. A linked install
 from before that rule may hold only one of them; check and update link the
 missing one in beside it.
 
-Install (public consumers): one clone, symlinked into each agent skills
-directory by the installer —
+Install (public consumers): one clone, symlinked (a junction on Windows)
+into each agent skills directory by the installer —
   curl -fsSL https://raw.githubusercontent.com/poiurewq/devops/main/install.py | python3 -
 or, with --copy-to DIR, self-contained skill copies. A copy never updates
 itself: update prints the command that rebuilds it.
@@ -66,6 +66,10 @@ VERSION_URL = "https://raw.githubusercontent.com/poiurewq/devops/main/VERSION"
 RAW_INSTALLER_URL = (
     "https://raw.githubusercontent.com/poiurewq/devops/main/install.py"
 )
+WINDOWS = os.name == "nt"
+# The Python that printed install commands pipe into: python.org's py
+# launcher on Windows, where python3 is often absent or the Store stub.
+INSTALL_PYTHON = "py" if WINDOWS else "python3"
 DEFAULT_INTERVAL_HOURS = 24
 CONFIG_DIR = Path.home() / ".config" / "devops-skill"
 CONFIG_PATH = CONFIG_DIR / "config.yml"
@@ -83,9 +87,9 @@ CONFIG_KEYS = (
 )
 
 # The skill dir this file was reached through (<skill>/lib/skill.py, never
-# resolved): VERSION and SKILL.md live beside lib/ there. In the clone
-# <skill>/lib and <skill>/VERSION are links into the shared package; in a
-# self-contained copy they are real files.
+# resolved): VERSION and SKILL.md live beside lib/ there. In the source tree
+# <skill>/lib and <skill>/VERSION are links into the shared package; in the
+# published clone and in a self-contained copy they are real files.
 SKILL_DIR = Path(os.path.abspath(__file__)).parent.parent
 # What a linked install updates: the clone holding the real skill dir.
 CLONE_DIR = SKILL_DIR.resolve().parent
@@ -361,7 +365,7 @@ def build_record() -> dict[str, str] | None:
 def rebuild_message(rec: dict[str, str]) -> str:
     """Why a copy cannot update, and the exact command that rebuilds it."""
     out = rec.get("output", "")
-    cmd = f"curl -fsSL {RAW_INSTALLER_URL} | python3 - --copy-to {shlex.quote(out)}"
+    cmd = f"curl -fsSL {RAW_INSTALLER_URL} | {INSTALL_PYTHON} - --copy-to {shlex.quote(out)}"
     return (
         f"this is a self-contained copy (devops {rec.get('version') or local_version()}) "
         "and cannot update itself; on the machine that built it, run:\n"
@@ -380,7 +384,7 @@ def git_pull_ff(path: Path) -> tuple[bool, str]:
             False,
             "this install is not a standalone git clone of poiurewq/devops "
             "(a copied tree, or one nested inside another repo); reinstall with:\n"
-            f"  curl -fsSL {RAW_INSTALLER_URL} | python3 -",
+            f"  curl -fsSL {RAW_INSTALLER_URL} | {INSTALL_PYTHON} -",
         )
     url = origin_url(path)
     if not url:
@@ -406,6 +410,32 @@ def git_pull_ff(path: Path) -> tuple[bool, str]:
 
 
 # --- siblings ---
+
+def is_link(path: Path) -> bool:
+    """A symlink, or a directory junction (what Windows installs make).
+    Duplicated from install.py, as is make_dir_link."""
+    if path.is_symlink():
+        return True
+    try:
+        tag = getattr(os.lstat(path), "st_reparse_tag", 0)
+    except OSError:
+        return False
+    # IO_REPARSE_TAG_MOUNT_POINT; the stat module defines it on Windows only.
+    return tag == 0xA0000003
+
+
+def make_dir_link(target: Path, source: Path) -> None:
+    """Point target at the directory source: a junction on Windows, which
+    needs no admin rights or Developer Mode, else a symlink."""
+    if not WINDOWS:
+        target.symlink_to(source, target_is_directory=True)
+        return
+    r = subprocess.run(["cmd", "/c", "mklink", "/J", str(target), str(source)],
+                       capture_output=True, text=True, check=False)
+    if r.returncode != 0:
+        raise OSError((r.stderr or r.stdout or "").strip()
+                      or "mklink /J failed")
+
 
 def package_skills(pkg: Path) -> list[str]:
     """Skill dirs in the package (a SKILL.md inside), as install.py finds them."""
@@ -433,7 +463,7 @@ def half_installed_roots(skills: list[str]) -> list[tuple[Path, list[str]]]:
             for name in skills:
                 target = root / name
                 try:
-                    if target.is_symlink() and \
+                    if is_link(target) and \
                             target.resolve() == (CLONE_DIR / name).resolve():
                         linked = True
                         break
@@ -466,9 +496,9 @@ def link_missing_siblings() -> None:
     for root, missing in half:
         for name in missing:
             target = root / name
-            if not target.exists() and not target.is_symlink():
+            if not target.exists() and not is_link(target):
                 try:
-                    target.symlink_to(CLONE_DIR / name, target_is_directory=True)
+                    make_dir_link(target, CLONE_DIR / name)
                     print(f"devops: linked the missing {name} skill into "
                           f"{root} (dev and ops install together)")
                     continue
@@ -477,7 +507,8 @@ def link_missing_siblings() -> None:
             else:
                 why = "something else is at that path"
             print(f"devops: the {name} skill is missing from {root} ({why}); "
-                  f"install it with:\n  curl -fsSL {RAW_INSTALLER_URL} | python3 -",
+                  f"install it with:\n  curl -fsSL {RAW_INSTALLER_URL} | "
+                  f"{INSTALL_PYTHON} -",
                   file=sys.stderr)
 
 
@@ -717,4 +748,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    # A Windows pipe defaults to the ANSI code page; print UTF-8 everywhere.
+    for _stream in (sys.stdout, sys.stderr):
+        _stream.reconfigure(encoding="utf-8")
     sys.exit(main())

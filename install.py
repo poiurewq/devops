@@ -5,8 +5,9 @@
 
 Clones the package to ~/.local/share/devops (XDG_DATA_HOME honoured), asks
 which agent skill roots to install into, then points a symlink at each skill
-directory (dev and ops, always both) inside that one clone. Updating is a
-pull in the clone, so every agent sees it at once.
+directory (dev and ops, always both) inside that one clone — a directory
+junction on Windows, which needs no admin rights or Developer Mode. Updating
+is a pull in the clone, so every agent sees it at once.
 
 Re-running is the supported way to add a root, repair a link, or fill in a
 root that holds only one of the skills: the clone is fast-forwarded and the
@@ -14,9 +15,10 @@ plan only lists what changes.
 
 Already-installed skill directories are replaced only with the user's
 consent, and never when they hold unsaved work (a dirty or unpushed clone
-is skipped, not overwritten). Prompts go to /dev/tty, so they still work
-when the script itself is what stdin is feeding; with no terminal at all,
-replacing needs an explicit --yes.
+is skipped, not overwritten). Prompts go to the terminal (/dev/tty), so
+they still work when the script itself is what stdin is feeding; on Windows
+they come only from a console on stdin. With no terminal at all, replacing
+needs an explicit --yes.
 
 Run from inside a package tree (a manual clone, or a copied tree passed via
 --source), that tree is used as-is and nothing is cloned — otherwise a
@@ -29,6 +31,13 @@ builds from the package in hand, else from a temporary clone it deletes
 afterwards, so it never touches the linked install. Each copy carries a
 BUILD record, which is how a rebuild knows it may replace that dir and how
 the default install knows to leave it alone.
+
+A package comes in two layouts. In the source tree each skill links to one
+shared lib/, shared/ and VERSION at the top (<skill>/lib -> ../lib). The
+published tree, which is what gets cloned, holds no links at all: each skill
+dir carries its own copies and there is no top-level lib/ or shared/, so a
+Windows checkout needs no symlink support. Everything here accepts either
+layout.
 
 CANONICAL_REPO is duplicated in lib/skill.py, which owns the update path.
 This file must stay standalone: it runs before any clone exists, so it
@@ -57,9 +66,15 @@ AGENT_HOME_GLOBS = (".claude*", ".grok*")
 SKILLS_SUBDIR = "skills"
 # Build record in each --copy-to copy; lib/skill.py reads the same name.
 BUILD_RECORD = "BUILD"
-# Package-level paths each skill links to (<skill>/<name> -> ../<name>); a
-# copy expands them into real files.
+# Package-level paths each skill links to in the source layout
+# (<skill>/<name> -> ../<name>); a copy and the published tree expand them
+# into real files.
 PACKAGE_LINKS = ("lib", "VERSION", "shared")
+# git's file mode for a symlink (ls-files -s).
+GIT_SYMLINK_MODE = "120000"
+WINDOWS = os.name == "nt"
+# What the installer makes at <root>/<skill>, as printed (make_dir_link).
+LINK_KIND = "junction" if WINDOWS else "symlink"
 
 
 def die(msg: str) -> "NoReturn":  # type: ignore[valid-type]
@@ -83,8 +98,14 @@ def git_out(args: list[str], cwd: Path) -> str:
 # --- package ---------------------------------------------------------------
 
 def is_package(path: Path) -> bool:
-    """True when path is a devops package tree (not merely a git clone)."""
-    return (path / "lib" / "tasks.py").is_file() and (path / "VERSION").is_file()
+    """True when path is a devops package tree (not merely a git clone):
+    VERSION plus lib/tasks.py, at the top (source layout) or inside a skill
+    dir (the link-free published layout)."""
+    if not (path / "VERSION").is_file():
+        return False
+    return (path / "lib" / "tasks.py").is_file() or any(
+        (path / name / "lib" / "tasks.py").is_file()
+        for name in discover_skills(path))
 
 
 def package_version(pkg: Path) -> str:
@@ -171,8 +192,9 @@ def ensure_clone(home: Path, dry_run: bool) -> Path:
             die(f"{home} exists and is {what}; move it aside or pass "
                 f"--home <dir>")
         if not is_package(home):
-            die(f"{home} is a clone of {CANONICAL_SLUG} but has no lib/ or "
-                "VERSION; the clone looks damaged — remove it and re-run")
+            die(f"{home} is a clone of {CANONICAL_SLUG} but has no "
+                "lib/tasks.py or VERSION; the clone looks damaged — remove it "
+                "and re-run")
         if dry_run:
             print(f"would fast-forward the clone at {home}")
             return home
@@ -193,7 +215,8 @@ def ensure_clone(home: Path, dry_run: bool) -> Path:
     if r.returncode != 0:
         die(f"git clone failed: {(r.stderr or r.stdout).strip()}")
     if not is_package(home):
-        die(f"cloned {CANONICAL_SLUG} but {home} has no lib/ or VERSION")
+        die(f"cloned {CANONICAL_SLUG} but {home} has no lib/tasks.py or "
+            "VERSION")
     return home
 
 
@@ -273,14 +296,15 @@ def classify(target: Path, pkg: Path) -> tuple[str, str, str]:
     blocked: someone chose that shape for that path, so no answer and no
     --yes turns it into a symlink.
     """
-    if target.is_symlink():
+    if is_link(target):
+        kind = "symlink" if target.is_symlink() else "junction"
         try:
             dest = target.resolve()
         except OSError:
-            return "link-other", "broken symlink", ""
+            return "link-other", f"broken {kind}", ""
         if dest == (pkg / target.name).resolve():
             return "linked", "already linked here", ""
-        return "link-other", f"symlink to {dest}", ""
+        return "link-other", f"{kind} to {tilde(dest)}", ""
     if not target.exists():
         return "free", "", ""
     if target.is_dir():
@@ -305,9 +329,9 @@ def path_key(path: Path) -> str:
     alone turns /var into /private/var, so the two forms must never be
     compared directly."""
     try:
-        return os.path.realpath(path)
+        return os.path.normcase(os.path.realpath(path))
     except OSError:
-        return str(path)
+        return os.path.normcase(str(path))
 
 
 def reject_root_inside_package(root: Path, pkg: Path,
@@ -346,7 +370,10 @@ def plan_for(root: Path, name: str, pkg: Path) -> dict | None:
 
 # The documented install is `curl … | python3 -`, where stdin is the script
 # itself: input() would read the remaining program text, or hit EOF. So every
-# prompt goes to the controlling terminal instead. _TTY is the cached handle;
+# prompt goes to the controlling terminal instead. Windows has no reliable
+# equivalent: CONIN$ opens even with nobody at it, and its readline() then
+# blocks forever, so there a prompt comes only from a real console on stdin
+# (windows_console) and a piped run is unattended. _TTY is the cached handle;
 # False means "not looked for yet", None means "there is none" (cron, CI, a
 # pipeline with no terminal), which is the only case that runs unattended.
 _TTY: object = False
@@ -363,11 +390,34 @@ class Cancelled(Exception):
     """The user asked to stop at a prompt."""
 
 
+def windows_console() -> bool:
+    """stdin is a Windows console someone can type at. isatty() is not
+    enough: it is True for NUL (what </dev/null becomes), so stdin must be a
+    console input buffer, and one with a window — a console created without
+    one (an agent's or a service's shell) has nobody typing at it."""
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+    try:
+        handle = msvcrt.get_osfhandle(sys.stdin.fileno())
+    except (AttributeError, OSError, ValueError):
+        return False
+    kernel32 = ctypes.WinDLL("kernel32")
+    kernel32.GetConsoleMode.argtypes = (wintypes.HANDLE,
+                                        ctypes.POINTER(wintypes.DWORD))
+    kernel32.GetConsoleWindow.restype = wintypes.HWND
+    mode = wintypes.DWORD()
+    return (bool(kernel32.GetConsoleMode(handle, ctypes.byref(mode)))
+            and bool(kernel32.GetConsoleWindow()))
+
+
 def tty_stream():
     """The terminal to prompt on, or None when the run is unattended."""
     global _TTY
     if _TTY is False:
-        if sys.stdin.isatty():
+        if WINDOWS:
+            _TTY = sys.stdin if windows_console() else None
+        elif sys.stdin.isatty():
             _TTY = sys.stdin
         else:
             try:
@@ -471,12 +521,47 @@ def confirm(prompt: str) -> bool:
 
 def tilde(path: Path) -> str:
     try:
-        return "~/" + str(path.relative_to(Path.home()))
+        return "~/" + path.relative_to(Path.home()).as_posix()
     except ValueError:
-        return str(path)
+        return path.as_posix()
 
 
 # --- apply -----------------------------------------------------------------
+
+def is_link(path: Path) -> bool:
+    """A symlink, or a directory junction (what Windows installs make)."""
+    if path.is_symlink():
+        return True
+    try:
+        tag = getattr(os.lstat(path), "st_reparse_tag", 0)
+    except OSError:
+        return False
+    # IO_REPARSE_TAG_MOUNT_POINT; the stat module defines it on Windows only.
+    return tag == 0xA0000003
+
+
+def make_dir_link(target: Path, source: Path) -> None:
+    """Point target at the directory source. On Windows a junction: a
+    symlink there needs admin rights or Developer Mode, a junction does not.
+    Duplicated in lib/skill.py."""
+    if not WINDOWS:
+        target.symlink_to(source, target_is_directory=True)
+        return
+    r = run(["cmd", "/c", "mklink", "/J", str(target), str(source)])
+    if r.returncode != 0:
+        raise OSError((r.stderr or r.stdout or "").strip()
+                      or "mklink /J failed")
+
+
+def remove_link(path: Path) -> None:
+    """Remove a link (or file) itself, never what it points at. A Windows
+    junction or directory symlink is removed with rmdir, which leaves its
+    target alone."""
+    if WINDOWS and path.is_dir():
+        os.rmdir(path)
+    else:
+        path.unlink()
+
 
 def apply(action: dict, pkg: Path, dry_run: bool) -> bool:
     """Perform one planned action. Returns True on success.
@@ -494,21 +579,21 @@ def apply(action: dict, pkg: Path, dry_run: bool) -> bool:
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         if action["verb"] == "replace":
-            if target.is_symlink() or target.is_file():
-                target.unlink()
+            if is_link(target) or target.is_file():
+                remove_link(target)
             else:
                 backup = target.with_name(target.name + ".devops-old")
-                if backup.is_symlink() or backup.is_file():
-                    backup.unlink()
+                if is_link(backup) or backup.is_file():
+                    remove_link(backup)
                 elif backup.is_dir():
                     shutil.rmtree(backup)
                 os.rename(target, backup)
-        target.symlink_to(source, target_is_directory=True)
+        make_dir_link(target, source)
     except OSError as e:
         print(f"error: {tilde(target)}: {e}", file=sys.stderr)
         if backup is not None:
             try:
-                if not target.exists() and not target.is_symlink():
+                if not target.exists() and not is_link(target):
                     os.rename(backup, target)
             except OSError as restore_err:
                 # Never delete it on the way out: that directory is now the
@@ -536,7 +621,7 @@ def temp_clone(tmp: Path) -> Path:
     if r.returncode != 0:
         die(f"git clone failed: {(r.stderr or r.stdout).strip()}")
     if not is_package(dest):
-        die(f"cloned {CANONICAL_SLUG} but it has no lib/ or VERSION")
+        die(f"cloned {CANONICAL_SLUG} but it has no lib/tasks.py or VERSION")
     return dest
 
 
@@ -546,7 +631,7 @@ def copy_plan(target: Path) -> tuple[str, str]:
     Only a previous copy is replaced; anything else at that path is someone
     else's and is reported, never deleted.
     """
-    if target.is_symlink():
+    if is_link(target):
         return "skip", "a symlink (a linked install?); move it aside"
     if not target.exists():
         return "build", ""
@@ -555,30 +640,44 @@ def copy_plan(target: Path) -> tuple[str, str]:
     return "skip", "not a previous self-contained copy; move it aside"
 
 
+def tracked_entries(pkg: Path, pathspecs) -> dict[str, str] | None:
+    """{path relative to pkg: git mode} for each file git tracks under
+    pathspecs; None when it tracks none (not a work tree, or untracked).
+    Relative to pkg, which may be nested in another repo."""
+    r = run(["git", "-C", str(pkg), "ls-files", "-s", "-z", "--",
+             *pathspecs])
+    entries: dict[str, str] = {}
+    if r.returncode == 0:
+        for record in (r.stdout or "").split("\0"):
+            meta, _, rel = record.partition("\t")
+            if rel:
+                entries[rel] = meta.split(" ", 1)[0]
+    return entries or None
+
+
 def tracked_copy_files(pkg: Path, name: str) -> list[tuple[Path, str]] | None:
     """(source, path in the copy) for every file git tracks in skill name.
 
-    ls-files lists <name>/lib, <name>/VERSION and <name>/shared as the links
-    they are, so each one that is tracked is expanded from the package's
-    own lib/, VERSION and shared/. Paths are relative to pkg, which may be nested in another repo.
-    A tracked file missing from the work tree is skipped. None when git
-    tracks nothing here (not a work tree, or an untracked tree): the caller
-    copies the tree.
+    In the source layout <name>/lib, <name>/VERSION and <name>/shared are
+    tracked symlinks, each expanded from the package's own lib/, VERSION and
+    shared/; in the published layout they are already real files. A link is
+    told by its git mode, not the work tree, so a checkout without symlink
+    support (the link a plain text file) still builds right. A tracked file
+    missing from the work tree is skipped. None when git tracks nothing
+    here: the caller copies the tree.
     """
-    r = run(["git", "-C", str(pkg), "ls-files", "-z", "--",
-             name, *PACKAGE_LINKS])
-    paths = [p for p in (r.stdout or "").split("\0") if p] \
-        if r.returncode == 0 else []
-    if not paths:
+    entries = tracked_entries(pkg, [name, *PACKAGE_LINKS])
+    if entries is None:
         return None
-    links = tuple(f"{name}/{link}" for link in PACKAGE_LINKS)
+    links = {f"{name}/{link}" for link in PACKAGE_LINKS
+             if entries.get(f"{name}/{link}") == GIT_SYMLINK_MODE}
     files = []
-    for rel in paths:
+    for rel in entries:
         if rel in links or not (pkg / rel).is_file():
             continue
         if rel.startswith(f"{name}/"):
             dest = rel[len(name) + 1:]
-        elif f"{name}/{rel.split('/')[0]}" in paths:
+        elif f"{name}/{rel.split('/')[0]}" in links:
             # Package files only where the skill links them: an older
             # skill without the links must fail the predates check, not
             # get a copy whose shims still reach outside it.
@@ -589,19 +688,10 @@ def tracked_copy_files(pkg: Path, name: str) -> list[tuple[Path, str]] | None:
     return files
 
 
-def build_copy(pkg: Path, name: str, out: Path) -> None:
-    """Write out/<name> as real files, replacing a previous copy last.
-
-    The skill's lib/, VERSION and shared/ links are followed, which is what makes it
-    self-contained; from a git work tree only tracked files are copied, so
-    the build matches one from a clean clone. The new tree is built beside
-    the target and swapped in by rename, so a failed build never leaves the
-    old copy half-replaced.
-    """
-    target = out / name
-    staging = out / f"{name}.devops-new"
-    if staging.exists():
-        shutil.rmtree(staging)
+def stage_skill(pkg: Path, name: str, staging: Path) -> None:
+    """Write skill name into staging as real files, or die if it cannot
+    stand alone. From a git work tree only tracked files are copied, so the
+    result matches one from a clean clone."""
     files = tracked_copy_files(pkg, name)
     if files is None:
         shutil.copytree(pkg / name, staging, symlinks=False,
@@ -612,9 +702,24 @@ def build_copy(pkg: Path, name: str, out: Path) -> None:
             shutil.copy2(src, staging / rel)
     if not ((staging / "lib" / "tasks.py").is_file()
             and (staging / "VERSION").is_file()):
-        shutil.rmtree(staging)
+        shutil.rmtree(staging, ignore_errors=True)
         die(f"{tilde(pkg / name)} has no lib/ or VERSION of its own; this "
             "package predates self-contained copies")
+
+
+def build_copy(pkg: Path, name: str, out: Path) -> None:
+    """Write out/<name> as real files, replacing a previous copy last.
+
+    The skill's lib/, VERSION and shared/ links are followed, which is what
+    makes it self-contained (stage_skill). The new tree is built beside the
+    target and swapped in by rename, so a failed build never leaves the old
+    copy half-replaced.
+    """
+    target = out / name
+    staging = out / f"{name}.devops-new"
+    if staging.exists():
+        shutil.rmtree(staging)
+    stage_skill(pkg, name, staging)
     (staging / BUILD_RECORD).write_text(
         f"version: {package_version(pkg)}\n"
         f"output: {out}\n", encoding="utf-8")
@@ -654,6 +759,30 @@ def install_copies(pkg: Path, skills: list[str], out: Path,
               "itself: re-run this command to rebuild, then put the new copy "
               "wherever the old one went.")
     return 1 if skipped else 0
+
+
+def tzdata_warning() -> str:
+    """On Windows, how to install the timezone database when this Python
+    lacks one, else "". Windows ships none, and without it every board
+    command on a board with a scheduled task stops."""
+    if not WINDOWS:
+        return ""
+    try:
+        import zoneinfo
+        zoneinfo.ZoneInfo("America/New_York")
+        return ""
+    except Exception:
+        return ("warning: this Python has no timezone database, which any "
+                "board with a scheduled task needs; install it with:\n"
+                "  py -m pip install --user tzdata")
+
+
+def warn_tzdata() -> None:
+    """Print tzdata_warning, if any, after what stdout has so far."""
+    warning = tzdata_warning()
+    if warning:
+        sys.stdout.flush()
+        print(warning, file=sys.stderr)
 
 
 # --- main ------------------------------------------------------------------
@@ -742,6 +871,7 @@ def install(argv: list[str] | None = None) -> int:
         with tempfile.TemporaryDirectory(prefix="devops-copy-") as tmp:
             pkg = local_pkg or temp_clone(Path(tmp))
             skills = package_skills(args, pkg)
+            warn_tzdata()
             return install_copies(pkg, skills, out, args.dry_run)
     if local_pkg is not None:
         # --home only says where a clone would go; with a package in hand
@@ -760,6 +890,7 @@ def install(argv: list[str] | None = None) -> int:
 
     # 2. skills
     skills = package_skills(args, pkg)
+    warn_tzdata()
     interactive = tty_stream() is not None and not args.yes
 
     # 3. roots
@@ -798,18 +929,23 @@ def install(argv: list[str] | None = None) -> int:
     # replacements become skips rather than happening silently. Linking into
     # free paths still proceeds — nothing is lost that way.
     if tty_stream() is None and not args.yes:
+        # On Windows a Git Bash run is seldom a console either, so name a
+        # window that is, and the clone's own install.py to run there.
+        where = (f"run py {pkg / 'install.py'} from a cmd or PowerShell "
+                 "window to choose" if WINDOWS
+                 else "re-run from a terminal")
         for a in actions:
             if a["verb"] == "replace":
                 a["verb"] = "skip"
-                a["reason"] = ("would replace an existing install; re-run "
-                               "from a terminal, or pass --yes")
+                a["reason"] = (f"would replace an existing install; {where}, "
+                               "or pass --yes")
 
     print("\nplan:")
     for a in actions:
         if a["verb"] == "skip":
             print(f"  skip     {tilde(a['target'])}  ({a['reason']})")
         elif a["verb"] == "replace":
-            print(f"  replace  {tilde(a['target'])}  ({a['detail']} → symlink)")
+            print(f"  replace  {tilde(a['target'])}  ({a['detail']} → {LINK_KIND})")
         else:
             print(f"  link     {tilde(a['target'])}")
 
@@ -818,7 +954,7 @@ def install(argv: list[str] | None = None) -> int:
     doing = [a for a in actions if a["verb"] in ("link", "replace")]
     if replacing and interactive:
         print(f"\n{len(replacing)} existing install(s) will be deleted and "
-              "replaced by a symlink.")
+              f"replaced by a {LINK_KIND}.")
         if not confirm("Proceed?"):
             print("nothing changed.")
             return 1
@@ -839,11 +975,16 @@ def install(argv: list[str] | None = None) -> int:
 
     print("\nupdate both skills with: /dev skill update  (or git pull in "
           f"{tilde(pkg)})")
-    print("note: an existing ./board viewer in a repo keeps working; it is "
-          "rewritten to point at this install the next time you run "
-          "/dev board.")
+    if not WINDOWS:  # no ./board viewer is written there
+        print("note: an existing ./board viewer in a repo is rewritten to "
+              "point at this install the next time you run /dev board; "
+              "until then one from an older install may say it is stale.")
     return 1 if (failed or skipping) else 0
 
 
 if __name__ == "__main__":
+    # Plans and paths print arrows and dashes; a Windows pipe defaults to
+    # the ANSI code page, which cannot print them.
+    for _stream in (sys.stdout, sys.stderr):
+        _stream.reconfigure(encoding="utf-8")
     raise SystemExit(main())

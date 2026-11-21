@@ -1,6 +1,6 @@
 # /<skill> tour — the key concepts, one card at a time
 
-A walk-through for someone new to the skill in use (`/<skill>`). Never start it on your own: it runs only when the user asks (`/<skill> tour`, or yes to the offer at the end of init). Five core cards, then this skill's own cards in `routes/tour-cards.md`.
+A walk-through for someone new to the skill in use (`/<skill>`). Never start it on your own: it runs only when the user asks (`/<skill> tour`, or yes to the offer at the end of init). Six core cards, then this skill's own cards in `routes/tour-cards.md`.
 
 ## How to give it
 
@@ -17,10 +17,11 @@ A walk-through for someone new to the skill in use (`/<skill>`). Never start it 
 3. **Identity.** Your GitHub login is who you are on this board (it maps to your handle on the roster), so the tasks you pick and run carry your name, and roles attach to it — the integrator, for one, is whoever merges finished work and closes iterations. — See it: `TASKS whoami`.
 4. **The script writes the board.** Nobody hand-edits `.tasks/`: every change goes through the skill's script, which commits and pushes it on the board's branch — that is what keeps a shared board free of conflicts. — See it: `git log --oneline` on the board's branch, one commit per change.
 5. **Agents draft, you decide.** Reviews, design questions, approvals and closing calls always come back to a person; an agent surfaces them and waits. Most come up right in the session, while an agent is building or reviewing with you; the list commands catch the ones left on the board, mostly by agents working unattended. — See it: `TASKS list --needs decision` and `TASKS list --status proposed`.
+6. **Distill.** What the user decided along the way — `Decision:` lines, notes, records — is turned into the product's `AGENTS.md` context and heuristics, so later agents decide the way you would; `/<skill> distill` proposes each item and you approve, reword or decline it. Run it whenever the records pile up; an iteration cannot close until every finished task has been through it. — See it: the `Decision:` lines in `TASKS show <id>` on a done task.
 
 ## This skill's cards
 
-Read `routes/tour-cards.md` and give its cards, numbered on from 6, the same way.
+Read `routes/tour-cards.md` and give its cards, numbered on from 7, the same way.
 
 ## The other skill
 

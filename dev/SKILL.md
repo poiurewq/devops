@@ -1,6 +1,6 @@
 ---
 name: dev
-description: Multi-contributor task board and dev workflow for a repo, or per-subdir boards in a monorepo. Use for /dev and subcommands (init, tour, add, plan, board, kanban, status, pick, implement, review, decide, audit, next, wake, schedule, absorb, flow list/show/create/edit/review/retire, agent, env, routine, change, delete, show, config, area, meta, iteration, update), and whenever the user asks to add/see/assign/implement/review tasks on the repo's task board, or asks "what should I work on".
+description: Multi-contributor task board and dev workflow for a repo, or per-subdir boards in a monorepo. Use for /dev and subcommands (init, tour, add, plan, board, kanban, status, pick, implement, review, decide, audit, next, wake, schedule, absorb, flow list/show/create/edit/review/retire, agent, env, routine, change, delete, show, config, area, meta, iteration, distill, update), and whenever the user asks to add/see/assign/implement/review tasks on the repo's task board, or asks "what should I work on".
 ---
 
 <!-- Built from src/ by src/build.py: edit there, then rebuild. -->
@@ -14,6 +14,8 @@ One task board per product (a repo, or a subdir of a monorepo), shared by every 
 `TASKS` = `SKILL_DIR/scripts/tasks.py` (an executable shim — one word, so it survives being stored in a shell variable; never prefix `python3`), run from inside the repo. It targets the nearest board at or above cwd, or `--scope <subdir>`; there is no single-board fallback, so in a repo of several products, work runs from the product directory.
 
 If running a shim (`TASKS` or `SKILL_CMD`) directly fails with `permission denied` (the file modes were lost, e.g. a synced skills dir), that is not a script error: use `python3 SKILL_DIR/scripts/<name>.py …` for that call and every later one this session, spelled out each time, never stored in a shell variable.
+
+On Windows (native Python with Git for Windows), never run a shim directly: run every call as `py SKILL_DIR/scripts/<name>.py …`, spelled out the same way. `board --watch` does not run there; plain `board` prints the board. A board with scheduled recurring tasks needs the timezone database (`py -m pip install tzdata`), which the script names when it is missing.
 
 `SKILL_CMD` = `SKILL_DIR/scripts/skill.py` — acts on the installed skill, not the board (`shared/routes/skill.md`).
 
@@ -67,6 +69,7 @@ TASKS add --title "<title>" [--area <m>] [--deps <id,id>]
           [--schedule "<cron> <timezone>"] [--next-due <date>]
           [--type ops] [--status proposed|backlog|planned|shelved --reason "<why>"]
           [--routine <name>]
+          [--distill]                   # with --type ops: a distill sitting
           [--umbrella <id[,id]>]        # file under it: adds to its deps
 TASKS update <id> [--title] [--area] [--status] [--kind umbrella|recurring|""]
           [--type ops|dev] [--assignee <who>|""] [--branch <b>|""] [--pr]
@@ -84,15 +87,20 @@ TASKS verify <id> "<how the children met the goal>"   # close an umbrella
 TASKS note <id> [--at "<step>"] "<what the work did not predict>"
             [--date YYYY-MM-DD]         # Note (<date>): …; any status but
                                         # proposed/not-planned, done included
+TASKS distilled <sitting> "<T3-T7, T9>" # tasks whose every candidate the
+                                        # user has dealt with; stays open
 TASKS ran <id> [--flow <name[,name]>] --record "<inputs; deviations>"
-               [--date <date|timestamp>]   # close an ops task with its run record
+               [--date <date|timestamp>]   # close an ops task with its run record;
+                                        # on a distill sitting also records
+                                        # it and its dependents as distilled
 TASKS collisions <id[,id…]>             # 2 doing-blocked, 3 PR open
 TASKS list [--assignee <who>] [--status <s>] [--needs decision]
            [--type ops|dev] [--flow <name>] [--json]
 TASKS recur list [--due] | recur ran <id> [--date <date|timestamp>]
 TASKS board [--expand] [--by-area] [--watch]
 TASKS iteration
-TASKS iteration-close [--carry]
+TASKS iteration-close [--carry] [--skip-distill "<why>"]
+                                        # skip: only when the user asks
 TASKS iteration-new [<branch>] [--parent <branch>] [--name <name>]
                     [--iteration N] [--iteration-started YYYY-MM-DD]
                     # omit the branch to roll in place (no parent)
@@ -133,8 +141,8 @@ Caveats: for a flag not spelled in this synopsis or the route you are following,
 - Natural-language intents map onto subcommands; fulfil them and mention the keyword once ("done — btw, `/dev pick 12` does this directly"). Always show a suggested command's argument shape — `/dev add <task-or-goal>`, `/dev show <id>` — never a bare `/dev add ...`, which leaves the user guessing what goes there.
 - **New work goes through `/dev add`.** Explicit `/dev add`, freeform "we should…", or a goal stated after `/dev` all land on the same path, and add triages it — never ask the user to pick a path. A verb given a description no task matches (`/dev implement <goal>`, `/ops run <description>`) files it through add first, then carries on.
 - **A new task's id is the one `add` printed.** Every follow-up on a task just filed — implementing it, citing it, updating it, a dep or umbrella pointing at it — uses the `id:` from that `add` call's output, never one predicted from the board or counted on from an earlier add: another contributor may have filed in between.
-- **Vendor-neutral context.** Product docs live in `AGENTS.md` at the directory that owns the work — the nearest one that covers it; a nested package's rule does not go in the repo root. Record what future work there needs and neither the code nor the board shows: conventions and decided architectural, procedural, or domain rules, not only pitfalls. Keep it lean. Each piece of knowledge has one home: what a flow needs goes in that flow, a place's facts in its environment entry (`TASKS env update`), and only product-wide context in `AGENTS.md`. A tracked `AGENTS.md` changes through a dev task like any other file; a gitignored one is the user's private copy, edited directly. If `CLAUDE.md` is present, it is a symlink to that `AGENTS.md` — not the reverse (promote a lone `CLAUDE.md`; if both are regular files, fold unique content into `AGENTS.md`, then replace `CLAUDE.md` with a symlink).
-- **Design heuristics.** A product may keep a `## Design heuristics` section in its `AGENTS.md`: the user's standing calls for settling design forks, one line each, led by a short bold name so it can be cited. A fork one of them clearly settles is not a question: decide it, record `Decision: <choice> (heuristic: <name>)`, and tell the user which heuristic decided it so they can override. This holds in every route that meets forks, unattended runs included — applying a heuristic is the user's decision, not the agent's. A fork no heuristic clearly settles still goes to the user. When the user's call on a fork looks general enough to settle future ones, propose it as a new heuristic; add it only on their yes, as an `AGENTS.md` change (above).
+- **Vendor-neutral context.** Product docs live in `AGENTS.md` at the directory that owns the work — the nearest one that covers it; a nested package's rule does not go in the repo root. Record what future work there needs and neither the code nor the board shows, of two kinds: **context** — what the project is, does, and aims at — and **heuristics** (below), not only pitfalls. Keep it lean. Each piece of knowledge has one home: what a flow needs goes in that flow, a place's facts in its environment entry (`TASKS env update`), and only product-wide context in `AGENTS.md`. A tracked `AGENTS.md` changes through a dev task like any other file; a gitignored one is the user's private copy, edited directly. If `CLAUDE.md` is present, it is a symlink to that `AGENTS.md` — not the reverse (promote a lone `CLAUDE.md`; if both are regular files, fold unique content into `AGENTS.md`, then replace `CLAUDE.md` with a symlink).
+- **Heuristics.** A heuristic is how decisions get made here — an approach, preference, convention or rule the user holds; settling a design fork is one case. No heading is imposed: any clear rule in an `AGENTS.md` that applies to the work counts, cited in short form — its bold name if it has one, else its section and a few words (`Decision: <choice> (heuristic: <short form>)`). A decision one of them clearly settles is not a question: decide it, record that `Decision:` line, and tell the user which heuristic decided it so they can override. This holds in every route that meets decisions, unattended runs included — applying a heuristic is the user's decision, not the agent's. A decision no heuristic clearly settles still goes to the user. When the user's call looks general enough to settle future ones, leave it as the `Decision:` line on the task and carry on: distill promotes it into `AGENTS.md` later, so no run stops for that side task.
 - **Scripted git lifecycle.** Never improvise multi-step git/gh for task work: use `claim`, `diff` (self-review from the task worktree), `ship`, `ready`/`unready`, `land`/`cleanup`, `preflight` (park/discard), `iteration-land`, and for stacks `restack`/`batch-gate`. Routes decide and call; they don't spell out raw sequences to re-invent. Reading a PR and the human review actions on it go through `TASKS pr <id> view|diff|comment|review|close`, never `gh pr` directly — `TASKS pr` runs `gh pr` and, where GraphQL is blocked (some hosted agent sandboxes), switches to GitHub's REST API, as every script PR call does. `DEVOPS_PR_TRANSPORT=rest` forces REST from the start.
 - **PR is the only merge flow.** GitHub and an authenticated `gh` are assumed; init walks the user through setup, and the script checks gh sign-in before any GitHub step (implement stops at preflight's error). Task branches start from `origin/<integration>`; if local integration is ahead on this board's scope, implement stops to park-as-PR or discard first (routes/implement.md). An unattended run never parks or discards — it skips and reports.
 - **To build a task, suggest `/dev <id[, id…]>`**, never `/dev implement <id>` — in a route, a report, or script output; the lead routes umbrellas, ops tasks and hosts without subagents itself.
@@ -175,6 +183,7 @@ Caveats: for a flag not spelled in this synopsis or the route you are following,
 | `/dev schedule <id> [<routine>]` | Read `shared/routes/schedule.md` (set up a routine so a recurring task starts on its own: pick or create the routine and its runner environment, the trigger proposed from this harness and created at its source on `go`, the task pointed at it, a watched first run; also moves a task between routines). Also where the offer after add, audit and status leads. |
 | `/dev absorb <source>` | Read `shared/routes/absorb.md` (import a list of things to do, each filed as the type its work is; a written procedure goes to `/dev flow adopt` instead). |
 | `/dev iteration ...` | Read `shared/routes/iteration.md` (show / close / new). |
+| `/dev distill` | Read `shared/routes/distill.md` (a sitting: turn this iteration's task records into `AGENTS.md` context and heuristics, each item the user's call; required before an iteration closes). |
 | `/dev board` / `kanban` | `TASKS board` (status index + in-play list); `TASKS board --by-area` for the area cut; then the PR state refresh (`shared/routes/status.md`). |
 | `/dev flow` / `/dev flow list` | `TASKS flow list` (`--all` includes retired). |
 | `/dev flow show <name>` | `TASKS flow show <name>`. |

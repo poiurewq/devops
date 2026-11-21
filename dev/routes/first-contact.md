@@ -53,5 +53,5 @@ Every agent shows the same menu, so the user learns one map of the tool. Emit it
 | **Do work** | `/dev pick <id>` — claim it · `/dev <id[, id…]>` — see a task through in one sitting: build, check against intent, review, with you deciding only the real calls · `/dev implement <id[, id…]|goal>` — only build it (or a batch) and open PR(s), no review; unknown goal is filed via add triage first · `/dev next` — pick the top task for you · `… unattended` after `/dev <id>` or `/dev next` — an agent builds it with nobody there, to a draft |
 | **Decide** | `/dev review` — PRs, design questions, and proposals waiting on you · `/dev decide` — only the questions and proposals · `/dev meta` — pressure the board · `/dev meta area` — area-validity only |
 | **Adjust** | `/dev change <id> <what>` · `/dev delete <id>` · `/dev area` · `/dev config` |
-| **Iterate** | `/dev iteration` — show, close, or start the next one |
+| **Iterate** | `/dev iteration` — show, close, or start the next one · `/dev distill` — turn this iteration's records into `AGENTS.md` context and heuristics |
 | **Skill** | `/dev skill` — version and update state · `/dev skill update` — pull latest dev skill · `/dev skill update auto on/off` — opt-in auto-apply · `/dev skill feedback <text>` — file a bug or idea about the skill as an issue on its public repo |

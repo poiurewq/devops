@@ -2,7 +2,7 @@
 
 The ops part of `shared/routes/unattended.md`, which holds the mode — identity, provenance, the marker, the hard limits, `next unattended`'s candidates, the report and its one notification; read that first. `routes/run.md` still governs, with the overrides below.
 
-**No flow, no run**: a task with no flow — none on the task, and none the flow pick in `routes/run.md` makes obvious — is reported and left alone, named or selected: a run without a flow is verified chunk by chunk by a person (`routes/run.md` section 4). `next unattended` also passes over rehearsals (`rehearsal: true`): a rehearsal is the user's own pass through a flow.
+**No flow, no run**: a task with no flow — none on the task, and none the flow pick in `routes/run.md` makes obvious — is reported and left alone, named or selected: a run without a flow is verified by a person as it goes (`routes/run.md` section 4). `next unattended` also passes over rehearsals (`rehearsal: true`): a rehearsal is the user's own pass through a flow.
 
 **The marker**: start the run with run.md's start call plus `--unattended <model-id>` (`TASKS update <id> --status doing --assignee <owner> --flow <name[,name]> --unattended <model-id>`). The script refuses it while any run's marker is set, one with your model id included. `ran` clears it by leaving `doing`; every stop below hands it back with `--unattended ""`.
 

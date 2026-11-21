@@ -1,0 +1,754 @@
+#!/usr/bin/env python3
+"""Skill-meta commands for the devops package (github.com/poiurewq/devops).
+
+Backs the `/dev skill ...` and `/ops skill ...` namespaces: everything
+acting on the installed skills themselves rather than on the user's board.
+Both skills live in one clone, install together and update together, so
+every message here names the package, not a single skill. A linked install
+from before that rule may hold only one of them; check and update link the
+missing one in beside it.
+
+Install (public consumers): one clone, symlinked (a junction on Windows)
+into each agent skills directory by the installer —
+  curl -fsSL https://raw.githubusercontent.com/poiurewq/devops/main/install.py | python3 -
+or, with --copy-to DIR, self-contained skill copies. A copy never updates
+itself: update prints the command that rebuilds it.
+
+User prefs live outside the skill tree so they survive updates:
+  ~/.config/devops-skill/config.yml   (~/.config/dev-skill/ is read as a
+  fallback for installs that predate the dev + ops package)
+
+Config schema (schema_version integer, like board.yml):
+  schema_version: 1
+  auto_update: false          # opt-in apply on check
+  check_interval_hours: 24    # throttle for check
+  last_check_at: ""           # ISO-8601 UTC; empty = never
+
+SCHEMA_VERSION in this file is what we write. Missing schema_version → 0.
+Never downgrade a higher schema_version stamp; preserve unknown keys.
+
+Commands:
+  status  Local version, auto-update state, and the skill commands.
+  check   Link a missing sibling skill (every call), then a throttled
+          version check vs origin/main VERSION. Quiet if local >= public or
+          network fails. One line if behind. If auto_update, apply.
+  update  Link a missing sibling skill, then ignore throttle; git pull
+          --ff-only origin main (requires clone).
+  auto    Show or set auto_update (on|off|true|false).
+  feedback  Open an issue on the public repo (maintainer inbox) via gh;
+            REST when GraphQL is blocked, else a prefilled link to file by hand.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import platform
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+
+# --- constants ---
+
+CONFIG_SCHEMA_VERSION = 1
+CANONICAL_REPO = "https://github.com/poiurewq/devops"
+REPO_SLUG = "poiurewq/devops"
+VERSION_URL = "https://raw.githubusercontent.com/poiurewq/devops/main/VERSION"
+# install.py carries its own copy of the two constants above: it runs before
+# any clone exists, so it cannot import this module. Keep them in step.
+RAW_INSTALLER_URL = (
+    "https://raw.githubusercontent.com/poiurewq/devops/main/install.py"
+)
+WINDOWS = os.name == "nt"
+# The Python that printed install commands pipe into: python.org's py
+# launcher on Windows, where python3 is often absent or the Store stub.
+INSTALL_PYTHON = "py" if WINDOWS else "python3"
+DEFAULT_INTERVAL_HOURS = 24
+CONFIG_DIR = Path.home() / ".config" / "devops-skill"
+CONFIG_PATH = CONFIG_DIR / "config.yml"
+# Prefs governed one skill before dev and ops shared a package. Reads fall
+# back to the old path when the new file is absent; writes always go to the
+# new one, and the old file is left alone rather than moved or deleted.
+LEGACY_CONFIG_PATH = Path.home() / ".config" / "dev-skill" / "config.yml"
+
+# Ordered keys we always write; unknown keys preserved after these.
+CONFIG_KEYS = (
+    "schema_version",
+    "auto_update",
+    "check_interval_hours",
+    "last_check_at",
+)
+
+# The skill dir this file was reached through (<skill>/lib/skill.py, never
+# resolved): VERSION and SKILL.md live beside lib/ there. In the source tree
+# <skill>/lib and <skill>/VERSION are links into the shared package; in the
+# published clone and in a self-contained copy they are real files.
+SKILL_DIR = Path(os.path.abspath(__file__)).parent.parent
+# What a linked install updates: the clone holding the real skill dir.
+CLONE_DIR = SKILL_DIR.resolve().parent
+# Written by `install.py --copy-to` into each copy (version, output).
+BUILD_RECORD = "BUILD"
+# Where agents keep skills, as install.py finds them (duplicated there: it
+# cannot import this module). Keep them in step.
+AGENT_HOME_GLOBS = (".claude*", ".grok*")
+SKILLS_SUBDIR = "skills"
+
+# Run from the package's own lib/ there is no SKILL.md beside it, so printed
+# guidance keeps the historical "dev".
+DEFAULT_SKILL = "dev"
+
+
+def invoking_skill() -> str:
+    """Skill namespace to name in output ('dev', 'ops', …), so printed
+    guidance names the command the user came in through."""
+    if (SKILL_DIR / "SKILL.md").is_file():
+        return SKILL_DIR.name
+    return DEFAULT_SKILL
+
+
+# --- small YAML subset (key: value lines; no deps) ---
+
+def parse_kv(text: str) -> dict[str, str]:
+    d: dict[str, str] = {}
+    for line in text.splitlines():
+        m = re.match(r"^([\w][\w-]*)\s*:\s*(.*)$", line)
+        if m:
+            d[m.group(1)] = m.group(2).strip()
+    return d
+
+
+def config_schema_version(cfg: dict[str, str]) -> int:
+    raw = cfg.get("schema_version", "")
+    if raw == "" or raw is None:
+        return 0
+    try:
+        return int(raw)
+    except ValueError:
+        return 0
+
+
+def default_config() -> dict[str, str]:
+    return {
+        "schema_version": str(CONFIG_SCHEMA_VERSION),
+        "auto_update": "false",
+        "check_interval_hours": str(DEFAULT_INTERVAL_HOURS),
+        "last_check_at": "",
+    }
+
+
+def config_source() -> Path | None:
+    """The prefs file to read: the current one, else the pre-devops one."""
+    if CONFIG_PATH.is_file():
+        return CONFIG_PATH
+    if LEGACY_CONFIG_PATH.is_file():
+        return LEGACY_CONFIG_PATH
+    return None
+
+
+def read_config() -> dict[str, str]:
+    source = config_source()
+    if source is None:
+        return default_config()
+    cfg = default_config()
+    on_disk = parse_kv(source.read_text(encoding="utf-8"))
+    # Preserve unknown keys; overlay known defaults then file values.
+    for k, v in on_disk.items():
+        cfg[k] = v
+    v = config_schema_version(cfg)
+    if v > CONFIG_SCHEMA_VERSION:
+        print(
+            f"warning: devops-skill config schema_version {v} is newer than "
+            f"this skill.py (supports {CONFIG_SCHEMA_VERSION}); "
+            f"unknown fields may be ignored",
+            file=sys.stderr,
+        )
+    elif v < CONFIG_SCHEMA_VERSION:
+        cfg["schema_version"] = str(CONFIG_SCHEMA_VERSION)
+    return cfg
+
+
+def write_config(cfg: dict[str, str]) -> None:
+    v = config_schema_version(cfg)
+    if v < CONFIG_SCHEMA_VERSION:
+        cfg["schema_version"] = str(CONFIG_SCHEMA_VERSION)
+    # Never downgrade a newer stamp from a newer script.
+    if v > CONFIG_SCHEMA_VERSION:
+        pass  # keep their schema_version
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    lines = []
+    known = set(CONFIG_KEYS)
+    for k in CONFIG_KEYS:
+        lines.append(f"{k}: {cfg.get(k, '')}")
+    for k, val in cfg.items():
+        if k not in known:
+            lines.append(f"{k}: {val}")
+    CONFIG_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def parse_bool(s: str) -> bool:
+    return str(s).strip().lower() in ("1", "true", "yes", "on")
+
+
+# --- versions ---
+
+def parse_semver(s: str) -> tuple[int, int, int] | None:
+    s = (s or "").strip()
+    m = re.match(r"^(\d+)\.(\d+)\.(\d+)$", s)
+    if not m:
+        return None
+    return int(m.group(1)), int(m.group(2)), int(m.group(3))
+
+
+def local_version() -> str:
+    path = SKILL_DIR / "VERSION"
+    if not path.is_file():
+        return "0.0.0"
+    ver = path.read_text(encoding="utf-8").strip()
+    return ver if ver else "0.0.0"
+
+
+def fetch_public_version(timeout: float = 5.0) -> str | None:
+    try:
+        req = urllib.request.Request(
+            VERSION_URL,
+            headers={"User-Agent": "devops-skill-self-update"},
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8", errors="replace").strip()
+        return body if body else None
+    except (urllib.error.URLError, TimeoutError, OSError):
+        return None
+
+
+def cmp_semver(a: str, b: str) -> int:
+    """Return -1 if a<b, 0 if equal/unparseable-equal treatment, 1 if a>b.
+
+    Unparseable versions compare as less than parseable ones when the other
+    side parses; two unparseable strings compare equal only if identical.
+    """
+    pa, pb = parse_semver(a), parse_semver(b)
+    if pa is None and pb is None:
+        if a == b:
+            return 0
+        return -1 if a < b else 1
+    if pa is None:
+        return -1
+    if pb is None:
+        return 1
+    if pa < pb:
+        return -1
+    if pa > pb:
+        return 1
+    return 0
+
+
+# --- throttle ---
+
+def parse_iso(ts: str) -> datetime | None:
+    ts = (ts or "").strip()
+    if not ts:
+        return None
+    try:
+        if ts.endswith("Z"):
+            ts = ts[:-1] + "+00:00"
+        return datetime.fromisoformat(ts)
+    except ValueError:
+        return None
+
+
+def now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def should_skip_check(cfg: dict[str, str]) -> bool:
+    last = parse_iso(cfg.get("last_check_at", ""))
+    if last is None:
+        return False
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
+    try:
+        hours = float(cfg.get("check_interval_hours") or DEFAULT_INTERVAL_HOURS)
+    except ValueError:
+        hours = DEFAULT_INTERVAL_HOURS
+    if hours < 0:
+        hours = 0
+    elapsed = (now_utc() - last).total_seconds()
+    return elapsed < hours * 3600
+
+
+def stamp_last_check(cfg: dict[str, str]) -> None:
+    cfg["last_check_at"] = now_utc().strftime("%Y-%m-%dT%H:%M:%SZ")
+    write_config(cfg)
+
+
+# --- git apply ---
+
+def is_skill_git_root(path: Path) -> bool:
+    """True only when path itself is a git worktree root (not a subdir of another repo).
+
+    Copied installs have no .git. Public installs are a clone whose
+    toplevel *is* CLONE_DIR (the devops package root, not a skill dir). A package tree nested inside another repo must
+    never be treated as an updatable install (pull would hit that repo's remote).
+    """
+    try:
+        inside = subprocess.run(
+            ["git", "-C", str(path), "rev-parse", "--is-inside-work-tree"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if inside.returncode != 0 or inside.stdout.strip() != "true":
+            return False
+        top = subprocess.run(
+            ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if top.returncode != 0:
+            return False
+        return Path(top.stdout.strip()).resolve() == path.resolve()
+    except OSError:
+        return False
+
+
+def origin_looks_canonical(url: str) -> bool:
+    """True only for github.com/poiurewq/devops (https/ssh/scp forms, optional .git).
+
+    Rejects substring traps (poiurewq/devops-extras) and other owners' repos.
+    The pre-devops repo (poiurewq/dev) is deliberately absent: install.py
+    migrates such a clone away rather than pulling into it.
+    """
+    u = (url or "").strip().lower().rstrip("/")
+    if u.endswith(".git"):
+        u = u[: -len(".git")]
+    # https://token@github.com/... or ssh://git@github.com/...
+    u = re.sub(r"^(https?|ssh)://[^/@]+@", r"\1://", u)
+    # After stripping userinfo, ssh URLs may be ssh://github.com/...
+    if u.startswith("ssh://"):
+        u = u[len("ssh://") :]
+    return u in (
+        "https://github.com/poiurewq/devops",
+        "http://github.com/poiurewq/devops",
+        "git@github.com:poiurewq/devops",
+        "github.com/poiurewq/devops",
+        "github.com:poiurewq/devops",
+    )
+
+
+def origin_url(path: Path) -> str:
+    """URL of remote 'origin', or "" if there is none."""
+    r = subprocess.run(
+        ["git", "-C", str(path), "remote", "get-url", "origin"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return (r.stdout or "").strip() if r.returncode == 0 else ""
+
+
+def build_record() -> dict[str, str] | None:
+    """This copy's build record, or None for a linked install."""
+    path = SKILL_DIR / BUILD_RECORD
+    if not path.is_file():
+        return None
+    return parse_kv(path.read_text(encoding="utf-8"))
+
+
+def rebuild_message(rec: dict[str, str]) -> str:
+    """Why a copy cannot update, and the exact command that rebuilds it."""
+    out = rec.get("output", "")
+    cmd = f"curl -fsSL {RAW_INSTALLER_URL} | {INSTALL_PYTHON} - --copy-to {shlex.quote(out)}"
+    return (
+        f"this is a self-contained copy (devops {rec.get('version') or local_version()}) "
+        "and cannot update itself; on the machine that built it, run:\n"
+        f"  {cmd}\n"
+        f"then put the new copies from {out} wherever the old ones went"
+    )
+
+
+def git_pull_ff(path: Path) -> tuple[bool, str]:
+    """Fast-forward pull origin main. Returns (ok, message)."""
+    rec = build_record()
+    if rec is not None:
+        return False, rebuild_message(rec)
+    if not is_skill_git_root(path):
+        return (
+            False,
+            "this install is not a standalone git clone of poiurewq/devops "
+            "(a copied tree, or one nested inside another repo); reinstall with:\n"
+            f"  curl -fsSL {RAW_INSTALLER_URL} | {INSTALL_PYTHON} -",
+        )
+    url = origin_url(path)
+    if not url:
+        return False, "no git remote 'origin'; set origin to poiurewq/devops and retry"
+    if not origin_looks_canonical(url):
+        return (
+            False,
+            f"origin is {url!r}, expected poiurewq/devops; "
+            "refusing to pull a different remote",
+        )
+    r = subprocess.run(
+        ["git", "-C", str(path), "pull", "--ff-only", "origin", "main"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    out = (r.stdout or "").strip()
+    err = (r.stderr or "").strip()
+    detail = out if out else err
+    if r.returncode != 0:
+        return False, detail or "git pull --ff-only failed"
+    return True, detail or "already up to date"
+
+
+# --- siblings ---
+
+def is_link(path: Path) -> bool:
+    """A symlink, or a directory junction (what Windows installs make).
+    Duplicated from install.py, as is make_dir_link."""
+    if path.is_symlink():
+        return True
+    try:
+        tag = getattr(os.lstat(path), "st_reparse_tag", 0)
+    except OSError:
+        return False
+    # IO_REPARSE_TAG_MOUNT_POINT; the stat module defines it on Windows only.
+    return tag == 0xA0000003
+
+
+def make_dir_link(target: Path, source: Path) -> None:
+    """Point target at the directory source: a junction on Windows, which
+    needs no admin rights or Developer Mode, else a symlink."""
+    if not WINDOWS:
+        target.symlink_to(source, target_is_directory=True)
+        return
+    r = subprocess.run(["cmd", "/c", "mklink", "/J", str(target), str(source)],
+                       capture_output=True, text=True, check=False)
+    if r.returncode != 0:
+        raise OSError((r.stderr or r.stdout or "").strip()
+                      or "mklink /J failed")
+
+
+def package_skills(pkg: Path) -> list[str]:
+    """Skill dirs in the package (a SKILL.md inside), as install.py finds them."""
+    try:
+        return sorted(d.name for d in pkg.iterdir()
+                      if not d.name.startswith(".") and (d / "SKILL.md").is_file())
+    except OSError:
+        return []
+
+
+def half_installed_roots(skills: list[str]) -> list[tuple[Path, list[str]]]:
+    """(skills root, missing skills) for each agent skills root that links
+    some skill of this clone but not all of them.
+
+    The shims exec lib/ through the resolved skill dir, so this process
+    never learns which skills root it was reached through: every agent
+    root is scanned instead (cheap lstats), which also fixes roots other
+    than the one in use. A skill counts as missing when <root>/<skill>/
+    SKILL.md is absent.
+    """
+    found = []
+    for pattern in AGENT_HOME_GLOBS:
+        for root in sorted(Path.home().glob(f"{pattern}/{SKILLS_SUBDIR}")):
+            linked = False
+            for name in skills:
+                target = root / name
+                try:
+                    if is_link(target) and \
+                            target.resolve() == (CLONE_DIR / name).resolve():
+                        linked = True
+                        break
+                except OSError:
+                    continue
+            if not linked:
+                continue
+            missing = [n for n in skills if not (root / n / "SKILL.md").is_file()]
+            if missing:
+                found.append((root, missing))
+    return found
+
+
+def link_missing_siblings() -> None:
+    """Link the skills of this package missing beside a linked one.
+
+    dev and ops always install together, but a linked install from before
+    that rule may hold only one. Only links into the canonical clone count,
+    and a copy is never touched. A free path gets the link; an occupied one
+    gets the installer command, since whatever sits there is not ours to
+    replace.
+    """
+    if build_record() is not None:
+        return
+    half = half_installed_roots(package_skills(CLONE_DIR))
+    # The git checks cost subprocesses, so they run only when there is work.
+    if not half or not is_skill_git_root(CLONE_DIR) \
+            or not origin_looks_canonical(origin_url(CLONE_DIR)):
+        return
+    for root, missing in half:
+        for name in missing:
+            target = root / name
+            if not target.exists() and not is_link(target):
+                try:
+                    make_dir_link(target, CLONE_DIR / name)
+                    print(f"devops: linked the missing {name} skill into "
+                          f"{root} (dev and ops install together)")
+                    continue
+                except OSError as e:
+                    why = str(e)
+            else:
+                why = "something else is at that path"
+            print(f"devops: the {name} skill is missing from {root} ({why}); "
+                  f"install it with:\n  curl -fsSL {RAW_INSTALLER_URL} | "
+                  f"{INSTALL_PYTHON} -",
+                  file=sys.stderr)
+
+
+# --- commands ---
+
+def cmd_check(*, force: bool = False) -> int:
+    link_missing_siblings()
+    cfg = read_config()
+    if not force and should_skip_check(cfg):
+        return 0
+
+    local = local_version()
+    public = fetch_public_version()
+    # Always stamp after an attempted network check (or force) so we throttle
+    # even when public is unreachable — avoids hammering on offline days.
+    stamp_last_check(cfg)
+
+    if public is None:
+        return 0  # network fail: silent
+
+    if cmp_semver(local, public) >= 0:
+        return 0  # local == or ahead: silent
+
+    # Behind. A copy can neither pull nor auto-update: say how to rebuild.
+    rec = build_record()
+    if rec is not None:
+        print(f"devops {public} available (you have {local}); {rebuild_message(rec)}")
+        return 0
+    if parse_bool(cfg.get("auto_update", "false")):
+        ok, msg = git_pull_ff(CLONE_DIR)
+        if ok:
+            new_local = local_version()
+            print(f"devops updated: {local} → {new_local}")
+            return 0
+        print(
+            f"devops {public} available (you have {local}); "
+            f"auto-update failed: {msg}",
+            file=sys.stderr,
+        )
+        return 1
+
+    skill = invoking_skill()
+    print(
+        f"devops {public} available (you have {local}) — "
+        f"/{skill} skill update, or /{skill} skill update auto on"
+    )
+    return 0
+
+
+def cmd_update() -> int:
+    link_missing_siblings()
+    local = local_version()
+    ok, msg = git_pull_ff(CLONE_DIR)
+    if not ok:
+        print(f"error: {msg}", file=sys.stderr)
+        return 1
+    new_local = local_version()
+    if new_local != local:
+        print(f"devops updated: {local} → {new_local}")
+    else:
+        # pull may have moved commits without VERSION change, or already current
+        print(f"devops up to date ({new_local})")
+    # Refresh throttle stamp so a following check stays quiet.
+    cfg = read_config()
+    stamp_last_check(cfg)
+    return 0
+
+
+def cmd_auto(value: str | None) -> int:
+    cfg = read_config()
+    if value is None or value == "":
+        on = parse_bool(cfg.get("auto_update", "false"))
+        print(f"auto_update: {'on' if on else 'off'}")
+        return 0
+    v = value.strip().lower()
+    if v in ("on", "true", "yes", "1"):
+        cfg["auto_update"] = "true"
+    elif v in ("off", "false", "no", "0"):
+        cfg["auto_update"] = "false"
+    else:
+        print("error: expected on|off", file=sys.stderr)
+        return 1
+    write_config(cfg)
+    print(f"auto_update: {'on' if parse_bool(cfg['auto_update']) else 'off'}")
+    return 0
+
+
+def cmd_status() -> int:
+    cfg = read_config()
+    on = parse_bool(cfg.get("auto_update", "false"))
+    print(f"devops {local_version()} (dev + ops)")
+    print(f"auto-update: {'on' if on else 'off'}")
+    skill = invoking_skill()
+    print(f"update:  /{skill} skill update")
+    print(f"feedback:  /{skill} skill feedback <text>")
+    return 0
+
+
+def install_kind() -> str:
+    """How this skill copy was installed — coarse label for issue triage.
+
+    Only the canonical clone is updatable, so distinguish it from a git root
+    pointing elsewhere (fork, or the skill developed inside another repo).
+    """
+    if build_record() is not None:
+        return "self-contained copy"
+    if not is_skill_git_root(CLONE_DIR):
+        return "copied (no git)"
+    if origin_looks_canonical(origin_url(CLONE_DIR)):
+        return "git clone"
+    return "git clone (other origin)"
+
+
+def feedback_context() -> str:
+    """Environment lines appended to an issue body.
+
+    Goes to a PUBLIC repo: version and platform only — never paths, repo or
+    board names, or task content.
+    """
+    return "\n".join(
+        [
+            f"- devops: {local_version()}",
+            f"- install: {install_kind()}",
+            f"- python: {platform.python_version()}",
+            f"- os: {platform.system()} {platform.release()}",
+        ]
+    )
+
+
+# gh issue create speaks GraphQL, which some hosted agent sandboxes refuse;
+# feedback then retries over REST, as lib/tasks.py does for PR calls (its
+# GRAPHQL_BLOCKED and DEVOPS_PR_TRANSPORT, duplicated here on purpose: this
+# module stays importable without tasks.py).
+GRAPHQL_BLOCKED = "graphql is not available"
+
+
+def graphql_blocked(returncode: int, err: str) -> bool:
+    return returncode != 0 and GRAPHQL_BLOCKED in (err or "").lower()
+
+
+def new_issue_url(title: str, body: str) -> str:
+    """A prefilled new-issue link, for filing by hand when gh cannot."""
+    q = urllib.parse.urlencode({"title": title, "body": body},
+                               quote_via=urllib.parse.quote)
+    return f"{CANONICAL_REPO}/issues/new?{q}"
+
+
+def file_issue(title: str, body: str) -> tuple[str | None, str]:
+    """File the issue with gh; returns (issue URL, "") or (None, error)."""
+    rest = (os.environ.get("DEVOPS_PR_TRANSPORT") or "").strip().lower() == "rest"
+    if not rest:
+        r = subprocess.run(
+            ["gh", "issue", "create", "--repo", REPO_SLUG,
+             "--title", title, "--body", body],
+            capture_output=True, text=True, check=False,
+        )
+        detail = (r.stderr or r.stdout or "").strip()
+        if r.returncode == 0:
+            # gh prints the new issue URL as its last stdout line.
+            lines = (r.stdout or "").strip().splitlines()
+            return (lines[-1] if lines else CANONICAL_REPO + "/issues"), ""
+        if not graphql_blocked(r.returncode, detail):
+            return None, f"gh issue create failed: {detail}"
+    r = subprocess.run(
+        ["gh", "api", "--method", "POST", f"repos/{REPO_SLUG}/issues",
+         "-f", f"title={title}", "-f", f"body={body}", "--jq", ".html_url"],
+        capture_output=True, text=True, check=False,
+    )
+    if r.returncode == 0 and r.stdout.strip():
+        return r.stdout.strip(), ""
+    detail = (r.stderr or r.stdout or "").strip()
+    return None, f"filing over the REST API (gh api) failed: {detail}"
+
+
+def cmd_feedback(title: str, body: str | None) -> int:
+    title = (title or "").strip()
+    if not title:
+        print("error: feedback title is empty", file=sys.stderr)
+        return 1
+    text = (body or "").strip()
+    full_body = f"{text}\n\n---\n\n{feedback_context()}" if text else feedback_context()
+    if shutil.which("gh") is None:
+        url, err = None, "gh not found (install GitHub CLI and run 'gh auth login')"
+    else:
+        url, err = file_issue(title, full_body)
+    if url is None:
+        print(f"error: {err}", file=sys.stderr)
+        print("not filed; open this prefilled link to file it by hand:\n"
+              f"  {new_issue_url(title, full_body)}", file=sys.stderr)
+        return 1
+    print(f"filed: {url}")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    p = argparse.ArgumentParser(
+        prog="skill.py",
+        description="Skill-meta commands for devops (github.com/poiurewq/devops)",
+    )
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("status", help="version, auto-update state, skill commands")
+
+    c = sub.add_parser("check", help="throttled version check / optional auto-apply")
+    c.add_argument(
+        "--force",
+        action="store_true",
+        help="ignore check_interval_hours throttle",
+    )
+
+    sub.add_parser("update", help="git pull --ff-only origin main")
+
+    a = sub.add_parser("auto", help="show or set auto_update")
+    a.add_argument(
+        "value",
+        nargs="?",
+        help="on|off (omit to show current)",
+    )
+
+    r = sub.add_parser("feedback", help=f"open an issue on {REPO_SLUG}")
+    r.add_argument("--title", required=True, help="issue title")
+    r.add_argument("--body", help="issue body (context is appended)")
+
+    args = p.parse_args(argv)
+    if args.cmd == "status":
+        return cmd_status()
+    if args.cmd == "check":
+        return cmd_check(force=bool(getattr(args, "force", False)))
+    if args.cmd == "update":
+        return cmd_update()
+    if args.cmd == "auto":
+        return cmd_auto(getattr(args, "value", None))
+    if args.cmd == "feedback":
+        return cmd_feedback(args.title, getattr(args, "body", None))
+    p.error(f"unknown command: {args.cmd}")
+    return 2
+
+
+if __name__ == "__main__":
+    # A Windows pipe defaults to the ANSI code page; print UTF-8 everywhere.
+    for _stream in (sys.stdout, sys.stderr):
+        _stream.reconfigure(encoding="utf-8")
+    sys.exit(main())

@@ -6,5 +6,9 @@ TASKS verify <id> "<how the children met the goal>"   # close an umbrella
 TASKS note <id> [--at "<step>"] "<what the work did not predict>"
             [--date YYYY-MM-DD]         # Note (<date>): …; any status but
                                         # proposed/not-planned, done included
+TASKS distilled <sitting> "<T3-T7, T9>" # tasks whose every candidate the
+                                        # user has dealt with; stays open
 TASKS ran <id> [--flow <name[,name]>] --record "<inputs; deviations>"
-               [--date <date|timestamp>]   # close an ops task with its run record
+               [--date <date|timestamp>]   # close an ops task with its run record;
+                                        # on a distill sitting also records
+                                        # it and its dependents as distilled

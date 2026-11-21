@@ -25,6 +25,22 @@ Useful flags: `--dry-run` prints the plan and changes nothing; `--home DIR` puts
 
 Requires `git`, `python3`, and `gh` (GitHub CLI) signed in — init ties your board handle to your GitHub login, for `/ops` too; `/dev` also needs it authenticated against the target repo.
 
+### Windows
+
+Install from Git Bash. You need [Git for Windows](https://gitforwindows.org) (which provides Git Bash and `curl`), Python 3 from [python.org](https://www.python.org/downloads/windows/) with its `py` launcher (the Microsoft Store Python has no `py` launcher, and the skills run their scripts with `py`), and `gh` signed in. Then:
+
+```bash
+py -m pip install --user tzdata
+curl -fsSL https://raw.githubusercontent.com/poiurewq/devops/main/install.py | py -
+```
+
+- Piped like this, the installer asks nothing: it links into the skill roots already in use (`~/.claude/skills` and the like), replaces an existing install only with `--yes`, and prints what it did. To choose roots and replacements yourself, run `py install.py` from the clone (`.local\share\devops` in your user folder) in a cmd or PowerShell window; Git Bash is usually not a console the installer can ask in. `--root PATH` picks another root.
+- `tzdata` is required: Windows ships no timezone database, and without it every command on a board with a scheduled recurring task stops. The installer warns when it is missing.
+- Each skill is linked as a directory junction rather than a symlink, so no admin rights or Developer Mode are needed. Updating is still one pull.
+- Board changes are git commits, so set your git identity if this machine has none: `git config --global user.name "<name>"` and `git config --global user.email "<email>"`.
+- Task worktrees nest deep (`<repo>/.dev/worktrees/<id>-<slug>/…`) and can pass Windows' 260-character path limit. Run `git config --global core.longpaths true`, and turn on long paths in Windows (the python.org installer's "Disable path length limit" button does it).
+- The live `./board` viewer does not run on Windows; `/dev board` prints the board instead.
+
 ### Self-contained copies
 
 Instead of links, the installer can build self-contained copies: each skill becomes a real directory that carries everything it needs, with no symlinks and nothing outside it. Use them wherever a link into one clone will not do, such as a skills directory that must stand on its own, or an agent that loads skills only from an uploaded folder (cloud agents, for example):
@@ -69,17 +85,16 @@ To add a skills directory later, or to repair a link, re-run the installer. It f
 ## Layout (this repo)
 
 ```
-install.py         # clone once, symlink each skill into your agent skill dirs
+install.py         # clone once, link each skill into your agent skill dirs
 VERSION            # one semver for the package (dev and ops ship together)
-lib/tasks.py       # board state API (shared)
-lib/skill.py       # status / update / feedback (shared)
-shared/routes/      # routes both skills follow (init, add, absorb, plan, shape, iteration, status, decide, verify, flows, flow-create, flow-review, gui, schedule, wake, unattended, skill, tour)
 src/               # source of both SKILL.md files: python3 src/build.py rebuilds them
 dev/SKILL.md       # /dev agent-facing router (built from src/; edit there)
-dev/routes/         # /dev multi-step procedures
-dev/scripts/       # shims that exec dev/lib/ (resolve symlinks first)
-dev/lib, dev/VERSION, dev/shared  # links to ../lib, ../VERSION, ../shared; real files in a copy
+dev/routes/        # /dev multi-step procedures
+dev/scripts/       # shims that run dev/lib/ (resolve links first)
+dev/lib/           # tasks.py (board state API), skill.py (status / update / feedback)
+dev/shared/routes/ # routes both skills follow (init, add, absorb, plan, shape, iteration, distill, status, decide, verify, flows, flow-create, flow-review, gui, schedule, wake, unattended, skill, tour)
+dev/VERSION        # the package VERSION
 ops/               # /ops, same shape
 ```
 
-Each skill directory (`dev/`, `ops/`) is what gets linked into an agent's skills root, or copied by `--copy-to`. Its shims and routes only ever reach files inside the skill directory (`<skill>/lib/`, `<skill>/VERSION`, `<skill>/shared/`), which is what lets a copy stand alone.
+Each skill directory (`dev/`, `ops/`) is what gets linked into an agent's skills root, or copied by `--copy-to`. Its shims and routes only ever reach files inside the skill directory (`<skill>/lib/`, `<skill>/VERSION`, `<skill>/shared/`), which is what lets a copy stand alone. `lib/`, `shared/` and `VERSION` are identical in both skills: the package's source keeps one copy of each, and this repo carries a copy inside each skill instead of symlinks, so it checks out the same on every platform.

@@ -133,6 +133,10 @@ OPS = "ops"
 # (`add --rehearsal`). The field, not the `Rehearse ` title, is what makes a
 # task one: `update` refuses a real run and a rehearsal of the same flow id
 # both being doing (rehearsal_clash_refusal).
+# distill: optional, `true` on the ops task that is a distill sitting
+# (`add --distill`). Only such a task takes `distilled`, and `ran` on one
+# appends a Distilled line for the sitting and its dependents (the task it
+# filed, which lists the sitting in its deps).
 # waiting: optional, `<who> by <YYYY-MM-DD>` — work stopped at an
 # [external] step or a handed-off sequence, awaiting a third party or an
 # agent's report. Set by `wait`; only a doing task
@@ -150,12 +154,12 @@ OPS = "ops"
 # is set, claim refuses anyone else's resume.
 FIELDS = ["id", "title", "area", "status", "kind", "type", "assignee", "branch",
           "deps", "pr", "needs", "waiting", "unattended", "flow", "rehearsal",
-          "created", "cadence", "schedule", "last_run", "next_due",
+          "distill", "created", "cadence", "schedule", "last_run", "next_due",
           "routine"]
 # Written only when non-empty, so an ordinary task file is byte-identical to
 # what a pre-schema-4 script produced. Older readers ignore them either way.
 # `type` is not among them: render always writes it (schema 8).
-OPTIONAL_FIELDS = ("waiting", "unattended", "flow", "rehearsal",
+OPTIONAL_FIELDS = ("waiting", "unattended", "flow", "rehearsal", "distill",
                    "cadence", "schedule", "last_run", "next_due",
                    "routine")
 # Board push races on a shared integration branch: rebase onto origin and
@@ -170,6 +174,9 @@ GIT_NETWORK_TIMEOUT_S = 60
 GIT_CODE_NETWORK_TIMEOUT_S = 600
 GIT_NETWORK_COMMANDS = ("fetch", "push", "ls-remote", "pull")
 GIT_TIMEOUT_RC = 124  # run_with_deadline's exit code for a timed-out call
+# Native Windows (Git for Windows): no process groups by signal, no termios,
+# so a few things go the Windows way or are refused there.
+WINDOWS = os.name == "nt"
 # Land: merge retries when GitHub reports not-mergeable / recomputing.
 # Land never rewrites the task branch; a conflict is merged forward.
 LAND_RETRIES = 5
@@ -196,9 +203,14 @@ def run_with_deadline(args, cwd, timeout):
     run(timeout=) kills only git and leaves the stalled ssh running. So git
     gets its own session and the whole process group is killed. A timeout
     comes back as a failed CompletedProcess (GIT_TIMEOUT_RC), never an
-    exception."""
+    exception. On Windows the group is a new process group, killed as a
+    tree by taskkill."""
+    if WINDOWS:
+        group = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+    else:
+        group = {"start_new_session": True}
     p = subprocess.Popen(args, cwd=cwd, text=True, stdout=subprocess.PIPE,
-                         stderr=subprocess.PIPE, start_new_session=True)
+                         stderr=subprocess.PIPE, **group)
     try:
         out, err = p.communicate(timeout=timeout)
         return subprocess.CompletedProcess(args, p.returncode, out, err)
@@ -215,10 +227,14 @@ def run_with_deadline(args, cwd, timeout):
 
 
 def _kill_group(p):
-    try:
-        os.killpg(p.pid, signal.SIGKILL)
-    except (ProcessLookupError, PermissionError):
-        pass
+    if WINDOWS:
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(p.pid)],
+                       capture_output=True)
+    else:
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
     try:
         p.communicate(timeout=5)
     except subprocess.TimeoutExpired:
@@ -335,13 +351,22 @@ def is_ancestor(root, maybe_anc, ref):
 
 
 def tdir(scope):
-    """Board dir relative to repo root ('.tasks' or '<scope>/.tasks')."""
-    return os.path.normpath(os.path.join(scope, TASKS_DIR))
+    """Board dir relative to repo root ('.tasks' or '<scope>/.tasks'),
+    `/`-separated: it also names a path in git's `<rev>:<path>`, which
+    rejects backslashes."""
+    return scope_form(os.path.normpath(os.path.join(scope, TASKS_DIR)))
 
 
 def fdir(scope):
-    """Flow store dir relative to repo root ('.flows' or '<scope>/.flows')."""
-    return os.path.normpath(os.path.join(scope, FLOWS_DIR))
+    """Flow store dir relative to repo root ('.flows' or '<scope>/.flows'),
+    `/`-separated like tdir."""
+    return scope_form(os.path.normpath(os.path.join(scope, FLOWS_DIR)))
+
+
+def shown_path(path):
+    """A path as printed for the user: one separator style (the OS's), since
+    a root from git (`C:/…`) joined with a scope would otherwise mix them."""
+    return os.path.normpath(path)
 
 
 def product_root(root, scope):
@@ -371,7 +396,7 @@ def append_ignore_line(path, line):
     parent = os.path.dirname(path)
     if parent:
         os.makedirs(parent, exist_ok=True)
-    with open(path, "a") as f:
+    with open(path, "a", newline="\n") as f:
         if existing and not existing.endswith("\n"):
             f.write("\n")
         f.write(line + "\n")
@@ -420,13 +445,29 @@ def skill_path_is_ephemeral(path):
         os.path.abspath(path).replace("\\", "/")))
 
 
+def viewer_tasks_py(real):
+    """The tasks.py path ./board bakes, given this file's real path.
+
+    Resolved, unlike invoking_skill: /dev and /ops reach lib/ through
+    different skill-dir links, and baking either would flip the wrapper
+    back and forth between them. Where each skill carries its own lib/ (the
+    published tree, a self-contained copy) resolving is not enough, since
+    the two real paths differ: there dev's copy is baked whichever skill
+    ran, as the shared lib/ reads as dev too.
+    """
+    skill_dir = os.path.dirname(os.path.dirname(real))
+    dev_copy = os.path.join(os.path.dirname(skill_dir), "dev", "lib",
+                            "tasks.py")
+    if os.path.isfile(os.path.join(skill_dir, "SKILL.md")) \
+            and os.path.isfile(dev_copy):
+        return dev_copy
+    return real
+
+
 def viewer_script():
     """Current ./board contents for this install."""
-    # Resolved, unlike invoking_skill: /dev and /ops reach lib/ through
-    # different skill-dir links, and baking either would flip the wrapper
-    # back and forth between them.
     return BOARD_VIEWER_SCRIPT.replace(
-        "__TASKS_PY__", repr(os.path.realpath(__file__)))
+        "__TASKS_PY__", repr(viewer_tasks_py(os.path.realpath(__file__))))
 
 
 def viewer_is_stock(text):
@@ -453,10 +494,11 @@ def ensure_board_viewer(root, scope, force=False):
 
     Returns (path, wrote). Leaves a user-edited file and a directory alone;
     force overwrites an edited one (./board update). Never writes when this
-    copy of the skill is ephemeral (skill_path_is_ephemeral).
+    copy of the skill is ephemeral (skill_path_is_ephemeral), nor on
+    Windows, where the live viewer does not run.
     """
     dest = viewer_path(root, scope)
-    if os.path.isdir(dest):
+    if WINDOWS or os.path.isdir(dest):
         return dest, False
     content = viewer_script()
     if os.path.isfile(dest):
@@ -474,7 +516,7 @@ def ensure_board_viewer(root, scope, force=False):
               f"which is deleted at land; run 'board' from the installed "
               f"skill to refresh the wrapper", file=sys.stderr)
         return dest, False
-    with open(dest, "w", encoding="utf-8") as f:
+    with open(dest, "w", encoding="utf-8", newline="\n") as f:
         f.write(content)
     os.chmod(dest, 0o755)
     return dest, True
@@ -537,14 +579,19 @@ def write_cache(root, scope, branch):
 SCOPE_OVERRIDE = None  # set from --scope in main()
 
 
+def scope_form(rel):
+    """A scope as the board writes it: `/`-separated on every OS, since it
+    names branches, PR titles and commit subjects every clone shares."""
+    return rel.replace(os.sep, "/")
+
+
 def discover_boards(root):
     """All board scopes visible in the checkout (shallow scan for board.yml)."""
     scopes = set()
     for pat in (".tasks", "*/.tasks", "*/*/.tasks", "*/*/*/.tasks"):
         for p in glob.glob(os.path.join(root, pat, "board.yml")):
             d = os.path.dirname(os.path.dirname(p))
-            rel = os.path.relpath(d, root)
-            scopes.add(rel)
+            scopes.add(scope_form(os.path.relpath(d, root)))
     return sorted(scopes)
 
 
@@ -559,7 +606,7 @@ def find_scope(root):
         scope = os.path.normpath(SCOPE_OVERRIDE)
         if scope != "." and (os.path.isabs(scope) or scope.startswith("..")):
             sys.exit("error: --scope must be a subdir path relative to the repo root")
-        return scope
+        return scope_form(scope)
     # Prefer the worktree containing cwd (task worktrees are linked trees).
     try:
         wt = worktree_root()
@@ -569,7 +616,7 @@ def find_scope(root):
     if s is not None:
         return s
     # cwd outside any worktree but under primary: walk primary
-    if os.path.realpath(wt) != os.path.realpath(root):
+    if not same_path(wt, root):
         s = nearest_scope(root, root)
         if s is not None:
             return s
@@ -588,16 +635,17 @@ def nearest_scope(walk_root, primary=None):
     reading it from primary lets a task worktree resolve the same way."""
     root_abs = os.path.realpath(walk_root)
     cur = os.path.realpath(os.getcwd())
-    if not (cur == root_abs or cur.startswith(root_abs + os.sep)):
+    if not path_is_inside(cur, root_abs):
         cur = root_abs
     probe = cur
     while True:
-        rel = "." if probe == root_abs else os.path.relpath(probe, root_abs)
+        at_root = same_path(probe, root_abs)
+        rel = "." if at_root else scope_form(os.path.relpath(probe, root_abs))
         if os.path.exists(os.path.join(probe, TASKS_DIR, "board.yml")):
             return rel
         if primary is not None and cached_board(primary, rel):
             return rel
-        if probe == root_abs:
+        if at_root:
             break
         probe = os.path.dirname(probe)
     return None
@@ -942,7 +990,7 @@ def board_commit(root, branch, bw, scope, message, queue=True):
 
 def update_local_branch(root, scope, branch, sha):
     """Best-effort: fast-forward the local branch / checkout to include sha."""
-    bw_path = os.path.realpath(os.path.join(root, board_worktree_rel(scope)))
+    bw_path = path_key(os.path.join(root, board_worktree_rel(scope)))
     out = git("worktree", "list", "--porcelain", cwd=root).stdout
     checkout = None
     path = None
@@ -950,7 +998,7 @@ def update_local_branch(root, scope, branch, sha):
         if line.startswith("worktree "):
             path = line.split(" ", 1)[1]
         elif line == f"branch refs/heads/{branch}":
-            if os.path.realpath(path) != bw_path:
+            if path_key(path) != bw_path:
                 checkout = path
     if checkout:
         clean = git("status", "--porcelain", cwd=checkout, check=False).stdout.strip() == ""
@@ -1300,7 +1348,7 @@ def write_board_cfg(bw, scope, cfg):
     for k, v in cfg.items():
         if k not in known:
             lines.append(f"{k}: {v}")
-    with open(board_yml_path(bw, scope), "w") as f:
+    with open(board_yml_path(bw, scope), "w", newline="\n") as f:
         f.write("\n".join(lines) + "\n")
 
 
@@ -1321,7 +1369,7 @@ def read_areas(bw, scope):
 
 
 def write_areas(bw, scope, mods):
-    with open(areas_path(bw, scope), "w") as f:
+    with open(areas_path(bw, scope), "w", newline="\n") as f:
         f.write("# Areas\n\n")
         for name, desc in mods.items():
             f.write(f"- {name}: {desc}\n")
@@ -1689,7 +1737,7 @@ def flow_line(f, show_status=False):
 
 
 def write_flow(meta):
-    with open(meta["path"], "w") as f:
+    with open(meta["path"], "w", newline="\n") as f:
         f.write(render_flow(meta))
 
 
@@ -1981,7 +2029,7 @@ def write_registry(meta):
     lines = ["---"] + [f"{k}: {meta.get(k, '')}"
                        for k in REGISTRIES[meta["kind"]]["fields"]] + ["---"]
     body = (meta.get("body") or "").strip()
-    with open(meta["path"], "w") as f:
+    with open(meta["path"], "w", newline="\n") as f:
         f.write("\n".join(lines) + ("\n\n" + body + "\n" if body else "\n"))
 
 
@@ -2082,6 +2130,12 @@ def parse_routine_schedule(value):
     return sched
 
 
+def tzdata_install():
+    """The command that gives this Python a timezone database: Windows has no
+    system zone data, so zoneinfo reads it from the tzdata package."""
+    return f"{'py' if WINDOWS else 'python3'} -m pip install tzdata"
+
+
 def read_routine_schedule(r):
     """(parsed schedule, None), or (None, why it cannot be read). Never
     exits: every board read derives stalls from it, and a zone this
@@ -2097,6 +2151,9 @@ def read_routine_schedule(r):
             try:
                 zoneinfo.ZoneInfo(toks[5])
             except (ValueError, OSError, zoneinfo.ZoneInfoNotFoundError):
+                if not zoneinfo.available_timezones():
+                    return None, ("no timezone database (install one with: "
+                                  f"{tzdata_install()})")
                 return None, f"unknown zone {toks[5]}"
         return None, f"bad value '{raw}'"
 
@@ -2826,6 +2883,9 @@ def parse_schedule(value, what="schedule"):
     try:
         tz = zoneinfo.ZoneInfo(toks[5])
     except (ValueError, zoneinfo.ZoneInfoNotFoundError):
+        if not zoneinfo.available_timezones():
+            sys.exit(f"error: {what} '{value}': this Python has no timezone "
+                     f"database; install one with: {tzdata_install()}")
         sys.exit(f"error: bad {what} '{value}': unknown timezone "
                  f"'{toks[5]}' (an IANA name such as America/New_York)")
     sched = {"tz": tz, "dom_star": toks[2].startswith("*"),
@@ -3121,6 +3181,17 @@ def validate_rehearsal(meta):
                  f"T{meta['id']} would be recurring")
 
 
+def is_distill(t):
+    return (t.get("distill") or "").strip() == "true"
+
+
+def validate_distill(meta):
+    """A distill sitting is an ops task. Exits on error."""
+    if is_distill(meta) and not is_ops(meta):
+        sys.exit(f"error: a distill sitting is an ops task; T{meta['id']} "
+                 f"would be {task_type(meta)}")
+
+
 def rehearsal_clash_refusal(meta, tasks):
     """Refusal message when this doing ops task and another doing ops task
     share a flow id with opposite rehearsal markers, else ''. A real run
@@ -3201,7 +3272,7 @@ def rearm_recurring(root, scope, branch, bw, meta, ran_on=None, record=None):
     meta["status"] = "backlog"
     meta["assignee"] = meta["branch"] = meta["pr"] = ""
     meta["body"] = append_body(meta["body"], record or f"Ran ({day}).")
-    with open(meta["path"], "w") as f:
+    with open(meta["path"], "w", newline="\n") as f:
         f.write(render_task(meta))
     board_commit(root, branch, bw, scope,
                  f"dev: T{meta['id']} ran {day} (re-armed)")
@@ -3985,7 +4056,7 @@ def free_task_branch_from_primary(root, branch, integration):
     checkout = branch_checkout_cwd(root, branch)
     if not checkout:
         return
-    if os.path.realpath(checkout) != os.path.realpath(root):
+    if not same_path(checkout, root):
         return  # already on a linked worktree — caller reuses it
     if worktree_is_dirty(root):
         sys.exit(f"error: primary clone is on task branch '{branch}' and dirty; "
@@ -4026,11 +4097,11 @@ def resolve_task_ready_path(root, scope, tid, title, branch, integration):
     checks out the task branch on primary. Idempotent resume reuses an
     existing task worktree for this id/branch.
     """
-    root_rp = os.path.realpath(root)
+    root_rp = path_key(root)
 
     # Resume: existing linked worktree for this task (never primary).
     for path in find_task_worktree_paths(root, scope, tid, branch):
-        if os.path.realpath(path) == root_rp:
+        if path_key(path) == root_rp:
             continue
         if not os.path.isdir(path):
             continue
@@ -4050,7 +4121,7 @@ def resolve_task_ready_path(root, scope, tid, title, branch, integration):
 
     # Branch already on a non-primary worktree (odd path / renamed title).
     checkout = branch_checkout_cwd(root, branch)
-    if checkout and os.path.realpath(checkout) != root_rp:
+    if checkout and path_key(checkout) != root_rp:
         return checkout
 
     # Free the branch if a prior claim left it on primary, then always add
@@ -4100,10 +4171,21 @@ def require_gh(root):
                  f"Run: gh auth login\n{err}")
 
 
+def path_key(path):
+    """A path in comparable form: resolved, and case-folded on Windows, where
+    git and the shell may spell one path in different cases. Compare paths
+    through this, never bare realpath."""
+    return os.path.normcase(os.path.realpath(path))
+
+
+def same_path(a, b):
+    return path_key(a) == path_key(b)
+
+
 def path_is_inside(inner, outer):
-    inner = os.path.realpath(inner)
-    outer = os.path.realpath(outer)
-    return inner == outer or inner.startswith(outer + os.sep)
+    inner = path_key(inner)
+    outer = path_key(outer)
+    return inner == outer or inner.startswith(outer.rstrip(os.sep) + os.sep)
 
 
 def list_worktrees(root):
@@ -4173,7 +4255,7 @@ def find_task_worktree_paths(root, scope, tid, branch):
         for t in list_worktrees(root):
             if t.get("branch") == branch:
                 path = t["path"]
-                rp = os.path.realpath(path)
+                rp = path_key(path)
                 if rp not in seen:
                     seen.add(rp)
                     found.append(path)
@@ -4186,7 +4268,7 @@ def find_task_worktree_paths(root, scope, tid, branch):
                 path = os.path.join(wt_dir, name)
                 if not os.path.isdir(path):
                     continue
-                rp = os.path.realpath(path)
+                rp = path_key(path)
                 if rp in seen:
                     continue
                 # Ids restart each iteration and carried tasks are
@@ -5259,7 +5341,7 @@ def mark_task_done(root, scope, branch, bw, meta):
     if meta["status"] == "done":
         return False
     meta["status"] = "done"
-    with open(meta["path"], "w") as f:
+    with open(meta["path"], "w", newline="\n") as f:
         f.write(render_task(meta))
     board_commit(root, branch, bw, scope,
                  f"dev: update T{meta['id']} (status=done)")
@@ -5281,7 +5363,7 @@ def _switch_primary_off_task_branch(root, scope, branch, actions):
     task branch checked out on the primary tree (not only in a task worktree).
     """
     still = branch_checkout_cwd(root, branch)
-    if not still or os.path.realpath(still) != os.path.realpath(root):
+    if not still or not same_path(still, root):
         return
     if worktree_is_dirty(root):
         actions.append(f"primary clone still on '{branch}' (dirty; not switching)")
@@ -5463,10 +5545,9 @@ def cleanup_task_artifacts(root, scope, bw, meta, branch=None, *, verbose=True):
         if path_is_inside(cwd, path):
             sys.exit(f"error: cwd is inside task worktree {path}; "
                      "cd to the primary clone (or product dir) and re-run")
-        if os.path.realpath(path) == os.path.realpath(root):
+        if same_path(path, root):
             continue
-        board_wt = os.path.realpath(os.path.join(root, board_worktree_rel(scope)))
-        if os.path.realpath(path) == board_wt:
+        if same_path(path, os.path.join(root, board_worktree_rel(scope))):
             continue
         if not os.path.exists(path):
             continue
@@ -5579,7 +5660,7 @@ def note_version_intent(intent, integration, product):
     print(f"note: Version intent is '{intent}' — apply one bump "
           f"on '{integration}' when this set is done (per product "
           f"versioning docs)")
-    print(f"  product: {product}")
+    print(f"  product: {shown_path(product)}")
 
 
 def cmd_land(args):
@@ -5947,7 +6028,7 @@ def cmd_claim(args):
         meta["unattended"] = run
         changes.append(f"unattended={run}")
     if changes:
-        with open(meta["path"], "w") as f:
+        with open(meta["path"], "w", newline="\n") as f:
             f.write(render_task(meta))
         board_commit(root, integration, bw, scope,
                      f"dev: update T{tid} ({', '.join(changes)})")
@@ -5957,8 +6038,8 @@ def cmd_claim(args):
 
     print(f"T{tid}: ready")
     print(f"  branch:  {branch}")
-    print(f"  workdir: {ready}")
-    print(f"  product: {product_root(ready, scope)}")
+    print(f"  workdir: {shown_path(ready)}")
+    print(f"  product: {shown_path(product_root(ready, scope))}")
     print(f"  base:    {base}")
 
 
@@ -5973,10 +6054,10 @@ def path_is_tasks_dir(path):
 
 def path_under_task_worktrees(root, scope, path):
     """True if path is under <product>/.dev/worktrees/ (claim policy)."""
-    wt_root = os.path.realpath(
+    wt_root = path_key(
         os.path.join(product_root(root, scope), ".dev", "worktrees"))
     try:
-        real = os.path.realpath(path)
+        real = path_key(path)
     except OSError:
         return False
     try:
@@ -6075,7 +6156,7 @@ def ship_work_cwd(root, scope, meta, branch, integration):
         sys.exit(f"error: task branch '{branch}' is not checked out anywhere; "
                  f"run claim first")
     if not path_under_task_worktrees(root, scope, work):
-        print(f"warning: shipping from {work} (not under "
+        print(f"warning: shipping from {shown_path(work)} (not under "
               f"<scope>/.dev/worktrees/); prefer the claim workdir",
               file=sys.stderr)
     return work
@@ -6094,8 +6175,8 @@ def cmd_diff(args):
     work = ship_work_cwd(root, scope, meta, branch, integration)
 
     print(f"T{tid}: diff")
-    print(f"  workdir: {work}")
-    print(f"  product: {product_root(work, scope)}")
+    print(f"  workdir: {shown_path(work)}")
+    print(f"  product: {shown_path(product_root(work, scope))}")
     print(f"  branch:  {branch}")
     # Diff against what the PR is (or will be) based on: a stacked task
     # measured against integration shows its parent's files as its own.
@@ -6284,6 +6365,152 @@ REHEARSED_RE = re.compile(
 def collect_rehearsed(text):
     """Every rehearsal record in a task body, in order."""
     return [m.group(0).strip() for m in REHEARSED_RE.finditer(text or "")]
+
+
+# ---------- distilled record (what a distill sitting covered) ----------
+
+# A distill sitting (a `distill: true` ops task) records, after each reply
+# from the user, the tasks whose every candidate the user has now dealt with
+# (approved, declined or edited) — `distilled <sitting> <ids>`, ranges
+# compacted; `ran` on the sitting adds one for itself and its dependents
+# (the task it filed, which depends on it). A sitting stopped partway leaves the rest uncovered:
+#   Distilled (2026-11-20): T3-T7, T9, T12
+# iteration-close refuses while a done or not-planned task on the live board
+# is in no such line. Ids renumber at every iteration boundary, so reseed
+# strips these lines from every copy it makes (strip_distilled).
+DISTILLED_RE = re.compile(
+    r"(?im)^Distilled \(\d{4}-\d{2}-\d{2}\):[ \t]*(.*)$")
+DISTILLED_PARA_RE = re.compile(r"^Distilled \(\d{4}-\d{2}-\d{2}\):")
+DISTILLED_TOKEN_RE = re.compile(r"^[Tt]?(\d+)(?:-[Tt]?(\d+))?$")
+
+
+def parse_distilled_spec(s):
+    """'T3-T7, 9, T12' (or '3-7 9 12') into a sorted unique id list.
+    Raises ValueError naming the first bad token."""
+    ids = set()
+    s = re.sub(r"\s*-\s*", "-", (s or "").strip())
+    for tok in re.split(r"[,\s]+", s):
+        tok = tok.strip()
+        if not tok:
+            continue
+        m = DISTILLED_TOKEN_RE.match(tok)
+        if not m:
+            raise ValueError(tok)
+        lo = int(m.group(1))
+        hi = int(m.group(2)) if m.group(2) else lo
+        if hi < lo:
+            raise ValueError(tok)
+        ids.update(range(lo, hi + 1))
+    return sorted(ids)
+
+
+def format_distilled(ids, date=None):
+    """One Distilled line, consecutive ids compacted into ranges."""
+    ids = sorted(set(int(i) for i in ids))
+    date = date or datetime.date.today().isoformat()
+    runs = []
+    for i in ids:
+        if runs and i == runs[-1][1] + 1:
+            runs[-1][1] = i
+        else:
+            runs.append([i, i])
+    parts = [f"T{a}" if a == b else f"T{a}-T{b}" for a, b in runs]
+    return f"Distilled ({date}): " + ", ".join(parts)
+
+
+def distilled_ids(text):
+    """Every id the Distilled lines in a body name (a bad line counts for
+    nothing rather than stopping a close)."""
+    ids = set()
+    for m in DISTILLED_RE.finditer(text or ""):
+        try:
+            ids.update(parse_distilled_spec(m.group(1)))
+        except ValueError:
+            continue
+    return ids
+
+
+def strip_distilled(body):
+    """A body without its Distilled paragraphs: for any copy reseed puts on
+    the next board, where the ids they name belong to other tasks."""
+    paras = [p.strip() for p in re.split(r"\n[ \t]*\n", body or "")]
+    return "\n\n".join(p for p in paras
+                        if p and not DISTILLED_PARA_RE.match(p))
+
+
+def distill_coverage_missing(tasks):
+    """Ids of done or not-planned non-recurring tasks that no Distilled line
+    on the board names — what iteration-close refuses on."""
+    covered = set()
+    for t in tasks:
+        covered |= distilled_ids(t.get("body"))
+    return sorted(t["id"] for t in tasks
+                  if t.get("status") in ("done", "not-planned")
+                  and not is_recurring(t) and t["id"] not in covered)
+
+
+def distill_close_ids(meta, tasks):
+    """What `ran` on a distill sitting covers: the sitting and every task
+    that lists it in its deps (the task it filed). An umbrella is left out:
+    its deps are its children, so listing the sitting files nothing."""
+    return sorted({meta["id"]} | {
+        t["id"] for t in tasks
+        if meta["id"] in (t.get("deps") or [])
+        and (t.get("kind") or "").strip() != "umbrella"})
+
+
+def distilled_refusal(ids, tasks, self_id):
+    """Why a Distilled line may not name this id list, or None. Each id must be
+    a non-recurring task on the live board, any status (a sitting lists the
+    task it filed, still open), or the sitting itself. A recurring task is
+    never distilled: it carries its records across and the gate skips it."""
+    if not ids:
+        return "no task ids named"
+    by_id = {t["id"]: t for t in tasks}
+    bad = []
+    for i in ids:
+        if i == self_id:
+            continue
+        t = by_id.get(i)
+        if t is None:
+            bad.append(f"T{i} (not on this board)")
+        elif is_recurring(t):
+            bad.append(f"T{i} (recurring)")
+    if bad:
+        return ("a Distilled line names only non-recurring tasks on this "
+                "board or the sitting itself; not: " + ", ".join(bad))
+    return None
+
+
+def distilled_verb_line(meta, spec, tasks, date=None):
+    """`distilled <sitting> <ids>`: (the Distilled line to append, None) or
+    (None, why it is refused)."""
+    if not is_distill(meta):
+        return None, (f"T{meta['id']} is not a distill sitting (distill: "
+                      f"true); only a sitting records what it distilled")
+    try:
+        ids = parse_distilled_spec(spec)
+    except ValueError as e:
+        return None, f"bad id or range '{e}' (use e.g. \"T3-T7, T9\")"
+    why = distilled_refusal(ids, tasks, meta["id"])
+    if why:
+        return None, why
+    return format_distilled(ids, date), None
+
+
+def ran_distilled_line(meta, tasks, date):
+    """The Distilled line `ran` appends on a distill sitting (the sitting and
+    its dependents, the task it filed), as (line, None); (None, None) on any
+    other task; (None, why) when a dependent cannot be named."""
+    if not is_distill(meta):
+        return None, None
+    ids = distill_close_ids(meta, tasks)
+    why = distilled_refusal(ids, tasks, meta["id"])
+    if why:
+        return None, (f"T{meta['id']} is a distill sitting, so ran records "
+                      f"it and the tasks that depend on it as distilled; "
+                      f"{why}")
+    return format_distilled(ids, date), None
 
 
 # ---------- paused record (ops run stopped partway) ----------
@@ -6913,7 +7140,7 @@ def cmd_ship(args):
         sys.exit("error: no origin remote; cannot ship")
 
     work = ship_work_cwd(root, scope, meta, branch, integration)
-    print(f"T{tid}: ship from {work} (branch {branch})")
+    print(f"T{tid}: ship from {shown_path(work)} (branch {branch})")
 
     if worktree_is_dirty(work):
         msg = (args.message or "").strip() or f"{prefix} {meta['title']}"
@@ -7044,7 +7271,7 @@ def cmd_ship(args):
     meta["body"] = append_body(meta.get("body") or "", shipped_line)
     changes.append("shipped")
     if changes:
-        with open(meta["path"], "w") as f:
+        with open(meta["path"], "w", newline="\n") as f:
             f.write(render_task(meta))
         board_commit(root, integration, bw, scope,
                      f"dev: update T{tid} ({', '.join(changes)})")
@@ -7058,7 +7285,7 @@ def cmd_ship(args):
 def set_task_status(root, scope, integration, bw, meta, status):
     """Write one status change and commit it to the board."""
     meta["status"] = status
-    with open(meta["path"], "w") as f:
+    with open(meta["path"], "w", newline="\n") as f:
         f.write(render_task(meta))
     board_commit(root, integration, bw, scope,
                  f"dev: update T{meta['id']} (status={status})")
@@ -7513,6 +7740,7 @@ def cmd_init(args):
         scope = os.path.normpath(args.scope)
         if scope != "." and (os.path.isabs(scope) or scope.startswith("..")):
             sys.exit("error: --scope must be a subdir path relative to the repo root")
+        scope = scope_form(scope)
     else:
         # Same walk as find_scope (current worktree first).
         try:
@@ -7599,7 +7827,9 @@ def cmd_init(args):
             board_commit(root, branch, bw, scope,
                          "dev: ignore local board viewer")
     dest, _wrote = ensure_board_viewer(root, scope)
-    if os.path.isdir(dest):
+    if WINDOWS:
+        print(f"viewer: none — {WATCH_WINDOWS_HINT}")
+    elif os.path.isdir(dest):
         print(f"viewer: skipped ({VIEWER_NAME} is a directory)")
     else:
         print(f"viewer: ./{VIEWER_NAME}  (r refresh, a by area, e expand, l latest, c check, f flows, g registries, q back/quit, arrows scroll, space/b page, type id↵)")
@@ -7847,7 +8077,7 @@ def contributor_rename(root, scope, branch, bw, cfg, ident, old, new,
     for t in all_tasks(bw, scope):
         if t.get("assignee") == old:
             t["assignee"] = new
-            with open(t["path"], "w") as f:
+            with open(t["path"], "w", newline="\n") as f:
                 f.write(render_task(t))
             reassigned.append(f"T{t['id']}")
     accessed = []
@@ -7939,6 +8169,7 @@ def cmd_add(args):
         "schedule": (args.schedule or "").strip(), "last_run": "",
         "next_due": (args.next_due or "").strip(),
         "rehearsal": "true" if args.rehearsal else "",
+        "distill": "true" if args.distill else "",
         "routine": (args.routine or "").strip(),
         "body": args.desc or "",
     }
@@ -7949,6 +8180,7 @@ def cmd_add(args):
     validate_recurring(meta)
     validate_type(meta, new=True)
     validate_rehearsal(meta)
+    validate_distill(meta)
     notes = point_at_routine(bw, scope, meta, tasks)
     umbrellas = add_umbrella_targets(parse_id_list(args.umbrella), meta["deps"],
                                      tasks)
@@ -7962,11 +8194,11 @@ def cmd_add(args):
             print(f"warning: area '{a}' has no entry in areas.md",
                   file=sys.stderr)
     path = os.path.join(bw, tdir(scope), f"{tid:03d}.md")
-    with open(path, "w") as f:
+    with open(path, "w", newline="\n") as f:
         f.write(render_task(meta))
     for u in umbrellas:
         u["deps"] = u["deps"] + [tid]
-        with open(u["path"], "w") as f:
+        with open(u["path"], "w", newline="\n") as f:
             f.write(render_task(u))
     under = "".join(f" under T{u['id']}" for u in umbrellas)
     board_commit(root, branch, bw, scope, f"dev: add T{tid} {args.title}{under}")
@@ -8081,6 +8313,7 @@ def cmd_update(args):
     validate_type(meta, set_type=args.type is not None,
                   set_area=args.area is not None)
     validate_rehearsal(meta)
+    validate_distill(meta)
     refusal = update_unattended_refusal(old, meta, run, args.status)
     if refusal:
         sys.exit(refusal)
@@ -8117,7 +8350,7 @@ def cmd_update(args):
         if undone:
             print(f"warning: T{meta['id']} has unfinished deps: {undone}",
                   file=sys.stderr)
-    with open(meta["path"], "w") as f:
+    with open(meta["path"], "w", newline="\n") as f:
         f.write(render_task(meta))
     board_commit(root, branch, bw, scope,
                  f"dev: update T{meta['id']} ({', '.join(changes)})")
@@ -8296,7 +8529,7 @@ def cmd_verify(args):
                  f"children met its goal")
     meta["body"] = append_body(meta["body"], format_verified(text))
     meta["status"] = "done"
-    with open(meta["path"], "w") as f:
+    with open(meta["path"], "w", newline="\n") as f:
         f.write(render_task(meta))
     board_commit(root, branch, bw, scope,
                  f"dev: verify T{meta['id']} (closed)")
@@ -8347,6 +8580,12 @@ def cmd_ran(args):
     day = run_day(ran) if ran else datetime.date.today()
     record = format_ran(text, refs, day.isoformat(),
                         "Rehearsed" if args.rehearsal else "Ran")
+    dline, why = ran_distilled_line(meta, all_tasks(bw, scope),
+                                    day.isoformat())
+    if why:
+        sys.exit(f"error: {why}")
+    if dline:
+        record += "\n\n" + dline
     meta["flow"] = ", ".join(refs)
     if is_recurring(meta):
         meta = rearm_recurring(root, scope, branch, bw, meta, ran_on=ran,
@@ -8357,12 +8596,30 @@ def cmd_ran(args):
     else:
         meta["status"] = "done"
         meta["body"] = append_body(meta["body"], record)
-        with open(meta["path"], "w") as f:
+        with open(meta["path"], "w", newline="\n") as f:
             f.write(render_task(meta))
         verb = "rehearsed" if args.rehearsal else "ran"
         board_commit(root, branch, bw, scope, f"dev: T{tid} {verb} (closed)")
         print(f"T{tid} closed" + (" (rehearsal)" if args.rehearsal else ""))
-    print(f"  {record}")
+    for line in record.split("\n\n"):
+        print(f"  {line}")
+
+
+def cmd_distilled(args):
+    """Record, on a distill sitting, the tasks whose every candidate the
+    user has now dealt with: appends `Distilled (<date>): …` and leaves the
+    sitting open. The record iteration-close's coverage gate reads."""
+    root, scope, branch, bw = ctx()
+    meta = find_task(bw, scope, args.id)
+    tid = meta["id"]
+    line, why = distilled_verb_line(meta, args.ids, all_tasks(bw, scope))
+    if why:
+        sys.exit(f"error: {why}")
+    meta["body"] = append_body(meta["body"], line)
+    with open(meta["path"], "w", newline="\n") as f:
+        f.write(render_task(meta))
+    board_commit(root, branch, bw, scope, f"dev: T{tid} distilled")
+    print(f"T{tid}: {line}")
 
 
 def cmd_pause(args):
@@ -8402,7 +8659,7 @@ def cmd_pause(args):
     if not is_ops(meta):
         push_dev_work(root, scope, branch, bw, meta, "paused")
     meta["body"] = append_body(meta["body"], record)
-    with open(meta["path"], "w") as f:
+    with open(meta["path"], "w", newline="\n") as f:
         f.write(render_task(meta))
     board_commit(root, branch, bw, scope, f"dev: T{tid} paused")
     print(f"T{tid} paused (still doing, assigned to "
@@ -8437,7 +8694,7 @@ def cmd_wait(args):
         if not (meta.get("waiting") or "").strip():
             sys.exit(f"error: T{tid} is not waiting on anyone")
         meta["waiting"] = ""
-        with open(meta["path"], "w") as f:
+        with open(meta["path"], "w", newline="\n") as f:
             f.write(render_task(meta))
         board_commit(root, branch, bw, scope, f"dev: T{tid} waiting cleared")
         print(f"T{tid} no longer waiting (still doing)")
@@ -8470,7 +8727,7 @@ def cmd_wait(args):
         push_dev_work(root, scope, branch, bw, meta, "waiting")
     meta["waiting"] = f"{who} by {by}"
     meta["body"] = append_body(meta["body"], record)
-    with open(meta["path"], "w") as f:
+    with open(meta["path"], "w", newline="\n") as f:
         f.write(render_task(meta))
     board_commit(root, branch, bw, scope, f"dev: T{tid} waiting")
     print(f"T{tid} waiting on {who} by {by} (still doing)")
@@ -8509,7 +8766,7 @@ def cmd_note(args):
                          iso_date(args.date, "date").isoformat()
                          if args.date else None)
     meta["body"] = append_body(meta["body"], record)
-    with open(meta["path"], "w") as f:
+    with open(meta["path"], "w", newline="\n") as f:
         f.write(render_task(meta))
     board_commit(root, branch, bw, scope, f"dev: T{tid} note")
     print(f"T{tid} noted")
@@ -8591,7 +8848,10 @@ _ASSIGNEE_COLORS = (
 
 
 def _use_color():
-    """Color tty stdout unless NO_COLOR is set or TERM is dumb."""
+    """Color tty stdout unless NO_COLOR is set or TERM is dumb. Never on
+    Windows, whose console may not read ANSI escapes."""
+    if WINDOWS:
+        return False
     if os.environ.get("NO_COLOR"):
         return False
     if os.environ.get("TERM") == "dumb":
@@ -8974,7 +9234,7 @@ def _render_board(args):
     by_area = bool(getattr(args, "by_area", False))
     plain = _board_text(cfg, scope, bw, tasks, expand=expand, by_area=by_area,
                         status_order=WATCH_STATUSES)
-    with open(os.path.join(root, scope, "TASKS.md"), "w") as f:
+    with open(os.path.join(root, scope, "TASKS.md"), "w", newline="\n") as f:
         f.write(plain)
     if _use_color():
         display = _board_text(cfg, scope, bw, tasks, expand=expand,
@@ -9269,6 +9529,9 @@ def _paint_watch(out, by_area, expand, buf, result, offset, check=False,
 
 def cmd_board_refresh_viewer(root, scope):
     """./board update: rewrite the wrapper from this skill's template."""
+    if WINDOWS:
+        sys.exit(f"error: there is no ./{VIEWER_NAME} viewer on Windows; "
+                 f"{WATCH_WINDOWS_HINT}")
     dest = viewer_path(root, scope)
     if os.path.isdir(dest):
         sys.exit(f"error: {VIEWER_NAME} is a directory")
@@ -9291,7 +9554,13 @@ def cmd_board_refresh_viewer(root, scope):
         print(f"viewer: refreshed ./{VIEWER_NAME}")
 
 
+WATCH_WINDOWS_HINT = ("the live viewer does not run on Windows yet; "
+                      "'board' without --watch prints the board")
+
+
 def cmd_board(args):
+    if WINDOWS and getattr(args, "watch", False):
+        sys.exit(f"error: board --watch: {WATCH_WINDOWS_HINT}")
     root, scope, _branch, bw = ctx()
     if getattr(args, "refresh_viewer", False):
         cmd_board_refresh_viewer(root, scope)
@@ -9683,8 +9952,7 @@ def archive_dir(scope, index, name=""):
     so archived files are never live tasks. Path is archive/{n}-{slug} or
     archive/{n} when unnamed.
     """
-    return os.path.join(tdir(scope), "archive",
-                        iteration_archive_slug(index, name))
+    return f"{tdir(scope)}/archive/{iteration_archive_slug(index, name)}"
 
 
 def find_archive_rel(bw, scope, index):
@@ -9873,13 +10141,14 @@ def reseed_later_tasks(bw, scope, old_index):
         meta = {k: v for k, v in t.items() if k != "path"}
         meta["id"] = mapping[t["id"]]
         meta["deps"] = [mapping[d] for d in t.get("deps", []) if d in mapping]
-        meta["body"] = remap_dev_batch(t.get("body") or "", mapping)
+        # Distilled lines name the old board's ids, now other tasks'.
+        meta["body"] = remap_dev_batch(strip_distilled(t.get("body")), mapping)
         # The marker is what keeps flow run history from doubling: this
         # body's Ran records also live in the archived copy.
         meta["body"] = append_body(meta["body"],
                                    f"carried from {old_index}/T{t['id']}")
         path = os.path.join(bw, tdir(scope), f"{meta['id']:03d}.md")
-        with open(path, "w") as f:
+        with open(path, "w", newline="\n") as f:
             f.write(render_task(meta))
         meta["path"] = path
         kept.append((meta, t["id"]))
@@ -9891,7 +10160,7 @@ def reseed_later_tasks(bw, scope, old_index):
         # A recurring task at rest sheds its run records so its file stays
         # short. A shelved one keeps them, and a --carry copy (above) stays
         # whole: either may hold a run to resume from its Paused/Waiting/Inputs.
-        body = t.get("body") or ""
+        body = strip_distilled(t.get("body"))
         if is_recurring(t):
             body = trim_run_records(body, keep_runs=t["status"] == "shelved")
         body = append_body(body, f"carried from {old_index}/T{t['id']}")
@@ -9920,6 +10189,7 @@ def reseed_later_tasks(bw, scope, old_index):
             "type": task_type(t),
             "flow": t.get("flow") or "",
             "rehearsal": t.get("rehearsal") or "",
+            "distill": t.get("distill") or "",
             "cadence": t.get("cadence") or "",
             "schedule": t.get("schedule") or "",
             "last_run": t.get("last_run") or "",
@@ -9934,11 +10204,36 @@ def reseed_later_tasks(bw, scope, old_index):
             "body": body,
         }
         path = os.path.join(bw, tdir(scope), f"{new_id:03d}.md")
-        with open(path, "w") as f:
+        with open(path, "w", newline="\n") as f:
             f.write(render_task(meta))
         meta["path"] = path
         written.append((meta, t["id"]))
     return kept, written
+
+
+def distill_skipped_line(why):
+    """The log.md line an iteration-close --skip-distill writes."""
+    return f"[distill skipped: {why}]"
+
+
+def distill_gate(tasks, skip_distill, skill):
+    """iteration-close's coverage gate: (the --skip-distill reason or None,
+    None) to go on, or (None, why) to refuse. The refusal never offers the
+    skip — that is the user's call, asked for in so many words."""
+    if skip_distill is not None:
+        why = " ".join(skip_distill.split())
+        if not why:
+            return None, '--skip-distill needs "<why>" (logged in log.md)'
+        return why, None
+    missing = distill_coverage_missing(tasks)
+    if missing:
+        ids = ", ".join(f"T{i}" for i in missing)
+        return None, (f"not yet distilled: {ids}. Run a distill sitting "
+                      f"first (/{skill} distill); a task counts once the "
+                      "user has dealt with all of its candidates, so a "
+                      "sitting stopped partway leaves the rest for the "
+                      "next one.")
+    return None, None
 
 
 def cmd_iteration_close(args):
@@ -9967,6 +10262,14 @@ def cmd_iteration_close(args):
                  "them, drop them (not-planned), delete them, or "
                  "re-run with --carry to carry them into the next iteration "
                  "as they are.")
+    # Every finished task's distill candidates are shown to the user before
+    # it is archived; recurring tasks carry their records over, so they are
+    # exempt.
+    # --skip-distill is the user's call for this close only, logged with its
+    # reason; the error never offers it.
+    skip, why = distill_gate(tasks, args.skip_distill, invoking_skill())
+    if why:
+        sys.exit(f"error: {why}")
     carry = {t["id"] for t in unfinished} if args.carry else set()
     idx = iteration_index(cfg)
     name = iteration_name(cfg)
@@ -9993,6 +10296,8 @@ def cmd_iteration_close(args):
     extra = f" → {parent}" if parent else ""
     entry.append(f"branch: {branch}{extra}")
     entry.append(f"archive: {arel}/")
+    if skip is not None:
+        entry.append(distill_skipped_line(skip))
     for t in tasks:
         line = f"- {idx}/T{t['id']} {t['title']}"
         if t.get("assignee"):
@@ -10021,7 +10326,7 @@ def cmd_iteration_close(args):
             entry.append("  - " + " ".join(rec.split()))
     log = os.path.join(bw, tdir(scope), "log.md")
     existing = open(log).read() if os.path.exists(log) else "# Iteration log\n"
-    with open(log, "w") as f:
+    with open(log, "w", newline="\n") as f:
         f.write(existing.rstrip() + "\n\n" + "\n".join(entry) + "\n")
     for t in tasks:
         # Copy verbatim, then remove: frontmatter (area, deps, pr, created)
@@ -10442,6 +10747,10 @@ def main():
     s.add_argument("--rehearsal", action="store_true",
                    help="ops tasks only: a dry run of its flow; no real run "
                         "of that flow may be doing while it is")
+    s.add_argument("--distill", action="store_true",
+                   help="ops tasks only: a distill sitting; takes "
+                        "`distilled`, and ran records it and the tasks that "
+                        "depend on it as distilled")
     s.add_argument("--routine",
                    help="recurring tasks only: the routine whose trigger "
                         "starts it")
@@ -10538,6 +10847,16 @@ def main():
                         "(required on a rehearsal task)")
     s.set_defaults(fn=cmd_ran)
 
+    s = sub.add_parser("distilled",
+                       help="on a distill sitting: record the tasks whose "
+                            "every candidate the user has dealt with; the "
+                            "sitting stays open")
+    s.add_argument("id", type=int, help="the sitting (distill: true)")
+    s.add_argument("ids", help="task ids, ranges allowed (\"T3-T7, T9\"); "
+                               "non-recurring tasks on this board — "
+                               "recorded as Distilled (<date>): …")
+    s.set_defaults(fn=cmd_distilled)
+
     s = sub.add_parser("pause",
                        help="record where a run stopped; it stays doing (a "
                             "dev task's branch is committed and pushed)")
@@ -10627,6 +10946,10 @@ def main():
                    help="carry unfinished tasks into the next iteration "
                         "with status, branch and PR intact (iteration-new "
                         "reseeds them)")
+    s.add_argument("--skip-distill", dest="skip_distill", metavar="WHY",
+                   help="close although some done or not-planned tasks are "
+                        "not distilled, this close only; the reason is "
+                        "logged in log.md as [distill skipped: <why>]")
     s.set_defaults(fn=cmd_iteration_close)
 
     s = sub.add_parser("iteration-new",
@@ -10797,4 +11120,8 @@ def main():
 
 
 if __name__ == "__main__":
+    # Task text and board marks are UTF-8; a Windows pipe defaults to the
+    # ANSI code page, which cannot print them.
+    for _stream in (sys.stdout, sys.stderr):
+        _stream.reconfigure(encoding="utf-8")
     main()

@@ -17,7 +17,7 @@ Classify with two script calls — `TASKS board` (board?) and `TASKS whoami` (id
 
 **What it is.** A **flow** is a written procedure: how you close the month, onboard a client, publish an issue. A **run** is one execution of it, recorded on the task it was run for — inputs it was given, anything that went differently. Both live in small files inside your project, synced through git, so every contributor on any machine sees the same board and the same playbook.
 
-**How it works.** You file what needs doing. When you run a task, I find the flow that fits, ask for anything it needs, and walk it with you — checking in where the flow says to, and once more at the end before anything is marked done — unless the run went exactly to plan and its result shows it. No flow yet? We do it a chunk at a time, I write down what we actually did, and you can turn that into a flow at the end.
+**How it works.** You file what needs doing. When you run a task, I find the flow that fits, ask for anything it needs, and walk it with you — checking in where the flow says to, and once more at the end before anything is marked done — unless the run went exactly to plan and its result shows it. No flow yet? We work it out as we go, I write down what we actually did, and you can turn that into a flow at the end.
 
 **The philosophy.** The playbook is written by using it. Procedures start rough and get sharper every run, and you approve every step that matters. Nothing is marked done because the steps ran out — only because the aim was met: you say so, or a run that went exactly as the flow says shows it plainly, and I tell you it closed.
 
@@ -58,5 +58,5 @@ Every agent shows the same menu, so the user learns one map of the tool. Emit it
 | **Adjust** | `/ops change <id> <what>` · `/ops drop <id>` — decided against · `/ops delete <id>` |
 | **Decide** | `/ops decide` — open questions and proposed tasks waiting on you |
 | **Think** | `/ops meta` — pressure the playbook and the board |
-| **Iterate** | `/ops iteration` — show, close, or start the next stretch of work |
+| **Iterate** | `/ops iteration` — show, close, or start the next stretch of work · `/ops distill` — turn this iteration's records into `AGENTS.md` context and heuristics |
 | **Skill** | `/ops skill` — version and update state · `/ops skill update` — pull the latest · `/ops skill update auto on/off` — opt-in auto-apply · `/ops skill feedback <text>` — file a bug or idea about the skill as an issue on its public repo |

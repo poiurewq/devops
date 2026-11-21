@@ -14,6 +14,7 @@ Several ids run **one after another**, each through the whole cycle below, in th
 ## 2. Preflight (per task)
 
 - `TASKS show <id>`. Read the body: past notes, recorded inputs, `Decision:` lines. The last `Intent:` line is what the user wants out of the run (SKILL.md *Intent*).
+- **A distill sitting** (`distill: true`) → not run here: `/ops distill` resumes it (`shared/routes/distill.md`).
 - **An umbrella** (`kind: umbrella`, of either type) → not run: it gets its verification pass (`shared/routes/verify.md`), and nothing below applies.
 - **Not an ops task** (no `type: ops`) → it is code work: continue as `/dev <id>` in this session (SKILL.md *Two task types*, crossing over) — unless it would change no files: then it converts to ops on the user's yes and runs here.
 - **State**:
@@ -107,11 +108,14 @@ At an `[external]` step the next move is up to someone outside — an office's r
 
 ## 4. Running with no flow
 
-The procedure is written as you go, in chunks the user verifies. Each round, **you propose the next chunk** — a handful of steps that can be done together, ending where a human should look — as a short list, with what verifying it will look like. The user accepts (`go`), edits, or replaces it; do not ask them to choose who proposes. An outward or hard-to-undo step inside a chunk is its own checkpoint (*Checkpoints*). Do the chunk, show the result, and let them verify before the next round. Code turning up is a crossing over, as in section 3.
+The procedure is written as you go, in rounds the user verifies. Before the first round, offer the two ways in one line — **agent-led**, you propose each chunk, or **user-led**, they state each step — and a plain `go` means agent-led. Either side may switch at the end of any round: the user by saying so, you by proposing it in one line (say, when your chunks keep being replaced, or when the user's steps have become routine), switched on their `go`. A resumed run carries on in the mode its last note's tag shows (`step` user-led, `chunk` agent-led), with no re-offer. In both, an outward or hard-to-undo step is its own checkpoint (*Checkpoints*), and code turning up is a crossing over, as in section 3.
 
-After each verified chunk, `TASKS note <id> --at "chunk <n>" "<what was actually done>"`, procedural (steps and inputs, not narration) and detailed enough for someone else to repeat.
+- **Agent-led.** Each round, **you propose the next chunk** — a handful of steps that can be done together, ending where a human should look — as a short list, with what verifying it will look like. The user accepts (`go`), edits, or replaces it. Do the chunk, show the result, and let them verify before the next round. After each verified chunk, `TASKS note <id> --at "chunk <n>" "<what was actually done>"`.
+- **User-led.** Each round, the user states one step: you do it and show the result, or they do it and tell you what came of it. Do not propose steps, reorder them or fold several into one; ask only when a step is unclear. Note each step as it is done, before the next: `TASKS note <id> --at "step <n>" "<what was done, with its inputs>"`, starting the text with `[user]` when the user did it, so the notes read as the procedure in the user's own order.
 
-Stop when the aim is met, not when you run out of ideas. Then section 5 — or, on a halt partway, *Pausing the run*, citing the last verified chunk for the step.
+Notes are procedural (steps and inputs, not narration) and detailed enough for someone else to repeat.
+
+Stop when the aim is met, not when you run out of ideas. Then section 5 — or, on a halt partway, *Pausing the run*, citing the last verified chunk or step.
 
 ## 5. Closing
 
@@ -131,7 +135,6 @@ Offers, made after the close so they never hold up the user's work. Skip any tha
 - **A flow with no sequence headings** (`shared/routes/flows.md` *Sequences*) → offer its sequence breakdown (`/ops flow edit <name>`) only when this run showed the work changing hands or place: a handoff, a step on another machine, a step needing a capability the runner lacked.
 - **An inline environment that ran** → after its first run, or one whose notes say its `Expects:` was wrong, offer to promote it: `TASKS env add <name> --accessors "<its Accessors:>" --expects "<its Expects:, corrected by this run>"`, then `TASKS flow update <flow> --file <path>` with its `Environment: inline`, `Expects:` and `Accessors:` lines replaced by `Environment: <name>` (reviewed as `shared/routes/flow-create.md` *Reviewing a flow write* says). The user names it. Otherwise leave it; `/ops meta` catches it later.
 - **A harness refusal** (a routine's run noted `harness refused …`) → propose a fix of the setup, not the flow: the call allowed or refused up front in the trigger's settings at its source (the routine's body says where), or the environment's `--expects` corrected (`TASKS env update <env> --expects "…"`; `shared/routes/schedule.md` step 7).
-- **Context for future work** — something this run learned that later work here needs and no flow or environment holds (SKILL.md *Ground rules*, vendor-neutral context): a flow's own knowledge goes in the tweak above, a place's facts in its environment entry (`TASKS env update <env> --expects "…"`), and product-wide context in `AGENTS.md`. Propose that note in a line; on yes, file one dev task for all of the run's notes, since a tracked `AGENTS.md` changes through a PR: `TASKS add --title "<the note, in a few words>" --desc "<what to add to AGENTS.md> Intent: <what later work there will know>"` — no `--type`, no area (implement asks for one). A gitignored `AGENTS.md` is the user's own copy: edit it directly on their yes.
 - **A flow with GUI steps** → also the two offers in `shared/routes/gui.md` *After the run*.
 - **No flow was followed** → offer `/ops flow create from <id>` (`shared/routes/flow-create.md`), which reads the run's `Note:` lines.
 - **Several flows were chained** → if the chain is likely to recur, offer a flow that composes them (`uses`).

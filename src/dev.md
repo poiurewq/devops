@@ -1,6 +1,6 @@
 ---
 name: dev
-description: Multi-contributor task board and dev workflow for a repo, or per-subdir boards in a monorepo. Use for /dev and subcommands (init, tour, add, plan, board, kanban, status, pick, implement, review, decide, audit, next, wake, schedule, absorb, flow list/show/create/edit/review/retire, agent, env, routine, change, delete, show, config, area, meta, iteration, update), and whenever the user asks to add/see/assign/implement/review tasks on the repo's task board, or asks "what should I work on".
+description: Multi-contributor task board and dev workflow for a repo, or per-subdir boards in a monorepo. Use for /dev and subcommands (init, tour, add, plan, board, kanban, status, pick, implement, review, decide, audit, next, wake, schedule, absorb, flow list/show/create/edit/review/retire, agent, env, routine, change, delete, show, config, area, meta, iteration, distill, update), and whenever the user asks to add/see/assign/implement/review tasks on the repo's task board, or asks "what should I work on".
 ---
 
 # dev — coordinated development for humans and agents
@@ -24,6 +24,7 @@ TASKS add --title "<title>" [--area <m>] [--deps <id,id>]
           [--schedule "<cron> <timezone>"] [--next-due <date>]
           [--type ops] [--status proposed|backlog|planned|shelved --reason "<why>"]
           [--routine <name>]
+          [--distill]                   # with --type ops: a distill sitting
           [--umbrella <id[,id]>]        # file under it: adds to its deps
 TASKS update <id> [--title] [--area] [--status] [--kind umbrella|recurring|""]
           [--type ops|dev] [--assignee <who>|""] [--branch <b>|""] [--pr]
@@ -93,6 +94,7 @@ TASKS pr <id> view [--json] | diff | close [--head <branch>]
 | `/dev schedule <id> [<routine>]` | Read `shared/routes/schedule.md` (set up a routine so a recurring task starts on its own: pick or create the routine and its runner environment, the trigger proposed from this harness and created at its source on `go`, the task pointed at it, a watched first run; also moves a task between routines). Also where the offer after add, audit and status leads. |
 | `/dev absorb <source>` | Read `shared/routes/absorb.md` (import a list of things to do, each filed as the type its work is; a written procedure goes to `/dev flow adopt` instead). |
 | `/dev iteration ...` | Read `shared/routes/iteration.md` (show / close / new). |
+| `/dev distill` | Read `shared/routes/distill.md` (a sitting: turn this iteration's task records into `AGENTS.md` context and heuristics, each item the user's call; required before an iteration closes). |
 | `/dev board` / `kanban` | `TASKS board` (status index + in-play list); `TASKS board --by-area` for the area cut; then the PR state refresh (`shared/routes/status.md`). |
 <!-- core: routing-flows -->
 | `/dev meta [id-or-area]` | Read `routes/meta.md` (pressure the board; optional focus). `/dev meta area` (or `areas`) is reserved: area-validity pass only. Freeform "does this board still make sense?" too. |

@@ -54,6 +54,8 @@ Reading the reply:
 
 **Echo how you read the reply — each finding's disposition and the wave — in one line in the same message as the work**, not as a separate round trip, so a misread surfaces before it costs anything. When one finding's reading is ambiguous, ask about **that finding only** — never re-ask the set, and never tell the user a reply was malformed.
 
+**Calls that reach past this diff.** When the user settles something during review that applies beyond this PR — how such code should be written, a preference for cases like it — record it on the task in the same message as the work: `TASKS update <id> --append "Decision: <the call + one-line why>"`, or `TASKS note <id> "<the convention, as the user stated it>"` for a stated convention. Record only: never write it into `AGENTS.md` mid-review — distill promotes it from the record.
+
 ## Reviewing a draft (`/dev review <id>` on a `draft` task)
 
 A draft is the **author's own** review loop, not the integrator's queue — it shows in its author's inbox and no other human's. A draft an unattended run shipped belongs to the human it ran as, like any of theirs. Entry is that inbox line or an explicit `/dev review <id>`, usually in a fresh session after implement.
