@@ -747,6 +747,9 @@ def flush_queued_board_commits(root, scope, branch, bw):
                         git("rev-parse", "HEAD", cwd=bw).stdout.strip())
 
 
+_STALE_WARNED = set()  # (scope, branch) already warned this process
+
+
 def resolve_board(root, scope):
     """Sync the board worktree, following integration_branch pointers: a
     branch whose board.yml names another branch (e.g. the parent after an
@@ -780,7 +783,12 @@ def resolve_board(root, scope):
                  f"{board_worktree_rel(scope)} reset --hard origin/{owner}")
     if read_cache(root, scope).get(scope) != branch:
         write_cache(root, scope, branch)
-    warn_stale_checkout(root, scope, branch, bw)
+    # A command may resolve several times (board re-read after git work,
+    # board then _render_board, every watch refresh); the warning is one
+    # per command, so once per process for each board it lands on.
+    if (scope, branch) not in _STALE_WARNED:
+        _STALE_WARNED.add((scope, branch))
+        warn_stale_checkout(root, scope, branch, bw)
     return branch, bw
 
 
