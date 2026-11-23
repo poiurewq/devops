@@ -13,13 +13,13 @@
    - **When**: the earliest next due among the routine's tasks (`TASKS recur list`). A task not re-armed yet — still in flight (not yet landed or closed, parked or waiting included) or waiting on a decision — counts as if it ran now: its cadence from today, or its schedule's next time after the one a run recorded now would cover (*Recurring*: inside a time's early window, that is the time after it — so an early wake never re-points to the time it is serving).
    - **Move it** at its source when the harness lets this session (the routine's body says how), then mirror it on the board: `TASKS routine update <routine> --schedule <timestamp>`. Never the board alone — it mirrors the source.
    - **Cannot** → notify the user with the time to set and the routine's body, and leave the board's schedule as it is. The not-started warning only shows once that time has passed, too late to save a spent trigger.
-6. **Report.** One line per task (what its run reports), the skipped lines, the re-point (moved to when, or the user notified), and any harness refusal noted. The notification rules of the flow each task ran under hold: an unattended session sends one notification at most, and an attended run has already reached the user if it needed them.
+6. **Report.** One line per task (what its run reports), the skipped lines, the re-point (moved to when, or the user notified), and any harness refusal noted. The notification rules of the route each task ran under hold: an unattended session sends one notification at most, and an attended run has already reached the user if it needed them.
 
 ## A scheduled run
 
-A run an attended routine's wake starts begins with nobody at the keyboard, but with someone the routine can reach. It is attended — no trailing word, and everything the task's own run flow says holds — except how it first reaches the user:
+A run an attended routine's wake starts begins with nobody at the keyboard, but with someone the routine can reach. It is attended — no trailing word, and everything the task's own run route says holds — except how it first reaches the user:
 
-- **Go to the first thing that needs the user** — what that is for each task type, and what is parked, is in the run flow's own scheduled part (SKILL.md *Running a task*, scheduled run). Work before it runs straight through, and a run that never needs the user ends as usual.
+- **Go to the first thing that needs the user** — what that is for each task type, and what is parked, is in the run route's own scheduled part (SKILL.md *Running a task*, scheduled run). Work before it runs straight through, and a run that never needs the user ends as usual.
 - **Park it there**, adding the session's link when the harness gives one: `TASKS update <id> --needs decision --append "Question: … — live: <session link>"`, its tail the provenance of step 4.
 - **Notify the user** through the harness — the task, the question in a line, the link — and wait in the session. A harness that cannot notify leaves the question on the board, where `/<skill> status` shows it.
 - **Answered in the session** → record it (`TASKS update <id> --needs "" --append "Decision: …"`), a `go` included, and carry on; the user is there now, so later questions are asked as usual.

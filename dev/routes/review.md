@@ -80,4 +80,4 @@ Pulling a promoted PR back off the queue is `TASKS unready <id>` (assignee or in
 
 ## Design forks and proposed tasks
 
-Picked from the inbox (or `/dev review <id>` on a task with `needs: decision` or in `proposed`), they are decided as `shared/routes/decide.md` says — the same flow `/dev decide` and `/ops decide` run, for a task of either type.
+Picked from the inbox (or `/dev review <id>` on a task with `needs: decision` or in `proposed`), they are decided as `shared/routes/decide.md` says — the same route `/dev decide` and `/ops decide` run, for a task of either type.

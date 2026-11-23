@@ -68,6 +68,11 @@ TASKS_DIR = ".tasks"
 # and rules as .tasks/ (integration branch only, written through the board
 # worktree), but flows outlive iterations — nothing archives them.
 FLOWS_DIR = ".flows"
+# Catalog: <scope>/.catalog/<category>/<key>.md, named things tasks and flows
+# point at. Same home and rules as .flows/. Its built-in categories are the
+# agent, environment and routine registries (REGISTRIES); every category
+# shares one key namespace.
+CATALOG_DIR = ".catalog"
 # Local live viewer dropped by init at <product>/board. Not .dev/board —
 # that path is the hidden board worktree.
 VIEWER_NAME = "board"
@@ -107,7 +112,12 @@ VIEWER_NAME = "board"
 # 12: optional `routine` on a recurring task, pointing at an entry in
 #    .flows/routines/. An older script drops the field on rewrite, which
 #    silently takes the task off its routine.
-SCHEMA_VERSION = 12
+# 13: the agent, environment and routine registries move from .flows/ into
+#    .catalog/ (migrate_registries, on the first sync that finds files in
+#    the old dirs), and their names share one namespace. An older script
+#    reads the old dirs, so it sees no registries and writes new ones there,
+#    which the next newer sync moves across.
+SCHEMA_VERSION = 13
 CONFIG_KEYS = ["schema_version", "integration_branch", "parent_branch",
                "iteration", "iteration_name", "iteration_started",
                "integrator", "contributors"]
@@ -144,7 +154,7 @@ OPS = "ops"
 # leaves doing, so every path out of doing clears it without knowing it
 # exists.
 # routine: optional, on a recurring task: the name of the routine (in
-# .flows/routines/) whose trigger starts it. A pointer that resolves through
+# .catalog/routines/) whose trigger starts it. A pointer that resolves through
 # the routine's former names; the board derives whether that routine should
 # already have started a due task (routine_stall), and stores nothing.
 # unattended: optional, the model id of an unattended run that claimed the
@@ -361,6 +371,12 @@ def fdir(scope):
     """Flow store dir relative to repo root ('.flows' or '<scope>/.flows'),
     `/`-separated like tdir."""
     return scope_form(os.path.normpath(os.path.join(scope, FLOWS_DIR)))
+
+
+def cdir(scope):
+    """Catalog dir relative to repo root ('.catalog' or '<scope>/.catalog'),
+    `/`-separated like tdir."""
+    return scope_form(os.path.normpath(os.path.join(scope, CATALOG_DIR)))
 
 
 def shown_path(path):
@@ -894,6 +910,7 @@ def ctx():
     err = missing_board_error(bw, scope, branch)
     if err:
         sys.exit(err)
+    migrate_registries(root, scope, branch, bw)
     return root, scope, branch, bw
 
 
@@ -937,8 +954,9 @@ def board_commit(root, branch, bw, scope, message, queue=True):
     Returns whether the commit reached origin (True when there is no
     remote)."""
     paths = [tdir(scope)]
-    if os.path.isdir(os.path.join(bw, fdir(scope))):
-        paths.append(fdir(scope))
+    for d in (fdir(scope), cdir(scope)):
+        if os.path.isdir(os.path.join(bw, d)):
+            paths.append(d)
     if os.path.exists(os.path.join(bw, ".gitignore")):
         paths.append(".gitignore")
     git("add", "-A", "--", *paths, cwd=bw)
@@ -1962,11 +1980,11 @@ def cmd_flow(args):
 
 
 # ---------- agent, environment and routine registries ----------
-# <scope>/.flows/agents/<name>.md and <scope>/.flows/environments/<name>.md,
-# one entry per file. They sit under .flows/ because flows name them and,
-# like flows, they outlive iterations; board_commit stages them and the ship
-# guard refuses them with the rest of .flows/. all_flows globs only the top
-# level, so these subdirs are never read as flows.
+# <scope>/.catalog/agents/<name>.md and <scope>/.catalog/environments/<name>.md,
+# one entry per file: the catalog's built-in categories, each schema defined
+# here in REGISTRIES. Like flows they outlive iterations; board_commit stages
+# .catalog/ and the ship guard refuses it with .tasks/ and .flows/. Before
+# schema 13 they lived in .flows/<dir>/ (migrate_registries moves them).
 #   ---
 #   name: grok-bot
 #   accessors: Q, bob     (board contributors who can reach it now; never
@@ -1978,7 +1996,7 @@ def cmd_flow(args):
 #   ---
 #   prose expectations                          (environment only)
 #
-# <scope>/.flows/routines/<name>.md is the third registry: a routine mirrors
+# <scope>/.catalog/routines/<name>.md is the third registry: a routine mirrors
 # a scheduled trigger that lives at its source (a harness's scheduler, cron,
 # a cloud routine), so the board knows which recurring tasks start on their
 # own. Beside name, accessors (who can reach the source), formerly and
@@ -1992,8 +2010,9 @@ def cmd_flow(args):
 # Accessors are a routing aid, not history: who ran an agent for a given run
 # lives in that run's record. There is no id: run records name an entry by
 # the name it had then, so unlike a flow's, a former name stays reserved
-# (add/rename refuse it) and keeps resolving for as long as the entry
-# exists. rm frees all of its names.
+# (add/rename refuse it, in every category: the catalog is one namespace)
+# and keeps resolving for as long as the entry exists. Lookups stay within
+# a category. rm frees all of its names.
 
 REGISTRIES = {
     "agent": {"dir": "agents", "label": "agent",
@@ -2014,7 +2033,85 @@ REGISTRY_RESERVED = ("project", "runner", "any", "inline")
 
 
 def registry_dir(bw, scope, kind):
+    return os.path.join(bw, cdir(scope), REGISTRIES[kind]["dir"])
+
+
+def legacy_registry_dir(bw, scope, kind):
+    """Where a registry lived before schema 13 (and where an older script
+    still writes it)."""
     return os.path.join(bw, fdir(scope), REGISTRIES[kind]["dir"])
+
+
+def all_registries(bw, scope):
+    """Every entry of every built-in category: the one namespace."""
+    return [e for kind in REGISTRIES for e in all_registry(bw, scope, kind)]
+
+
+def registry_clash_warnings(entries):
+    """One line per name two categories both hold (current or former), with
+    the rename that clears it where one holds it as its current name. Pure.
+    A rename keeps the old name as a former one, so the name stays held by
+    both — but lookups stay within a category, so only a current name held
+    elsewhere is worth renaming."""
+    held = {}
+    for e in entries:
+        for n in [e["name"]] + split_names(e.get("formerly")):
+            held.setdefault(n, []).append(e)
+    out = []
+    for name, es in sorted(held.items()):
+        if len({e["kind"] for e in es}) < 2:
+            continue
+        who = ", ".join(f"{REGISTRIES[e['kind']]['label']} '{e['name']}'"
+                        + ("" if e["name"] == name else " (former name)")
+                        for e in es)
+        cur = [e for e in es if e["name"] == name]
+        fix = (f"; rename one: {cur[-1]['kind']} rename {name} <new-name>"
+               if cur else "; each category still resolves it as its own")
+        out.append(f"warning: catalog name '{name}' is held by {who}{fix}")
+    return out
+
+
+def move_legacy_registries(bw, scope):
+    """Move registry files an older layout left in .flows/<dir>/ into
+    .catalog/<dir>/ on disk; returns how many moved. A file whose name is
+    already taken in .catalog/ is left where it is, with a warning."""
+    moves, kept = [], []
+    for kind in REGISTRIES:
+        old = legacy_registry_dir(bw, scope, kind)
+        for p in sorted(glob.glob(os.path.join(old, "*.md"))):
+            dest = os.path.join(registry_dir(bw, scope, kind),
+                                os.path.basename(p))
+            (kept if os.path.exists(dest) else moves).append((p, dest))
+    for p, dest in kept:
+        print(f"warning: {os.path.relpath(p, bw)} not moved: "
+              f"{os.path.relpath(dest, bw)} already exists; merge them by "
+              "hand on the board branch", file=sys.stderr)
+    for p, dest in moves:
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        os.replace(p, dest)
+    for kind in REGISTRIES:
+        try:
+            os.rmdir(legacy_registry_dir(bw, scope, kind))
+        except OSError:
+            pass
+    return len(moves)
+
+
+def migrate_registries(root, scope, branch, bw):
+    """Schema 13: whenever the legacy .flows/<dir>/ registries hold files
+    (an older script may write there after the move), move them into
+    .catalog/ in one board commit that stamps the schema, then warn about
+    names two categories share. A board with nothing to move is stamped on
+    its next ordinary write, so a read-only command never commits."""
+    n = move_legacy_registries(bw, scope)
+    if not n:
+        return
+    write_board_cfg(bw, scope, read_board_cfg(bw, scope))
+    board_commit(root, branch, bw, scope,
+                 f"dev: move {n} agent/environment/routine file(s) from "
+                 ".flows/ into .catalog/")
+    for w in registry_clash_warnings(all_registries(bw, scope)):
+        print(w, file=sys.stderr)
 
 
 def all_registry(bw, scope, kind):
@@ -2059,6 +2156,19 @@ def registry_holder(entries, name):
     return (next((e for e in entries if e["name"] == name), None)
             or next((e for e in entries
                      if name in split_names(e.get("formerly"))), None))
+
+
+def catalog_name_taken(entries, name, kind):
+    """Why `name` cannot be taken in category `kind` because another
+    category holds it (current or former), or None. Pure: the catalog is
+    one namespace."""
+    other = registry_holder([x for x in entries if x["kind"] != kind], name)
+    if other is None:
+        return None
+    return (f"'{name}' is held by {REGISTRIES[other['kind']]['label']} "
+            f"'{other['name']}'"
+            + ("" if other["name"] == name else " as a former name")
+            + "; catalog names are shared across categories")
 
 
 def registry_rename(e, new):
@@ -2444,6 +2554,9 @@ def cmd_registry(args):
                 f"'{name}' already exists" if e["name"] == name else
                 f"'{e['name']}' was formerly '{name}', so that name stays "
                 "reserved (run records may use it)"))
+        err = catalog_name_taken(all_registries(bw, scope), name, kind)
+        if err:
+            sys.exit(f"error: {err}")
         e = {"kind": kind, "name": name, "created":
              datetime.date.today().isoformat(),
              "path": os.path.join(registry_dir(bw, scope, kind), f"{name}.md")}
@@ -2491,11 +2604,15 @@ def cmd_registry(args):
         if held is not None and held is not e:
             sys.exit(f"error: '{new}' is held by {label} '{held['name']}'"
                      + ("" if held["name"] == new else " as a former name"))
+        err = catalog_name_taken(all_registries(bw, scope), new, kind)
+        if err:
+            sys.exit(f"error: {err}")
         old_path = e["path"]
         registry_rename(e, new)
         e["path"] = os.path.join(registry_dir(bw, scope, kind), f"{new}.md")
         os.replace(old_path, e["path"])
         write_registry(e)
+        write_board_cfg(bw, scope, read_board_cfg(bw, scope))  # stamp 13
         board_commit(root, branch, bw, scope, f"dev: {kind} rename {old} → {new}")
         print(f"{label} {old} → {new} (formerly: {e['formerly']}; former "
               "names stay reserved and still match)")
@@ -2528,6 +2645,7 @@ def cmd_registry(args):
         sys.exit("error: nothing to update")
     os.makedirs(os.path.dirname(e["path"]), exist_ok=True)
     write_registry(e)
+    write_board_cfg(bw, scope, read_board_cfg(bw, scope))  # stamp 13
     board_commit(root, branch, bw, scope,
                  f"dev: {kind} {act} {e['name']}"
                  + (f" ({', '.join(changes)})" if act == "update" else ""))
@@ -6054,10 +6172,10 @@ def cmd_claim(args):
 # ---------- ship (implement: commit, push, open PR) ----------
 
 def path_is_tasks_dir(path):
-    """True if path is inside a .tasks or .flows directory (board state —
-    must not ship on a code branch)."""
+    """True if path is inside a .tasks, .flows or .catalog directory (board
+    state — must not ship on a code branch)."""
     norm = path.replace("\\", "/")
-    return bool(re.search(r"(^|/)\.(tasks|flows)(/|$)", norm))
+    return bool(re.search(r"(^|/)\.(tasks|flows|catalog)(/|$)", norm))
 
 
 def path_under_task_worktrees(root, scope, path):
@@ -10679,9 +10797,9 @@ def main():
 
     for kind, r in REGISTRIES.items():
         label = r["label"]
-        s = sub.add_parser(kind, help=f"the {label} registry "
-                                      f"(.flows/{r['dir']}/): named {label}s "
-                                      "flows can point at")
+        s = sub.add_parser(kind, help=f"the {label} catalog category "
+                                      f"(.catalog/{r['dir']}/): named "
+                                      f"{label}s flows can point at")
         rsub = s.add_subparsers(dest="action", required=True)
         m = rsub.add_parser("list", help=f"every {label}")
         m.add_argument("--json", action="store_true")

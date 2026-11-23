@@ -59,7 +59,7 @@ curl -fsSL https://raw.githubusercontent.com/poiurewq/devops/main/install.py | p
 
 On Windows, from Git Bash: `curl -fsSL https://raw.githubusercontent.com/poiurewq/devops/main/install.py | py - --uninstall --yes` (piped there, the installer cannot ask, so `--yes` is the consent). From inside an agent session, `/dev skill uninstall` does the same after asking you.
 
-It shows a plan and asks first, then removes the `dev` and `ops` links in every skills directory that point into the clone, and the clone itself, unless it holds uncommitted or unpushed work. It asks before deleting your prefs (`~/.config/devops-skill/config.yml`); with `--yes` they are kept unless you also pass `--remove-config`. `--home DIR` names a clone kept elsewhere, and `--dry-run` prints the plan. Self-contained copies are left alone (delete their folder), and nothing in your repos is touched: boards (`.tasks/`, `.flows/`) stay, and a `./board` viewer simply stops working.
+It shows a plan and asks first, then removes the `dev` and `ops` links in every skills directory that point into the clone, and the clone itself, unless it holds uncommitted or unpushed work. It asks before deleting your prefs (`~/.config/devops-skill/config.yml`); with `--yes` they are kept unless you also pass `--remove-config`. `--home DIR` names a clone kept elsewhere, and `--dry-run` prints the plan. Self-contained copies are left alone (delete their folder), and nothing in your repos is touched: boards (`.tasks/`, `.flows/`, `.catalog/`) stay, and a `./board` viewer simply stops working.
 
 ## Getting started
 
