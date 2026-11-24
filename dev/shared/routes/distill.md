@@ -38,3 +38,4 @@ The user may stop after any batch.
 - **The final message** lists the elsewhere items and the tasks that yielded no candidate. Once the user has replied, `TASKS distilled <sitting> "<those ids>"`.
 - `TASKS ran <sitting> --record "<what was read; approved n, declined m; filed T<id>>"`. On a sitting, `ran` also records the sitting and the task it filed (which depends on it) as distilled, so they are never named by hand. A sitting stopped early still closes this way; the tasks it did not finish stay for the next sitting.
 - Report the filed task, built like any other (`/dev <id>`).
+- Offer `/<skill> catalog` (`shared/routes/catalog.md`): its bare mode looks for facts the board writes out more than once, which a sitting's reading often turns up.

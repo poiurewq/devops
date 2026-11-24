@@ -1,6 +1,6 @@
 ---
 name: ops
-description: Playbook of flows plus the runs that follow them, on a shared task board inside the user's repo. Use for /ops and subcommands (init, tour, add, run, next, wake, schedule, rehearse, flow list/show/create/edit/review/retire, agent, env, status, board, show, change, drop, delete, meta, distill), and whenever the user asks to run a procedure or checklist, follow or write a flow, record what a run did, dry-run (rehearse) a flow, or work a task that is not code.
+description: Playbook of flows plus the runs that follow them, on a shared task board inside the user's repo. Use for /ops and subcommands (init, tour, add, run, next, wake, schedule, rehearse, flow list/show/create/edit/review/retire, agent, env, catalog, status, board, show, change, drop, delete, meta, distill), and whenever the user asks to run a procedure or checklist, follow or write a flow, record what a run did, dry-run (rehearse) a flow, or work a task that is not code.
 ---
 
 # ops — procedures that run, recorded where they ran
@@ -60,6 +60,8 @@ TASKS board [--expand] [--watch]
 
 <!-- core: state-layout -->
 
+<!-- core: catalog-refs -->
+
 ## Routing
 
 | Invocation | Action |
@@ -89,7 +91,7 @@ TASKS board [--expand] [--watch]
 | `/ops iteration …` | Read `shared/routes/iteration.md` (show, close, start the next). |
 | `/ops distill` | Read `shared/routes/distill.md` (a sitting: turn this iteration's task records into `AGENTS.md` context and heuristics, each item the user's call; required before an iteration closes). |
 | `/ops config [key] [value]` | `TASKS config …` (settable: iteration, iteration_name, iteration_started, parent_branch). |
-| `/ops absorb <source>` | Read `shared/routes/absorb.md` (import a list of things to do, each filed as the type its work is; a written procedure goes to `/ops flow adopt` instead). |
+| `/ops absorb <source>` | Read `shared/routes/absorb.md` (import a list of things to do, each filed as the type its work is; a written procedure goes to `/ops flow adopt` instead, and a table of facts about named things to `/ops catalog <source>`). |
 | `/ops decide [id]` | Read `shared/routes/decide.md` (open questions and proposed tasks, of either type — the judgments waiting on a person). |
 | `/ops pick <id-or-desc>` | `TASKS update <id> --status planned --assignee <me>`; if it is already assigned to someone else, confirm the takeover with the user first. |
 | `/ops meta` | Read `routes/meta.md` (pressure the playbook and the board). |

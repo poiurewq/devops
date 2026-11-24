@@ -74,6 +74,8 @@ Either one walks you through identity + board setup; both share one board and on
 
 **What goes on the board.** The board is files in your repo, committed to git, so it is exactly as private as the repo and every clone keeps its history for good. Identifiers a task or flow needs (a username, an account number) go on it as they are. Credentials never do: passwords, one-time codes, API keys and session tokens stay in the environment that uses them (a browser session, the keychain, a password manager), and a flow step says `assumes signed in to <X>` instead. A secret that lands on the board anyway is fixed by rotating it, not by rewriting history.
 
+**Write a fact once.** The catalog holds the named things your tasks and flows keep mentioning — a property, a client, a server — each a **key** in a category you declare (`/dev catalog` or `/ops catalog`), with one line per field. It holds facts only: payments, readings and balances stay in the system that records them. Anywhere on the board, `{elm-st.address}` points at that field: reading a task or flow through the skill shows it as `elm-st.address «12 Elm St»`, always the current value, so a change is made in one place. A field may point at another key (`owner: {bob}`), so `{elm-st.owner.phone}` follows it; agents, environments and routines are catalog entries too. Already keep these facts in a spreadsheet? `/dev catalog <source>` (or `/ops catalog <source>`) proposes categories and fields from it, then fills in the keys with you. A key that live tasks or flows still point at cannot be deleted.
+
 ## Updating (`/dev skill`, `/ops skill`)
 
 `/dev skill ...` and `/ops skill ...` act on the installed package (same subcommands); every other command acts on your board. The package tracks `main` on this repo, and a throttled check on common entry points prints one quiet line when you are behind. One update moves both skills.
@@ -102,7 +104,7 @@ dev/SKILL.md       # /dev agent-facing router (built from src/; edit there)
 dev/routes/        # /dev multi-step procedures
 dev/scripts/       # shims that run dev/lib/ (resolve links first)
 dev/lib/           # tasks.py (board state API), skill.py (status / update / feedback)
-dev/shared/routes/ # routes both skills follow (init, add, absorb, plan, shape, iteration, distill, status, decide, verify, flows, flow-create, flow-review, gui, schedule, wake, unattended, skill, tour)
+dev/shared/routes/ # routes both skills follow (init, add, absorb, catalog, plan, shape, iteration, distill, status, decide, verify, flows, flow-create, flow-review, gui, schedule, wake, unattended, skill, tour)
 dev/VERSION        # the package VERSION
 ops/               # /ops, same shape
 ```

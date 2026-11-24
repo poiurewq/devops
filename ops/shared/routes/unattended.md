@@ -17,6 +17,7 @@
 - never pick or run an umbrella: its close is a human judgment (SKILL.md *Umbrella close*);
 - never pass a checkpoint on its own judgment, and never fabricate a step's output;
 - never merge, approve, `ready` or `unready` a PR, and never park, discard or reset the local integration branch;
+- never add a catalog category, field or key, rename or remove one, or update a value its flow does not say to (SKILL.md *Catalog references*, who writes the catalog);
 - never create, edit or rehearse a flow, and never pause an ops run (a pause is the user's call; a dev run's park is the one exception, `routes/unattended-run.md`).
 
 Anything that needs a person goes on the board — `needs: decision` with a `Question:` in the body, or new work filed as `proposed` — and humans dispose of it (answering a parked question, SKILL.md *Running a task*).

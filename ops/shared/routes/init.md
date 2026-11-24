@@ -34,7 +34,7 @@ Every board needs all three; help the user with any that is missing before going
 
      Then scan the top-level structure and propose areas with that parallelization heuristic and path-preferring names (no hard count cap), each `TASKS area set <name> --desc "<one line>"`, the user trimming or confirming first. **No code yet** → none; they appear later per the rule above.
 
-5. **The first work, offered in one line**: `/<skill> add <task-or-goal>` files it, `/<skill> flow create` writes down a procedure they already have, and `/<skill> absorb <source>` imports a list of things to do that already lives somewhere (a TODO file, a roadmap, an issues dump).
+5. **The first work, offered in one line**: `/<skill> add <task-or-goal>` files it, `/<skill> flow create` writes down a procedure they already have, `/<skill> absorb <source>` imports a list of things to do that already lives somewhere (a TODO file, a roadmap, an issues dump), and `/<skill> catalog <source>` takes in a table of facts it keeps (a spreadsheet of clients, properties, accounts).
 
 6. Run *AGENTS.md pointers* (below), then report what was set up: scope, integration branch (and parent, if any), identity, integrator, areas, gh status, that `origin` syncs it, and the `./board` viewer.
 

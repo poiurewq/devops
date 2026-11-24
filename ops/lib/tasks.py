@@ -1836,8 +1836,8 @@ def cmd_flow(args):
         return
     if act == "show":
         f = find_flow(bw, scope, args.name, flows)
-        with open(f["path"]) as fh:
-            print(fh.read().rstrip())
+        show_file(f["path"], bw, scope, args.raw,
+                  skip=flow_input_names(f.get("inputs")))
         return
     if act == "runs":
         f = find_flow(bw, scope, args.name, flows)
@@ -1875,6 +1875,7 @@ def cmd_flow(args):
         print(render_flow(meta).rstrip())
         warn_sequence_names(bw, scope, meta["body"])
         warn_placeholders(meta["inputs"], meta["body"])
+        warn_catalog_refs(bw, scope, meta["inputs"], meta["body"])
         return
     f = find_flow(bw, scope, args.name, flows)
     name = f["name"]
@@ -1912,6 +1913,7 @@ def cmd_flow(args):
         print(f"flow {name} updated: {', '.join(changes)}")
         warn_sequence_names(bw, scope, f["body"])
         warn_placeholders(f["inputs"], f["body"])
+        warn_catalog_refs(bw, scope, f["inputs"], f["body"])
         return
     if act == "rename":
         new = validate_flow_name((args.new_name or "").strip())
@@ -2138,11 +2140,21 @@ def write_registry(meta):
         f.write("\n".join(lines) + ("\n\n" + body + "\n" if body else "\n"))
 
 
+# The one name rule for every catalog name (built-in entries, user keys,
+# categories and fields): lowercase letters, digits, '-' and '_', starting
+# with a letter or digit, never a bare number (the lookahead wants one
+# non-digit). Flow names keep their own rule (FLOW_NAME_RE).
+CATALOG_NAME = r"(?=[a-z0-9_-]*[a-z_-])[a-z0-9][a-z0-9_-]*"
+CATALOG_NAME_RE = re.compile(rf"^{CATALOG_NAME}$")
+CATALOG_NAME_RULE = ("lowercase letters, digits, '-' and '_', not a bare "
+                     "number")
+
+
 def registry_name_error(name):
     """Why `name` cannot name a registry entry, or None. Pure."""
-    if not FLOW_NAME_RE.match(name or "") or name.isdigit():
-        return (f"name '{name}' must be a slug: lowercase letters, digits, "
-                "hyphens (grok-bot), not a bare number")
+    if not CATALOG_NAME_RE.match(name or ""):
+        return (f"name '{name}' must be {CATALOG_NAME_RULE} (grok-bot, "
+                "studio_mac)")
     if name in REGISTRY_RESERVED:
         return (f"'{name}' is reserved ({', '.join(REGISTRY_RESERVED)} mean "
                 "something to a flow already)")
@@ -2165,7 +2177,7 @@ def catalog_name_taken(entries, name, kind):
     other = registry_holder([x for x in entries if x["kind"] != kind], name)
     if other is None:
         return None
-    return (f"'{name}' is held by {REGISTRIES[other['kind']]['label']} "
+    return (f"'{name}' is held by {entry_label(other)} "
             f"'{other['name']}'"
             + ("" if other["name"] == name else " as a former name")
             + "; catalog names are shared across categories")
@@ -2554,7 +2566,7 @@ def cmd_registry(args):
                 f"'{name}' already exists" if e["name"] == name else
                 f"'{e['name']}' was formerly '{name}', so that name stays "
                 "reserved (run records may use it)"))
-        err = catalog_name_taken(all_registries(bw, scope), name, kind)
+        err = catalog_name_taken(catalog_entries(bw, scope), name, kind)
         if err:
             sys.exit(f"error: {err}")
         e = {"kind": kind, "name": name, "created":
@@ -2570,10 +2582,14 @@ def cmd_registry(args):
         print(f"matched {label} '{e['name']}' (formerly '{name}')",
               file=sys.stderr)
     if act == "show":
-        with open(e["path"]) as fh:
-            print(fh.read().rstrip())
+        show_file(e["path"], bw, scope, args.raw)
         return
     if act == "rm":
+        everything = catalog_entries(bw, scope)
+        err = catalog_rm_refusal(bw, scope, next(
+            x for x in everything if x["path"] == e["path"]), everything)
+        if err:
+            sys.exit(f"error: {err}")
         held = (", ".join(f"T{t['id']}" for t in
                           routine_tasks(tasks, entries, e))
                 if kind == "routine" else "")
@@ -2604,7 +2620,7 @@ def cmd_registry(args):
         if held is not None and held is not e:
             sys.exit(f"error: '{new}' is held by {label} '{held['name']}'"
                      + ("" if held["name"] == new else " as a former name"))
-        err = catalog_name_taken(all_registries(bw, scope), new, kind)
+        err = catalog_name_taken(catalog_entries(bw, scope), new, kind)
         if err:
             sys.exit(f"error: {err}")
         old_path = e["path"]
@@ -2651,6 +2667,661 @@ def cmd_registry(args):
                  + (f" ({', '.join(changes)})" if act == "update" else ""))
     print(f"{label} '{e['name']}' {'added' if act == 'add' else 'updated'}: "
           + registry_line(e))
+
+
+# ---------- user catalog: categories, keys and {key.field} references ----------
+# <scope>/.catalog/<category>.md declares a user category; its body holds one
+# field per line, `<field>: <one line: what it holds>`, where a description
+# ending in `(one of: a, b, c)` names the values the field expects (a value
+# outside them only warns). <scope>/.catalog/<category>/<key>.md holds one
+# key:
+#   ---
+#   name: elm-st
+#   address: 12 Elm St          (one line per field, in the category's order)
+#   owner: {bob}                (a bare {key} in a value is a reference)
+#   formerly: old-name          (past names; still reserved, still resolve)
+#   created: 2026-11-23
+#   ---
+# Keys share the one catalog namespace with the built-in entries (agents,
+# environments, routines), so {key.field} names a key in any category and a
+# built-in entry's fields resolve like any key's. {a.b.c} chains: a.b holds
+# {x}, so c is read from x. Text read through TASKS (show, flow show, the
+# registry and catalog show) resolves each {key.field} outside code spans
+# and fenced blocks as `key.field «value»` and reports the ones it cannot;
+# --raw prints the file as stored. In a flow a declared input wins: in
+# {property.address} with an input `property`, the runner supplies the key.
+
+RAW_HELP = ("print the file as stored, {key.field} references unresolved "
+            "(read this before rewriting the text)")
+SET_HELP = ("<field>=<value>, one line (repeatable; an empty value "
+            "clears it)")
+CATALOG_BUILTIN_DIRS = tuple(r["dir"] for r in REGISTRIES.values())
+# Frontmatter every key carries besides its fields, so no field may take it.
+CATALOG_META = ("name", "formerly", "created")
+CATALOG_ENUM_RE = re.compile(r"\s*\(one of:\s*([^)]*)\)\s*$")
+# A bare {key} inside a value: a reference to that key, which is how a
+# reference chains. Outside a value a bare {name} is a flow placeholder.
+CATALOG_KEY_REF_RE = re.compile(rf"(?<!\$)\{{({CATALOG_NAME})\}}")
+# Inline code spans (same-length backtick runs) are skipped, and so is every
+# line inside a ``` or ~~~ fence.
+CATALOG_SCAN_RE = re.compile(
+    r"(?P<code>(`+).*?(?<!`)\2(?!`))"
+    rf"|(?<!\$)\{{(?P<ref>{CATALOG_NAME}(?:\.{CATALOG_NAME})+)\}}")
+FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+
+
+def category_path(bw, scope, name):
+    return os.path.join(bw, cdir(scope), f"{name}.md")
+
+
+def parse_category_fields(body):
+    """[{'name', 'description', 'one_of'}] from a category body. Pure."""
+    out = []
+    for line in (body or "").splitlines():
+        m = re.match(rf"^({CATALOG_NAME}):\s*(.*)$", line.strip())
+        if not m:
+            continue
+        en = CATALOG_ENUM_RE.search(m.group(2))
+        out.append({"name": m.group(1), "description": m.group(2).strip(),
+                    "one_of": split_names(en.group(1)) if en else []})
+    return out
+
+
+def all_categories(bw, scope):
+    """Every user category (.catalog/<category>.md), by name."""
+    out = []
+    for p in sorted(glob.glob(os.path.join(bw, cdir(scope), "*.md"))):
+        with open(p) as fh:
+            m = re.match(r"^---\n(.*?)\n---\n?(.*)$", fh.read(), re.DOTALL)
+        if not m:
+            sys.exit(f"error: malformed catalog category file {p}")
+        meta = parse_kv(m.group(1))
+        out.append({"name": os.path.basename(p)[:-3],
+                    "created": meta.get("created", ""),
+                    "fields": parse_category_fields(m.group(2)), "path": p})
+    return out
+
+
+def write_category(cat):
+    lines = ["---", f"name: {cat['name']}", f"created: {cat['created']}",
+             "---", ""] + [f"{f['name']}: {f['description']}"
+                           for f in cat["fields"]]
+    with open(cat["path"], "w", newline="\n") as fh:
+        fh.write("\n".join(lines) + "\n")
+
+
+def category_name_error(name):
+    """Why `name` cannot name a user category, or None. Pure."""
+    if not CATALOG_NAME_RE.match(name or ""):
+        return (f"category name '{name}' must be {CATALOG_NAME_RULE} "
+                "(properties, rental_units)")
+    if name in CATALOG_BUILTIN_DIRS:
+        return (f"'{name}' is a built-in category; its entries are written "
+                f"through TASKS agent|env|routine")
+    return None
+
+
+def category_field_spec(text):
+    """(field dict, None) from `<field>: <description>`, or (None, why).
+    Pure."""
+    m = re.match(r"^\s*([^:\s]+)\s*:\s*(.*)$", text or "")
+    if not m or not m.group(2).strip():
+        return None, (f"field '{text}' must read \"<field>: <one line: what "
+                      "it holds>\" (end it with \"(one of: a, b)\" to name "
+                      "the values it expects)")
+    name, desc = m.group(1), " ".join(m.group(2).split())
+    if not CATALOG_NAME_RE.match(name):
+        return None, f"field name '{name}' must be {CATALOG_NAME_RULE}"
+    if name in CATALOG_META:
+        return None, (f"'{name}' is not a field name: every key already "
+                      f"carries {', '.join(CATALOG_META)}")
+    [f] = parse_category_fields(f"{name}: {desc}")
+    return f, None
+
+
+def all_catalog_keys(bw, scope, cats=None):
+    """Every key of every user category. Each carries its category's field
+    names, so resolving a reference needs nothing but the entries."""
+    out = []
+    for cat in all_categories(bw, scope) if cats is None else cats:
+        fields = [f["name"] for f in cat["fields"]]
+        d = os.path.join(bw, cdir(scope), cat["name"])
+        for p in sorted(glob.glob(os.path.join(d, "*.md"))):
+            with open(p) as fh:
+                m = re.match(r"^---\n(.*?)\n---\n?(.*)$", fh.read(),
+                             re.DOTALL)
+            if not m:
+                sys.exit(f"error: malformed catalog key file {p}")
+            meta = parse_kv(m.group(1))
+            out.append({"kind": "key", "category": cat["name"],
+                        "name": meta.get("name") or os.path.basename(p)[:-3],
+                        "formerly": meta.get("formerly", ""),
+                        "created": meta.get("created", ""),
+                        "values": {k: v for k, v in meta.items()
+                                   if k not in CATALOG_META},
+                        "fields": fields, "body": m.group(2).strip(),
+                        "path": p})
+    return out
+
+
+def catalog_entries(bw, scope):
+    """The whole catalog namespace: built-in entries and user keys."""
+    return all_registries(bw, scope) + all_catalog_keys(bw, scope)
+
+
+def write_catalog_key(e):
+    fields = e["fields"] + [k for k in e["values"] if k not in e["fields"]]
+    lines = (["---", f"name: {e['name']}"]
+             + [f"{k}: {e['values'].get(k, '')}" for k in fields]
+             + [f"formerly: {e.get('formerly', '')}",
+                f"created: {e.get('created', '')}", "---"])
+    body = (e.get("body") or "").strip()
+    with open(e["path"], "w", newline="\n") as fh:
+        fh.write("\n".join(lines) + ("\n\n" + body + "\n" if body else "\n"))
+
+
+def entry_label(e):
+    """'agent', 'environment', 'routine', or '<category> key'."""
+    if e["kind"] in REGISTRIES:
+        return REGISTRIES[e["kind"]]["label"]
+    return f"{e['category']} key"
+
+
+def entry_fields(e):
+    if e["kind"] in REGISTRIES:
+        return REGISTRIES[e["kind"]]["fields"]
+    return ["name"] + e["fields"] + [k for k in e["values"]
+                                     if k not in e["fields"]]
+
+
+def entry_value(e, field):
+    if e["kind"] in REGISTRIES or field == "name":
+        return e.get(field) or ""
+    return e["values"].get(field, "")
+
+
+def catalog_set(e, cat, text):
+    """Apply one `--set <field>=<value>` to key `e`: (warning or None) on
+    success, else exits. A value outside the field's `one of` only warns,
+    and a reference ({key}) is never held to it."""
+    field, eq, value = (text or "").partition("=")
+    field, value = field.strip(), value.strip()
+    err = catalog_set_error(cat, field, eq, value)
+    if err:
+        sys.exit(f"error: {err}")
+    e["values"][field] = value
+    spec = next(f for f in cat["fields"] if f["name"] == field)
+    if (value and spec["one_of"] and value not in spec["one_of"]
+            and not CATALOG_KEY_REF_RE.fullmatch(value)):
+        return (f"{e['name']}.{field} is '{value}', not one of "
+                f"{', '.join(spec['one_of'])}")
+    return None
+
+
+def catalog_set_error(cat, field, eq, value):
+    """Why `--set field=value` cannot be written to a key of `cat`, or
+    None. Pure."""
+    if not eq or not field:
+        return f"--set takes <field>=<value>, got '{field}{eq}{value}'"
+    names = [f["name"] for f in cat["fields"]]
+    if field not in names:
+        return (f"category {cat['name']} has no field '{field}' "
+                f"({', '.join(names) or 'none'}); add it: catalog category "
+                f"update {cat['name']} --field \"{field}: <what it holds>\"")
+    if "\n" in value or "\r" in value:
+        return f"{field}: a value is one line"
+    return None
+
+
+def catalog_ref_value(ref, entries):
+    """(value, None) for a reference `key.field[.field…]`, or (None, why).
+    Each field but the last must hold a bare {key}, which the next field is
+    read from. Pure."""
+    parts = ref.split(".")
+    e = registry_holder(entries, parts[0])
+    if e is None:
+        return None, f"no catalog key '{parts[0]}'"
+    for i, field in enumerate(parts[1:], 1):
+        here = ".".join(parts[:i])
+        if field not in entry_fields(e):
+            who = ("" if here == e["name"]
+                   else f" ({entry_label(e)} '{e['name']}')")
+            return None, f"{here}{who} has no field '{field}'"
+        value = entry_value(e, field)
+        here = ".".join(parts[:i + 1])
+        if not value:
+            return None, f"{here} is empty"
+        if i == len(parts) - 1:
+            return value, None
+        m = CATALOG_KEY_REF_RE.fullmatch(value)
+        if not m:
+            return None, (f"{here} holds '{value}', not a {{key}} reference, "
+                          "so it cannot be read further")
+        e = registry_holder(entries, m.group(1))
+        if e is None:
+            return None, f"{here} points at '{m.group(1)}', no catalog key"
+
+
+def catalog_text_map(text, fn):
+    """`text` with each {key.field} outside code spans and fenced blocks
+    replaced by fn(ref), or kept where fn returns None. Pure."""
+    out, fence = [], None
+    for line in (text or "").split("\n"):
+        m = FENCE_RE.match(line)
+        if fence:
+            if (m and m.group(1)[0] == fence[0]
+                    and len(m.group(1)) >= len(fence)):
+                fence = None
+            out.append(line)
+            continue
+        if m:
+            fence = m.group(1)
+            out.append(line)
+            continue
+        out.append(CATALOG_SCAN_RE.sub(
+            lambda mm: mm.group(0) if mm.group("code")
+            else (fn(mm.group("ref")) or mm.group(0)), line))
+    return "\n".join(out)
+
+
+def catalog_refs(text):
+    """Every {key.field} reference outside code, in order. Pure."""
+    refs = []
+    catalog_text_map(text, lambda r: refs.append(r))
+    return refs
+
+
+def resolve_catalog_text(text, entries, skip=()):
+    """(text with each {key.field} shown as `key.field «value»`, [(ref,
+    why)] for the ones that do not resolve). A reference whose head is in
+    `skip` (a flow's declared inputs) is left as written. Pure."""
+    bad = []
+
+    def one(ref):
+        if ref.split(".", 1)[0] in skip:
+            return None
+        value, why = catalog_ref_value(ref, entries)
+        if why:
+            if (ref, why) not in bad:
+                bad.append((ref, why))
+            return None
+        return f"{ref} «{value}»"
+    return catalog_text_map(text, one), bad
+
+
+def live_ref_refusal(what, *texts):
+    """Why record text cannot be written as given, or None. A record keeps
+    the value a run used; a live {key.field} in it would be shown with
+    whatever the catalog holds when it is read, so past records would change
+    with the catalog. Nothing is resolved here: the value the run used may
+    no longer be the catalog's, so only the writer knows it. Pure."""
+    refs = list(dict.fromkeys(r for t in texts for r in catalog_refs(t)))
+    if not refs:
+        return None
+    return (f"{what} holds a live catalog reference "
+            f"({', '.join(f'{{{r}}}' for r in refs)}); a record keeps the "
+            f"value the run used, so write that value instead: "
+            f"`{refs[0]} «<value>»`, or the plain value (naming the syntax, "
+            f"not a value? put it in backticks)")
+
+
+def print_resolved(text, entries, skip=()):
+    out, bad = resolve_catalog_text(text, entries, skip)
+    print(out)
+    for ref, why in bad:
+        print(f"warning: unresolved catalog reference {{{ref}}}: {why}",
+              file=sys.stderr)
+
+
+def show_file(path, bw, scope, raw, skip=()):
+    """Print a board file, its catalog references resolved unless raw."""
+    with open(path) as fh:
+        text = fh.read().rstrip()
+    if raw:
+        print(text)
+    else:
+        print_resolved(text, catalog_entries(bw, scope), skip)
+
+
+def flow_input_names(inputs):
+    """Each declared input's name: its text before the first '('; commas
+    inside parentheses (a hint) do not split. Pure."""
+    names = [item.split("(", 1)[0].strip()
+             for item in re.split(r",(?![^(]*\))", inputs or "")]
+    return [n for n in names if n]
+
+
+def catalog_lint_warnings(inputs, body, entries):
+    """Flow lint: an input named like a catalog key (the input wins, so the
+    key is out of reach in this flow), and a {key.field} whose key is a
+    near-miss of one the catalog holds. Pure."""
+    names = flow_input_names(inputs)
+    out = []
+    for n in names:
+        e = registry_holder(entries, n)
+        if e is not None:
+            out.append(f"input '{n}' is named like {entry_label(e)} "
+                       f"'{e['name']}'; in {{{n}.…}} the input wins, so "
+                       "rename the input if the key is meant")
+    known = sorted({n for e in entries
+                    for n in [e["name"]] + split_names(e.get("formerly"))})
+    for ref in dict.fromkeys(catalog_refs(body)):
+        head, rest = ref.split(".", 1)
+        if head in names or registry_holder(entries, head) is not None:
+            continue
+        near = difflib.get_close_matches(head, known, n=1, cutoff=0.8)
+        if near:
+            out.append(f"{{{ref}}} names no catalog key; did you mean "
+                       f"{{{near[0]}.{rest}}}?")
+    return out
+
+
+def warn_catalog_refs(bw, scope, inputs, body):
+    for w in catalog_lint_warnings(inputs, body, catalog_entries(bw, scope)):
+        print(f"warning: {w}", file=sys.stderr)
+
+
+def catalog_ref_holders(entry, tasks, flows, entries):
+    """What still references `entry` (by its name or a former one): live
+    tasks (any status but done and not-planned), active flows (a reference
+    headed by one of the flow's inputs is the input's, not the key's) and
+    other catalog entries, as labels. Pure."""
+    names = {entry["name"], *split_names(entry.get("formerly"))}
+
+    def hits(text, skip=(), bare=False):
+        heads = {r.split(".", 1)[0] for r in catalog_refs(text)} - set(skip)
+        if bare:
+            heads |= set(CATALOG_KEY_REF_RE.findall(text))
+        return bool(names & heads)
+    out = [f"T{t['id']}" for t in tasks
+           if t["status"] not in ("done", "not-planned")
+           and hits(t.get("title", "") + "\n" + t.get("body", ""))]
+    out += [f"flow {f['name']}" for f in flows if flow_is_active(f)
+            and hits(f.get("description", "") + "\n" + f.get("body", ""),
+                     skip=flow_input_names(f.get("inputs")))]
+    for e in entries:
+        if e is entry:
+            continue
+        # Field values chain through a bare {key}; a body's bare {name} is
+        # a placeholder, so only its {key.field} refs count.
+        values = "\n".join(entry_value(e, f) for f in entry_fields(e)
+                           if f != "name")
+        if hits(values, bare=True) or hits(e.get("body") or ""):
+            out.append(f"{entry_label(e)} {e['name']}")
+    return out
+
+
+def catalog_rm_refusal(bw, scope, entry, entries):
+    """The error text when `entry` is still referenced, else None."""
+    held = catalog_ref_holders(entry, all_tasks(bw, scope),
+                               all_flows(bw, scope), entries)
+    if not held:
+        return None
+    return (f"{entry_label(entry)} '{entry['name']}' is still referenced by "
+            f"{', '.join(held)}; change those references first (done and "
+            "not-planned tasks, retired flows and archives do not count)")
+
+
+def catalog_key_line(e):
+    vals = "; ".join(f"{k}: {v}" for k, v in e["values"].items() if v)
+    was = f" (formerly {e['formerly']})" if e.get("formerly") else ""
+    return f"{e['name']} — {vals or '(no values)'}{was}"
+
+
+def find_category(cats, name):
+    cat = next((c for c in cats if c["name"] == name), None)
+    if cat is None:
+        if name in CATALOG_BUILTIN_DIRS:
+            return None
+        have = ", ".join(c["name"] for c in cats) or "none"
+        sys.exit(f"error: no catalog category '{name}' ({have}). See: "
+                 "catalog list")
+    return cat
+
+
+def builtin_kind(dirname):
+    return next(k for k, r in REGISTRIES.items() if r["dir"] == dirname)
+
+
+def cmd_catalog_category(args, root, scope, branch, bw, cats, keys):
+    act = args.category_action
+    name = (args.name or "").strip()
+    if act == "add":
+        err = category_name_error(name)
+        if err:
+            sys.exit(f"error: {err}")
+        if any(c["name"] == name for c in cats):
+            sys.exit(f"error: category '{name}' already exists")
+        cat = {"name": name, "created": datetime.date.today().isoformat(),
+               "fields": [], "path": category_path(bw, scope, name)}
+        if not args.field:
+            sys.exit("error: category add needs at least one --field "
+                     "\"<field>: <one line: what it holds>\"")
+    else:
+        cat = find_category(cats, name)
+        if cat is None:
+            sys.exit(f"error: '{name}' is a built-in category; its fields "
+                     "are fixed")
+    mine = [k for k in keys if k["category"] == cat["name"]]
+    if act == "show":
+        with open(cat["path"]) as fh:
+            print(fh.read().rstrip())
+        return
+    if act == "rename":
+        new = (args.new_name or "").strip()
+        err = category_name_error(new)
+        if err:
+            sys.exit(f"error: {err}")
+        if new == name:
+            sys.exit(f"error: category is already named '{name}'")
+        old_dir = os.path.join(bw, cdir(scope), name)
+        new_dir = os.path.join(bw, cdir(scope), new)
+        if any(c["name"] == new for c in cats) or os.path.exists(new_dir):
+            sys.exit(f"error: category '{new}' already exists")
+        old_path, cat["name"] = cat["path"], new
+        cat["path"] = category_path(bw, scope, new)
+        os.replace(old_path, cat["path"])
+        if os.path.isdir(old_dir):
+            os.replace(old_dir, new_dir)
+        write_category(cat)
+        board_commit(root, branch, bw, scope,
+                     f"dev: catalog category rename {name} → {new}")
+        print(f"category {name} → {new} ({len(mine)} key"
+              f"{'' if len(mine) == 1 else 's'} moved; references name "
+              "keys, so none change)")
+        return
+    if act == "rm":
+        if mine:
+            sys.exit(f"error: category {name} still holds "
+                     f"{', '.join(k['name'] for k in mine)}; rm each first "
+                     "(catalog rm <key>)")
+        os.remove(cat["path"])
+        try:
+            os.rmdir(os.path.join(bw, cdir(scope), name))
+        except OSError:
+            pass
+        board_commit(root, branch, bw, scope, f"dev: catalog category rm "
+                                              f"{name}")
+        print(f"category '{name}' removed")
+        return
+    changes = []
+    for text in args.field or []:
+        f, err = category_field_spec(text)
+        if err:
+            sys.exit(f"error: {err}")
+        old = next((x for x in cat["fields"] if x["name"] == f["name"]),
+                   None)
+        if old is None:
+            cat["fields"].append(f)
+        else:
+            old.update(f)
+        changes.append(f["name"])
+    for field in getattr(args, "drop_field", None) or []:
+        if not any(x["name"] == field for x in cat["fields"]):
+            sys.exit(f"error: category {name} has no field '{field}'")
+        held = [k["name"] for k in mine if k["values"].get(field)]
+        if held:
+            sys.exit(f"error: {', '.join(held)} still "
+                     f"hold{'s' if len(held) == 1 else ''} a value for "
+                     f"'{field}'; clear each first (catalog update <key> "
+                     f"--set {field}=)")
+        cat["fields"] = [x for x in cat["fields"] if x["name"] != field]
+        for k in mine:
+            if field in k["values"]:
+                del k["values"][field]
+                k["fields"] = [x["name"] for x in cat["fields"]]
+                write_catalog_key(k)
+        changes.append(f"-{field}")
+    if not changes:
+        sys.exit("error: nothing to update")
+    os.makedirs(os.path.dirname(cat["path"]), exist_ok=True)
+    write_category(cat)
+    board_commit(root, branch, bw, scope,
+                 f"dev: catalog category {act} {name} ({', '.join(changes)})")
+    print(f"category '{name}' {'added' if act == 'add' else 'updated'}: "
+          + ", ".join(f["name"] for f in cat["fields"]))
+
+
+def cmd_catalog(args):
+    root, scope, branch, bw = ctx()
+    cats = all_categories(bw, scope)
+    keys = all_catalog_keys(bw, scope, cats)
+    entries = all_registries(bw, scope) + keys
+    act = args.action
+    if act == "category":
+        cmd_catalog_category(args, root, scope, branch, bw, cats, keys)
+        return
+    if act == "list":
+        name = (args.category or "").strip()
+        if not name:
+            rows = []
+            for kind, r in REGISTRIES.items():
+                n = sum(1 for e in entries if e["kind"] == kind)
+                rows.append({"name": r["dir"], "builtin": True, "keys": n,
+                             "fields": REGISTRIES[kind]["fields"]})
+            for c in cats:
+                rows.append({"name": c["name"], "builtin": False,
+                             "keys": sum(1 for k in keys
+                                         if k["category"] == c["name"]),
+                             "fields": [f["name"] for f in c["fields"]]})
+            if args.json:
+                print(json.dumps(rows, indent=1))
+                return
+            for r in rows:
+                what = ("built-in" if r["builtin"]
+                        else "fields: " + ", ".join(r["fields"]))
+                print(f"{r['name']} — {what} ({r['keys']} "
+                      f"key{'' if r['keys'] == 1 else 's'})")
+            return
+        cat = find_category(cats, name)
+        if cat is None:
+            sel = [e for e in entries if e["kind"] == builtin_kind(name)]
+        else:
+            sel = [k for k in keys if k["category"] == name]
+        if args.json:
+            print(json.dumps([{"name": e["name"], "category": name,
+                               "values": {f: entry_value(e, f)
+                                          for f in entry_fields(e)
+                                          if f != "name"},
+                               "formerly": e.get("formerly", "")}
+                              for e in sel], indent=1))
+            return
+        for e in sel:
+            print(registry_line(e) if cat is None else catalog_key_line(e))
+        if not sel:
+            print(f"(no keys in {name})")
+        return
+    if act == "get":
+        ref = (args.ref or "").strip().strip("{}")
+        if "." not in ref:
+            sys.exit("error: catalog get takes <key>.<field>[.<field>…]")
+        value, why = catalog_ref_value(ref, entries)
+        if why:
+            sys.exit(f"error: {{{ref}}} does not resolve: {why}")
+        print(value)
+        return
+    name = (args.name or "").strip()
+    if act == "add":
+        cat = find_category(cats, args.category.strip())
+        if cat is None:
+            kind = builtin_kind(args.category.strip())
+            sys.exit(f"error: {args.category.strip()} is a built-in "
+                     f"category; add one with: {kind} add {name} …")
+        err = registry_name_error(name)
+        if err:
+            sys.exit(f"error: {err}")
+        held = registry_holder(entries, name)
+        if held is not None:
+            sys.exit(f"error: '{name}' is held by {entry_label(held)} "
+                     f"'{held['name']}'"
+                     + ("" if held["name"] == name else " as a former name")
+                     + "; catalog names are shared across categories")
+        e = {"kind": "key", "category": cat["name"], "name": name,
+             "formerly": "", "created": datetime.date.today().isoformat(),
+             "values": {f["name"]: "" for f in cat["fields"]},
+             "fields": [f["name"] for f in cat["fields"]], "body": "",
+             "path": os.path.join(bw, cdir(scope), cat["name"],
+                                  f"{name}.md")}
+    else:
+        e = registry_holder(entries, name)
+        if e is None:
+            sys.exit(f"error: no catalog key '{name}'. See: catalog list")
+        if e["name"] != name:
+            print(f"matched {entry_label(e)} '{e['name']}' (formerly "
+                  f"'{name}')", file=sys.stderr)
+        if act == "show":
+            show_file(e["path"], bw, scope, args.raw)
+            return
+        if e["kind"] != "key":
+            sys.exit(f"error: {e['name']} is a built-in {entry_label(e)}; "
+                     f"use: {e['kind']} {act} {e['name']} …")
+        cat = find_category(cats, e["category"])
+    if act == "rm":
+        err = catalog_rm_refusal(bw, scope, e, entries)
+        if err:
+            sys.exit(f"error: {err}")
+        os.remove(e["path"])
+        board_commit(root, branch, bw, scope, f"dev: catalog rm {e['name']}")
+        freed = [e["name"]] + split_names(e.get("formerly"))
+        print(f"{entry_label(e)} '{e['name']}' removed (frees "
+              f"{', '.join(freed)})")
+        return
+    if act == "rename":
+        new, old = (args.new_name or "").strip(), e["name"]
+        err = registry_name_error(new)
+        if err:
+            sys.exit(f"error: {err}")
+        if new == old:
+            sys.exit(f"error: key is already named '{old}'")
+        held = registry_holder(entries, new)
+        if held is not None and held is not e:
+            sys.exit(f"error: '{new}' is held by {entry_label(held)} "
+                     f"'{held['name']}'"
+                     + ("" if held["name"] == new else " as a former name"))
+        old_path = e["path"]
+        registry_rename(e, new)
+        e["path"] = os.path.join(os.path.dirname(old_path), f"{new}.md")
+        os.replace(old_path, e["path"])
+        write_catalog_key(e)
+        board_commit(root, branch, bw, scope,
+                     f"dev: catalog rename {old} → {new}")
+        print(f"key {old} → {new} (formerly: {e['formerly']}; former names "
+              "stay reserved and references to them still resolve)")
+        return
+    warnings = [w for w in (catalog_set(e, cat, s) for s in args.set or [])
+                if w]
+    if act == "update" and not args.set:
+        sys.exit("error: nothing to update (--set <field>=<value>)")
+    os.makedirs(os.path.dirname(e["path"]), exist_ok=True)
+    write_catalog_key(e)
+    fields = ", ".join(s.partition("=")[0].strip() for s in args.set or [])
+    board_commit(root, branch, bw, scope,
+                 f"dev: catalog {act} {e['name']}"
+                 + (f" ({fields})" if act == "update" else ""))
+    print(f"{entry_label(e)} '{e['name']}' "
+          f"{'added' if act == 'add' else 'updated'}: {catalog_key_line(e)}")
+    for w in warnings:
+        print(f"warning: {w}", file=sys.stderr)
 
 
 # ---------- flow sequences ----------
@@ -2766,6 +3437,9 @@ def placeholder_warnings(inputs, body):
             continue
         names.append(name)
     used = PLACEHOLDER_RE.findall(body or "")
+    # {input.field}: the input holds a catalog key.
+    used += [h for h in (r.split(".", 1)[0] for r in catalog_refs(body))
+             if h in names]
     for name in names:
         if name not in used:
             out.append(f"input '{name}' is declared but never referenced as "
@@ -3723,12 +4397,13 @@ def parallel_line(reasons, color=False):
     return f"parallel: {no} — {'; '.join(reasons)}"
 
 
-def watch_task_view(tid, tasks):
-    """Frontmatter + body for the live viewer, or None if missing."""
+def watch_task_view(tid, tasks, entries=()):
+    """Frontmatter + body for the live viewer, or None if missing, its
+    catalog references resolved against `entries`."""
     task = next((t for t in tasks if t["id"] == tid), None)
     if task is None:
         return None
-    return render_task(task).rstrip()
+    return resolve_catalog_text(render_task(task).rstrip(), entries)[0]
 
 
 def watch_search_view(query, tasks, expand=False, color=False):
@@ -3832,6 +4507,7 @@ def watch_registry_view(bw, scope, kind, name, tasks=()):
         return None
     with open(e["path"]) as fh:
         text = fh.read().rstrip()
+    text = resolve_catalog_text(text, catalog_entries(bw, scope))[0]
     page = f"# {REGISTRIES[kind]['label']} {e['name']}\n\n{text}"
     mine = routine_tasks(tasks, entries, e) if kind == "routine" else []
     if mine:
@@ -3873,6 +4549,8 @@ def watch_flow_view(bw, scope, fid):
             text = fh.read().rstrip()
     except OSError:
         text = render_flow(flow).rstrip()
+    text = resolve_catalog_text(text, catalog_entries(bw, scope),
+                                skip=flow_input_names(flow["inputs"]))[0]
     runs = flow_runs_text(bw, scope, flow, color=_use_color())
     return f"{text}\n\n{runs}", len(text.splitlines()) + 1
 
@@ -7258,6 +7936,9 @@ def cmd_ship(args):
         sys.exit(f"error: T{tid} needs --shipped \"<what actually shipped>\"; "
                  "one or two sentences on the result, not the plan "
                  "(re-ship: what changed since the last ship)")
+    live = live_ref_refusal("--shipped", shipped)
+    if live:
+        sys.exit(f"error: {live}")
     shipped_line = format_shipped(shipped)
     shipped_records = collect_shipped(meta.get("body") or "") + [shipped_line]
 
@@ -8280,6 +8961,9 @@ def cmd_add(args):
     if args.status == "shelved" and not (args.reason or "").strip():
         sys.exit('error: --status shelved requires --reason "<why>" '
                  "(recorded in the task body)")
+    live = live_ref_refusal("--reason", args.reason or "")
+    if live:
+        sys.exit(f"error: {live}")
     root, scope, branch, bw = ctx()
     tasks = all_tasks(bw, scope)
     tid = max((t["id"] for t in tasks), default=0) + 1
@@ -8409,6 +9093,9 @@ def cmd_update(args):
     if args.status in REASON_STATUSES and not (args.reason or "").strip():
         sys.exit(f"error: --status {args.status} requires --reason \"<why>\" "
                  "(recorded in the task body)")
+    live = live_ref_refusal("--reason", args.reason or "")
+    if live:
+        sys.exit(f"error: {live}")
     strand_err, cleared = off_board_guard(old, meta, args.status)
     if strand_err:
         sys.exit(strand_err)
@@ -8559,8 +9246,7 @@ def cmd_delete(args):
 def cmd_show(args):
     root, scope, branch, bw = ctx()
     meta = find_task(bw, scope, args.id)
-    with open(meta["path"]) as f:
-        print(f.read().rstrip())
+    show_file(meta["path"], bw, scope, args.raw)
 
 
 def cmd_list(args):
@@ -8653,6 +9339,9 @@ def cmd_verify(args):
     if not text:
         sys.exit(f"error: verify needs the record: how T{meta['id']}'s "
                  f"children met its goal")
+    live = live_ref_refusal("the verify record", text)
+    if live:
+        sys.exit(f"error: {live}")
     meta["body"] = append_body(meta["body"], format_verified(text))
     meta["status"] = "done"
     with open(meta["path"], "w", newline="\n") as f:
@@ -8688,6 +9377,9 @@ def cmd_ran(args):
     if not text:
         sys.exit(f"error: ran needs --record \"<inputs; deviations>\": what "
                  f"the run was given and where it departed from the flow")
+    live = live_ref_refusal("--record", text)
+    if live:
+        sys.exit(f"error: {live}")
     if is_rehearsal(meta) and not args.rehearsal:
         sys.exit(f"error: T{tid} is a rehearsal (rehearsal: true); record it "
                  f"as one so it never counts as a real run: "
@@ -8774,6 +9466,9 @@ def cmd_pause(args):
         sys.exit(f"error: pause needs --record \"<what exists so far>\": what "
                  f"the run produced, and where it lives, so the next session "
                  f"can pick it up")
+    live = live_ref_refusal("the pause record", at, text)
+    if live:
+        sys.exit(f"error: {live}")
     refs = resolve_flow_refs(bw, scope, args.flow) if args.flow else []
     if not refs and meta.get("flow"):
         refs = [f"{i} {n}" for i, n in parse_flow_refs(meta["flow"])]
@@ -8841,6 +9536,9 @@ def cmd_wait(args):
     if not text:
         sys.exit(f"error: wait needs --record \"<what was sent, and where>\": "
                  f"what they have, so the resume can pick up their reply")
+    live = live_ref_refusal("the wait record", who, at, text)
+    if live:
+        sys.exit(f"error: {live}")
     refs = resolve_flow_refs(bw, scope, args.flow) if args.flow else []
     if not refs and meta.get("flow"):
         refs = [f"{i} {n}" for i, n in parse_flow_refs(meta["flow"])]
@@ -8887,6 +9585,9 @@ def cmd_note(args):
     text = " ".join((args.text or "").split())
     if not text:
         sys.exit("error: note needs its text: what the flow did not predict")
+    live = live_ref_refusal("the note", args.at or "", text)
+    if live:
+        sys.exit(f"error: {live}")
     refs = [f"{i} {n}" for i, n in parse_flow_refs(meta.get("flow") or "")]
     record = format_note(text, refs, args.at,
                          iso_date(args.date, "date").isoformat()
@@ -8896,6 +9597,39 @@ def cmd_note(args):
         f.write(render_task(meta))
     board_commit(root, branch, bw, scope, f"dev: T{tid} note")
     print(f"T{tid} noted")
+    print(f"  {record}")
+
+
+def inputs_refusal(meta, text):
+    """Why `Inputs: <text>` cannot be recorded on task `meta`, or None.
+    Inputs are recorded before a run starts or while it is under way, so a
+    closed or unapproved task takes none. Pure."""
+    if meta["status"] in TERMINAL + ("proposed",):
+        return (f"T{meta['id']} is {meta['status']}; inputs are recorded "
+                f"for a run about to start or under way")
+    if not text:
+        return ("inputs needs the values: \"<input>=<value>; …\", under the "
+                "flow's input names")
+    return live_ref_refusal("the inputs line", text)
+
+
+def cmd_inputs(args):
+    """Record the values a run was given as `Inputs: …`, its own write path
+    so the live-reference guard covers it (--append stays live). No date and
+    no flow tag: the line shape trim_run_records and resumes already read.
+    """
+    root, scope, branch, bw = ctx()
+    meta = find_task(bw, scope, args.id)
+    text = " ".join((args.text or "").split())
+    refusal = inputs_refusal(meta, text)
+    if refusal:
+        sys.exit(f"error: {refusal}")
+    record = f"Inputs: {text}"
+    meta["body"] = append_body(meta["body"], record)
+    with open(meta["path"], "w", newline="\n") as f:
+        f.write(render_task(meta))
+    board_commit(root, branch, bw, scope, f"dev: T{meta['id']} inputs")
+    print(f"T{meta['id']} inputs recorded")
     print(f"  {record}")
 
 
@@ -9772,7 +10506,8 @@ def cmd_board(args):
                         color=_use_color())
                     result = ""
                 elif last_kind == "show" and last_tid is not None:
-                    view = watch_task_view(last_tid, tasks)
+                    view = watch_task_view(last_tid, tasks,
+                                           catalog_entries(bw, scope))
                     if view is None:
                         result = watch_missing_tid(
                             last_tid, color=_use_color())
@@ -10015,7 +10750,8 @@ def cmd_board(args):
                                 tid, tasks, color=color)
                             display = board
                             continue
-                        view = watch_task_view(tid, tasks)
+                        view = watch_task_view(
+                            tid, tasks, catalog_entries(bw, scope))
                         if view is None:
                             last_tid = None
                             last_kind = "search" if last_query else None
@@ -10756,8 +11492,10 @@ def main():
     m = fsub.add_parser("list", help="active flows: name — description")
     m.add_argument("--all", action="store_true", help="include retired")
     m.add_argument("--json", action="store_true")
-    m = fsub.add_parser("show", help="print one flow file")
+    m = fsub.add_parser("show", help="print one flow file, catalog "
+                                     "references resolved")
     m.add_argument("name", help="flow name (closest match is accepted)")
+    m.add_argument("--raw", action="store_true", help=RAW_HELP)
     m = fsub.add_parser("runs", help="every recorded run of one flow, "
                                      "newest first")
     m.add_argument("name", help="flow name (closest match is accepted)")
@@ -10806,6 +11544,8 @@ def main():
         for act in ("show", "rm"):
             m = rsub.add_parser(act, help=f"{act} one {label}")
             m.add_argument("name", help="its name or a former one")
+            if act == "show":
+                m.add_argument("--raw", action="store_true", help=RAW_HELP)
         m = rsub.add_parser("rename", help=f"rename one {label}; the old "
                                            "name stays reserved")
         m.add_argument("name", help="its name or a former one")
@@ -10853,6 +11593,56 @@ def main():
                                              "tasks in due order")
             m.add_argument("name", help="its name or a former one")
         s.set_defaults(fn=cmd_registry, registry=kind)
+
+    s = sub.add_parser("catalog", help="the catalog (.catalog/): user "
+                                       "categories and their keys, and "
+                                       "{key.field} references")
+    csub = s.add_subparsers(dest="action", required=True)
+    m = csub.add_parser("list", help="every category, or one category's "
+                                     "keys")
+    m.add_argument("category", nargs="?")
+    m.add_argument("--json", action="store_true")
+    m = csub.add_parser("show", help="print one key's file, references "
+                                     "resolved")
+    m.add_argument("name", help="its name or a former one")
+    m.add_argument("--raw", action="store_true", help=RAW_HELP)
+    m = csub.add_parser("get", help="print the value a reference resolves "
+                                    "to: <key>.<field>[.<field>…]")
+    m.add_argument("ref")
+    m = csub.add_parser("add", help="add a key to a user category")
+    m.add_argument("category")
+    m.add_argument("name", help="slug, unique across the whole catalog")
+    m.add_argument("--set", action="append", help=SET_HELP)
+    m = csub.add_parser("update", help="set a key's values")
+    m.add_argument("name", help="its name or a former one")
+    m.add_argument("--set", action="append", help=SET_HELP)
+    m = csub.add_parser("rename", help="rename a key; the old name stays "
+                                       "reserved and keeps resolving")
+    m.add_argument("name", help="its name or a former one")
+    m.add_argument("new_name")
+    m = csub.add_parser("rm", help="remove a key (refused while live tasks, "
+                                   "flows or keys reference it)")
+    m.add_argument("name", help="its name or a former one")
+    m = csub.add_parser("category", help="declare a user category and its "
+                                         "fields")
+    ccsub = m.add_subparsers(dest="category_action", required=True)
+    for act in ("add", "update", "show", "rm", "rename"):
+        m = ccsub.add_parser(act, help=f"{act} one category")
+        m.add_argument("name")
+        if act == "rename":
+            m.add_argument("new_name")
+        if act in ("add", "update"):
+            m.add_argument("--field", action="append",
+                           help="\"<field>: <one line: what it holds>\", "
+                                "optionally ending \"(one of: a, b)\" "
+                                "(repeatable; an existing field's "
+                                "description is replaced)")
+        if act == "update":
+            m.add_argument("--drop-field", dest="drop_field",
+                           action="append",
+                           help="remove a field no key holds a value for "
+                                "(repeatable)")
+    s.set_defaults(fn=cmd_catalog)
 
     s = sub.add_parser("add", help="add a task")
     s.add_argument("--title", required=True)
@@ -10937,8 +11727,10 @@ def main():
     s.add_argument("id", type=int)
     s.set_defaults(fn=cmd_delete)
 
-    s = sub.add_parser("show", help="print one task file")
+    s = sub.add_parser("show", help="print one task file, catalog "
+                                    "references resolved")
     s.add_argument("id", type=int)
+    s.add_argument("--raw", action="store_true", help=RAW_HELP)
     s.set_defaults(fn=cmd_show)
 
     s = sub.add_parser("list", help="one-line-per-task, filterable")
@@ -11033,6 +11825,14 @@ def main():
                                 "text); omit outside a run")
     s.add_argument("--date", help="YYYY-MM-DD it happened (default today)")
     s.set_defaults(fn=cmd_note)
+
+    s = sub.add_parser("inputs",
+                       help="record the values a run was given, as "
+                            "Inputs: … (values, never live {key.field})")
+    s.add_argument("id", type=int)
+    s.add_argument("text", help="\"<input>=<value>; …\" under the flow's "
+                                "input names")
+    s.set_defaults(fn=cmd_inputs)
 
     s = sub.add_parser("verify",
                        help="close an umbrella: record how its children met "

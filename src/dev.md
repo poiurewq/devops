@@ -1,6 +1,6 @@
 ---
 name: dev
-description: Multi-contributor task board and dev workflow for a repo, or per-subdir boards in a monorepo. Use for /dev and subcommands (init, tour, add, plan, board, kanban, status, pick, implement, review, decide, audit, next, wake, schedule, absorb, flow list/show/create/edit/review/retire, agent, env, routine, change, delete, show, config, area, meta, iteration, distill, update), and whenever the user asks to add/see/assign/implement/review tasks on the repo's task board, or asks "what should I work on".
+description: Multi-contributor task board and dev workflow for a repo, or per-subdir boards in a monorepo. Use for /dev and subcommands (init, tour, add, plan, board, kanban, status, pick, implement, review, decide, audit, next, wake, schedule, absorb, flow list/show/create/edit/review/retire, agent, env, catalog, routine, change, delete, show, config, area, meta, iteration, distill, update), and whenever the user asks to add/see/assign/implement/review tasks on the repo's task board, or asks "what should I work on".
 ---
 
 # dev — coordinated development for humans and agents
@@ -72,6 +72,8 @@ TASKS pr <id> view [--json] | diff | close [--head <branch>]
 
 <!-- core: state-layout -->
 
+<!-- core: catalog-refs -->
+
 ## Routing
 
 | Invocation | Action |
@@ -92,7 +94,7 @@ TASKS pr <id> view [--json] | diff | close [--head <branch>]
 | `/dev <id[, id…]> unattended` / `/dev next unattended` | Read `shared/routes/unattended.md`, then `routes/unattended-run.md` (nobody there: not the lead — implement with forks filed as `needs: decision`, ship to `draft`, stop; no reviewer pass). Only on the trailing word — never assumed. |
 | `/dev wake <routine> <dir>` | Read `shared/routes/wake.md` (a routine's run: the skill check, the gate, then its due tasks — attended or unattended by the routine's mode — and, on a one-time trigger, re-pointing it). The whole prompt a trigger at its source carries. |
 | `/dev schedule <id> [<routine>]` | Read `shared/routes/schedule.md` (set up a routine so a recurring task starts on its own: pick or create the routine and its runner environment, the trigger proposed from this harness and created at its source on `go`, the task pointed at it, a watched first run; also moves a task between routines). Also where the offer after add, audit and status leads. |
-| `/dev absorb <source>` | Read `shared/routes/absorb.md` (import a list of things to do, each filed as the type its work is; a written procedure goes to `/dev flow adopt` instead). |
+| `/dev absorb <source>` | Read `shared/routes/absorb.md` (import a list of things to do, each filed as the type its work is; a written procedure goes to `/dev flow adopt` instead, and a table of facts about named things to `/dev catalog <source>`). |
 | `/dev iteration ...` | Read `shared/routes/iteration.md` (show / close / new). |
 | `/dev distill` | Read `shared/routes/distill.md` (a sitting: turn this iteration's task records into `AGENTS.md` context and heuristics, each item the user's call; required before an iteration closes). |
 | `/dev board` / `kanban` | `TASKS board` (status index + in-play list); `TASKS board --by-area` for the area cut; then the PR state refresh (`shared/routes/status.md`). |
