@@ -6566,6 +6566,22 @@ def cmd_land(args):
     if not has_remote(root):
         sys.exit("error: no origin remote; cannot land")
 
+    # The merge commit carries the PR title in its body (its subject is
+    # "Merge pull request #N from …"), so bring the title up to the task's
+    # current one first (a retitle after the last ship). Title only; a
+    # failed edit only costs the mirror, so it warns.
+    prefix = title_prefix(iteration_index(read_board_cfg(bw, scope)), tid,
+                          scope)
+    want_title = ship_pr_title(meta, prefix)
+    if want_title != (info.get("title") or ""):
+        r = pr_cmd("edit", pr, "--title", want_title, cwd=root)
+        if r.returncode != 0:
+            err = (r.stderr or r.stdout or "").strip()
+            print(f"  warning: could not update the PR title: {err}",
+                  file=sys.stderr)
+        else:
+            print(f"  updated PR title: {want_title}")
+
     git("fetch", "origin", integration, cwd=root, check=False)
     git("fetch", "origin", branch, cwd=root, check=False)
     # Land never pushes the task branch: it merges what was reviewed.
@@ -7422,6 +7438,32 @@ def ensure_shipped_in_text(text, records):
     return (text + "\n\n" + block if text else block) + "\n"
 
 
+def ship_pr_title(meta, prefix, title=None):
+    """PR title a ship writes: `title`, else the task title, prefixed."""
+    text = (title or "").strip() or f"{prefix} {meta['title']}"
+    return with_title_prefix(text, prefix, meta["id"])
+
+
+def ship_pr_body(meta, shipped_records, body=None, version_intent=None,
+                 batch_ids=(), pr_body=None):
+    """PR body a ship writes: `body`, else the task body, then the machine
+    lines and the shipped block. On a re-ship `pr_body` is the live PR body,
+    whose Dev-batch and Version intent lines carry over unless a flag (or a
+    line in `body`) sets them — the opening is rebuilt from the task."""
+    text = (body or "").strip() or (meta.get("body") or "").strip() \
+        or meta["title"]
+    if pr_body is not None:
+        if version_intent is None and parse_version_intent(text) is None:
+            version_intent = parse_version_intent(pr_body)
+        if not batch_ids and not parse_dev_batch(text):
+            batch_ids = parse_dev_batch(pr_body)
+    if version_intent is not None:
+        text = set_version_intent_in_text(text, version_intent)
+    if batch_ids:
+        text = ensure_dev_batch_in_text(text, batch_ids)
+    return ensure_shipped_in_text(text, shipped_records)
+
+
 def pr_is_open(info):
     if not info:
         return False
@@ -7963,7 +8005,6 @@ def cmd_ship(args):
     batch_ids = parse_id_list(getattr(args, "batch", None) or "")
     if batch_ids and tid not in batch_ids:
         batch_ids = sorted(set(batch_ids) | {tid})
-    batch_line = format_dev_batch(batch_ids) if batch_ids else ""
 
     pr_url = (meta.get("pr") or "").strip()
     if pr_url:
@@ -7972,8 +8013,8 @@ def cmd_ship(args):
             sys.exit(f"error: T{tid} PR already merged: {pr_url}")
         if not (info and (info.get("state") or "").upper() == "OPEN"):
             # Closed/unknown recorded URL — look for a live open PR.
-            # Open PR is reused as-is; --title/--body/--base apply only
-            # when creating below (--version-intent also corrects a re-ship).
+            # An open PR is reused (its title and body refreshed below);
+            # --base applies only when creating.
             pr_url = find_open_pr_for_branch(root, branch, pr_base)
     else:
         pr_url = find_open_pr_for_branch(root, branch, pr_base)
@@ -7998,16 +8039,9 @@ def cmd_ship(args):
     push_task_branch(root, branch, force=False)
 
     if not pr_url:
-        title = (args.title or "").strip() or f"{prefix} {meta['title']}"
-        title = with_title_prefix(title, prefix, tid)
-        body = (args.body or "").strip()
-        if not body:
-            body = (meta.get("body") or "").strip() or meta["title"]
-        if args.version_intent is not None:
-            body = set_version_intent_in_text(body, args.version_intent)
-        if batch_line:
-            body = ensure_dev_batch_in_text(body, batch_ids)
-        body = ensure_shipped_in_text(body, shipped_records)
+        title = ship_pr_title(meta, prefix, args.title)
+        body = ship_pr_body(meta, shipped_records, args.body,
+                            args.version_intent, batch_ids)
         create = ["create", "--base", pr_base, "--head", branch,
                   "--title", title, "--body", body]
         argv = create + ["--draft"] if target == "draft" else create
@@ -8031,35 +8065,40 @@ def cmd_ship(args):
             print(f"  opened PR: {pr_url}")
     else:
         print(f"  PR: {pr_url}")
-        # Re-ship: refresh the shipped records on the open PR (and the
-        # Dev-batch stamp when --batch given). The task body is the source of
-        # truth; a failed edit only costs the mirror, so it warns.
+        # Re-ship: rebuild the PR title and body as create does, so a task
+        # retitled or reshaped since the last ship is described as it now
+        # is. The PR's Dev-batch and Version intent lines carry over unless
+        # a flag sets them (land reads the intent line). The task is the
+        # source of truth — hand edits to the PR are overwritten — and a
+        # failed edit only costs the mirror, so it warns.
         info = pr_view(root, pr_url, soft=True)
         if info is None:
-            # Unread body: treating it as "" would make the edit below
-            # overwrite the live PR body with these blocks alone. The
-            # record lands on the task either way, so leave the mirror.
+            # Unread body: carrying nothing over would drop the PR's
+            # machine lines. The record lands on the task either way, so
+            # leave the mirror.
             print(f"  warning: could not read the PR body; leaving the PR "
                   f"as it is (the task body keeps the record)",
                   file=sys.stderr)
         else:
             body = info.get("body") or ""
-            new_body = body
-            if batch_ids and parse_dev_batch(new_body) != batch_ids:
-                new_body = ensure_dev_batch_in_text(new_body, batch_ids)
-            # An intent can change after the first ship (a batch member turns
-            # breaking); land reads this line, so the flag must correct it.
-            if args.version_intent is not None:
-                new_body = set_version_intent_in_text(new_body,
-                                                      args.version_intent)
-            new_body = ensure_shipped_in_text(new_body, shipped_records)
+            new_title = ship_pr_title(meta, prefix, args.title)
+            new_body = ship_pr_body(meta, shipped_records, args.body,
+                                    args.version_intent, batch_ids,
+                                    pr_body=body)
+            edit = []
+            if new_title != (info.get("title") or ""):
+                edit += ["--title", new_title]
             if new_body.strip() != body.strip():
-                r = pr_cmd("edit", pr_url, "--body", new_body, cwd=root)
+                edit += ["--body", new_body]
+            if edit:
+                r = pr_cmd("edit", pr_url, *edit, cwd=root)
                 if r.returncode != 0:
                     err = (r.stderr or r.stdout or "").strip()
-                    print(f"  warning: could not update PR body: {err}",
+                    print(f"  warning: could not update the PR: {err}",
                           file=sys.stderr)
                 else:
+                    if "--title" in edit:
+                        print(f"  updated PR title: {new_title}")
                     print(f"  updated PR body: {shipped_line}")
 
     integration, bw = resolve_board(root, scope)
@@ -11942,11 +11981,12 @@ def main():
                         "(default: [n/T<id>] <title>; scoped board: "
                         "[<scope> n/T<id>] <title>)")
     s.add_argument("--title",
-                   help="PR title on create only "
+                   help="PR title, rewritten on every ship "
                         "(default: [n/T<id>] <task title>; scoped "
                         "board: [<scope> n/T<id>] <task title>)")
     s.add_argument("--body",
-                   help="PR body on create only (default: task body)")
+                   help="PR body opening, rewritten on every ship "
+                        "(default: task body)")
     s.add_argument("--version-intent",
                    help="set the PR body's 'Version intent: …' line, on create "
                         "or re-ship (replaces a stale one; 'none' removes it). "
