@@ -717,10 +717,16 @@ def sync_board(root, scope, branch, owner=None):
     to; default `branch`) and are replayed and flushed only when syncing
     that branch. Syncing any other branch while they wait leaves the
     worktree alone, so a pointer hop never carries one board's commits
-    onto another; resolve_board decides what to do with them."""
+    onto another; resolve_board decides what to do with them.
+
+    A failed fetch leaves the board on the local copy; BOARD_SYNC_FAILURE
+    says so, for the viewer and `board` to show."""
+    global BOARD_SYNC_FAILURE
     bw = ensure_worktree(root, scope, branch)
-    git("fetch", "origin", branch, cwd=bw, check=False,
-        timeout=GIT_NETWORK_TIMEOUT_S)
+    r = git("fetch", "origin", branch, cwd=bw, check=False,
+            timeout=GIT_NETWORK_TIMEOUT_S)
+    if r.returncode != 0 and has_remote(root):
+        BOARD_SYNC_FAILURE = sync_failure_line(branch, r)
     upstream = f"origin/{branch}" if ref_exists(root, f"origin/{branch}") else branch
     if not ref_exists(root, upstream):
         sys.exit(f"error: integration branch '{branch}' not found locally or on origin")
@@ -735,6 +741,23 @@ def sync_board(root, scope, branch, owner=None):
                      f"resolve manually in {board_worktree_rel(scope)}")
         flush_queued_board_commits(root, scope, branch, bw)
     return bw
+
+
+# Set by sync_board when its fetch fails: the board just read is the local
+# copy. resolve_board clears it, so it describes the latest sync only.
+BOARD_SYNC_FAILURE = ""
+BOARD_SYNCING = "syncing board with origin…"
+
+
+def sync_failure_line(branch, r):
+    """One line saying the board shown is the local copy, and why."""
+    if r.returncode == GIT_TIMEOUT_RC:
+        why = f"git fetch origin {branch} timed out after {GIT_NETWORK_TIMEOUT_S}s"
+    else:
+        first = next((ln.strip() for ln in git_err(r).splitlines()
+                      if ln.strip()), "")
+        why = f"git fetch origin {branch} failed: {first}"
+    return f"warning: showing the local board copy, not synced ({why})"
 
 
 def git_err(r):
@@ -776,6 +799,8 @@ def resolve_board(root, scope):
     sync_board leaves untouched while another branch's commits are queued.
     Queued commits that cannot reach their own branch before the board
     moves on are refused rather than replayed onto the next one."""
+    global BOARD_SYNC_FAILURE
+    BOARD_SYNC_FAILURE = ""
     branch = integration_branch(root, scope)
     owner = read_cache(root, scope).get(scope) or branch
     bw = sync_board(root, scope, branch, owner)
@@ -10317,14 +10342,20 @@ def _watch_help_counts(help_line, more_above, more_below):
 def _watch_footer_lines(by_area, expand, buf, result,
                         more_above=0, more_below=0, check=False,
                         history=False, flows=False, search=False,
-                        latest=False, back=False, registries=False):
+                        latest=False, back=False, registries=False,
+                        notice=""):
+    """`notice`: a sync line (syncing, or the local-copy warning), shown
+    above the help line."""
     help_line = _watch_help(by_area, expand, more_above, more_below,
                            check=check, history=history, flows=flows,
                            search=search, latest=latest, back=back,
                            registries=registries)
     if _use_color():
         help_line = _ansi(_DIM, help_line)
-    lines = ["", help_line]
+    lines = [""]
+    if notice:
+        lines.append(_ansi(_NEEDS, notice) if _use_color() else notice)
+    lines.append(help_line)
     if check or search or history or buf:
         if registries:
             lines.append(f"g> {buf}")
@@ -10385,7 +10416,7 @@ def _watch_page_offsets(body, offset, body_rows, cols):
 
 def _paint_watch(out, by_area, expand, buf, result, offset, check=False,
                  history=False, flows=False, search=False, latest=False,
-                 back=False, registries=False):
+                 back=False, registries=False, notice=""):
     """Paint a terminal-height viewport.
 
     Returns (clamped offset, page-up offset, page-down offset).
@@ -10397,7 +10428,7 @@ def _paint_watch(out, by_area, expand, buf, result, offset, check=False,
         _watch_footer_lines(by_area, expand, buf, result,
                             check=check, history=history, flows=flows,
                             search=search, latest=latest, back=back,
-                            registries=registries), cols)
+                            registries=registries, notice=notice), cols)
     body_rows = max(1, rows - footer_rows)
     shown, offset, more_below = _window_lines(body, offset, body_rows, cols)
     more_above = offset
@@ -10408,7 +10439,7 @@ def _paint_watch(out, by_area, expand, buf, result, offset, check=False,
                                 more_above, more_below, check=check,
                                 history=history, flows=flows, search=search,
                                 latest=latest, back=back,
-                                registries=registries),
+                                registries=registries, notice=notice),
             cols)
         body_rows = max(1, rows - footer_rows)
         shown, offset, more_below = _window_lines(
@@ -10418,7 +10449,7 @@ def _paint_watch(out, by_area, expand, buf, result, offset, check=False,
                                  more_above, more_below, check=check,
                                  history=history, flows=flows, search=search,
                                  latest=latest, back=back,
-                                 registries=registries)
+                                 registries=registries, notice=notice)
     _clear_screen()
     # No trailing newline: print() on the last row scrolls the first line off.
     frame = shown + footer
@@ -10463,13 +10494,16 @@ WATCH_WINDOWS_HINT = ("the live viewer does not run on Windows yet; "
 def cmd_board(args):
     if WINDOWS and getattr(args, "watch", False):
         sys.exit(f"error: board --watch: {WATCH_WINDOWS_HINT}")
+    watch = bool(getattr(args, "watch", False))
+    if watch and sys.stdin.isatty():
+        # The first sync runs before the first paint: say what the wait is.
+        print(BOARD_SYNCING, flush=True)
     resolved = ctx()
     root, scope, _branch, bw = resolved
     if getattr(args, "refresh_viewer", False):
         cmd_board_refresh_viewer(root, scope)
         return
     _, wrote = ensure_board_viewer(root, scope)
-    watch = bool(getattr(args, "watch", False))
     if wrote and not (watch and sys.stdin.isatty()):
         print(f"viewer: refreshed ./{VIEWER_NAME}")
     if watch and sys.stdin.isatty():
@@ -10498,13 +10532,20 @@ def cmd_board(args):
         last_reg = None      # ...and the (kind, name) being shown
         latest_mode = False  # l: flat latest-first list replaces the board
         offset = 0
+        display = None
+        frame = {}  # the last frame's mode flags, for the syncing repaint
         try:
             while True:
                 by_area = bool(getattr(args, "by_area", False))
                 expand = bool(getattr(args, "expand", False))
+                if display is not None:
+                    # A refresh re-syncs: keep the last frame up, saying so.
+                    _paint_watch(display, by_area, expand, buf, result,
+                                 offset, notice=BOARD_SYNCING, **frame)
                 board, tasks = _watch_board(args, latest_mode, bw, scope,
                                             resolved)
                 resolved = None  # every later refresh re-syncs
+                notice = BOARD_SYNC_FAILURE
                 display = board
                 if regs_mode:
                     display, reg_rows = registries_pane(
@@ -10560,8 +10601,7 @@ def cmd_board(args):
                         display = view
                         result = ""
                 while True:
-                    offset, page_up, page_down = _paint_watch(
-                        display, by_area, expand, buf, result, offset,
+                    frame = dict(
                         check=check_mode, flows=flows_mode,
                         search=search_mode, latest=latest_mode,
                         history=history_mode,
@@ -10571,6 +10611,9 @@ def cmd_board(args):
                                   or check_mode
                                   or buf or result
                                   or last_kind is not None))
+                    offset, page_up, page_down = _paint_watch(
+                        display, by_area, expand, buf, result, offset,
+                        notice=notice, **frame)
                     key = _read_key(cooked=old_term is None)
                     pane = flows_mode or regs_mode
                     if key == "\x04":  # Ctrl-D / EOF, even mid-query
@@ -10831,6 +10874,8 @@ def cmd_board(args):
                 termios.tcsetattr(fd, termios.TCSADRAIN, old_term)
         return
     print(_render_board(args, resolved)[1])
+    if BOARD_SYNC_FAILURE:
+        print(BOARD_SYNC_FAILURE, file=sys.stderr)
 
 
 # ---------- iterations ----------
