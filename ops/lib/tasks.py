@@ -10085,44 +10085,60 @@ def _board_text(cfg, scope, bw, tasks, expand=False, by_area=False, color=False,
     return "\n".join(lines)
 
 
-# The latest list is for recent activity: read only this many board commits
-# so the repaint cost stays flat as history grows.
-LATEST_COMMITS = 200
+def touch_times_from_log(lines, d, ids):
+    """{task id: unix time} from `git log --format=%x01%ct --name-only` lines.
 
-
-def task_touch_times(bw, scope):
-    """{task id: unix time of the last board commit touching its file}.
-
-    One `git log` over the board dir, newest first, so the first sighting of
-    a file is its latest touch. Only `NNN.md` at the board root counts —
-    archived tasks of earlier iterations are not on the live board. Capped
-    at LATEST_COMMITS: a task untouched in that window has no entry.
+    Newest first, so the first sighting of a file is its latest touch. Only
+    `NNN.md` directly in `d` counts — archived tasks of earlier iterations
+    are not on the live board. Stops reading once every id in `ids` is seen:
+    every live task file is written in the current iteration (add or the
+    iteration-new reseed), so the walk ends inside it.
     """
-    d = tdir(scope)
-    r = git("log", f"-n{LATEST_COMMITS}", "--format=%x01%ct", "--name-only",
-            "--", d, cwd=bw, check=False)
+    want = set(ids)
     times, ts = {}, None
-    for line in (r.stdout or "").splitlines() if r.returncode == 0 else []:
+    if not want:
+        return times
+    for line in lines:
+        line = line.rstrip("\n")
         if line.startswith("\x01"):
             ts = int(line[1:])
             continue
         m = re.fullmatch(r"(\d{3})\.md", os.path.basename(line))
         if (m and ts is not None
                 and os.path.normpath(os.path.dirname(line)) == d):
-            times.setdefault(int(m.group(1)), ts)
+            tid = int(m.group(1))
+            if tid not in times:
+                times[tid] = ts
+                want.discard(tid)
+                if not want:
+                    break
     return times
 
 
-def _board_latest_text(cfg, scope, bw, tasks, color=False):
-    """Every live task, done included, newest board commit first.
+def task_touch_times(bw, scope, ids):
+    """{task id: unix time of the last board commit touching its file}.
 
-    Tasks older than the LATEST_COMMITS window follow undated, by id.
+    Streams the board log and stops once every id in `ids` has a time, so
+    the cost tracks the current iteration, not the board's whole history.
     """
+    p = subprocess.Popen(
+        ["git", "log", "--format=%x01%ct", "--name-only", "--", tdir(scope)],
+        cwd=bw, text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    try:
+        return touch_times_from_log(p.stdout, tdir(scope), ids)
+    finally:
+        p.kill()
+        p.stdout.close()
+        p.wait()
+
+
+def _board_latest_text(cfg, scope, bw, tasks, color=False):
+    """Every live task, done included, newest board commit first."""
     title = f"# Board — iteration {iteration_label(cfg)}"
     if scope != ".":
         title += f" ({scope})"
     lines = [title + " · latest", ""]
-    times = task_touch_times(bw, scope)
+    times = task_touch_times(bw, scope, [t["id"] for t in tasks])
     for t in sorted(tasks, key=lambda t: (-times.get(t["id"], 0), -t["id"])):
         ts = times.get(t["id"])
         when = (datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
